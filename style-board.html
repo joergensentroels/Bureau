@@ -1,0 +1,181 @@
+<h2 class="sr-only">Four visual style directions for the Foreman agent-org app, each shown with a sample agent card and procedurally generated avatars.</h2>
+
+<style>
+  :root{
+    --bg:#f4f2ee; --panel:#fbfaf7; --ink:#1b1a16; --ink-2:#6a6459; --hair:#e4e0d7;
+    --accent:#b4552f; --chrome:"Segoe UI",system-ui,-apple-system,sans-serif;
+    --mono:ui-monospace,"Cascadia Mono",Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{--bg:#151410;--panel:#1e1c17;--ink:#efe9dd;--ink-2:#9a9385;--hair:#302d25;--accent:#e07a4f}
+  }
+  :root[data-theme="dark"]{--bg:#151410;--panel:#1e1c17;--ink:#efe9dd;--ink-2:#9a9385;--hair:#302d25;--accent:#e07a4f}
+  :root[data-theme="light"]{--bg:#f4f2ee;--panel:#fbfaf7;--ink:#1b1a16;--ink-2:#6a6459;--hair:#e4e0d7;--accent:#b4552f}
+
+  .fm{background:var(--bg);color:var(--ink);font-family:var(--chrome);padding:2.4rem clamp(1rem,4vw,2.6rem);border-radius:16px;line-height:1.55;}
+  .fm-head{max-width:60ch;margin-bottom:2rem;}
+  .fm-eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin:0 0 .5rem;}
+  .fm-title{font-size:clamp(26px,4vw,36px);font-weight:800;letter-spacing:-.02em;margin:0 0 .6rem;text-wrap:balance;}
+  .fm-sub{font-size:16px;color:var(--ink-2);margin:0;}
+  .fm-axis{display:flex;align-items:center;gap:12px;margin:1.4rem 0 0;font-family:var(--mono);font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-2);}
+  .fm-axis .bar{flex:1;height:2px;background:linear-gradient(90deg,var(--hair),var(--accent),var(--hair));border-radius:2px;}
+
+  .fm-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px;}
+  .lane{background:var(--panel);border:1px solid var(--hair);border-radius:16px;padding:20px;display:flex;flex-direction:column;gap:16px;}
+  .lane-h{display:flex;align-items:baseline;justify-content:space-between;gap:10px;}
+  .lane-name{font-size:18px;font-weight:700;margin:0;letter-spacing:-.01em;}
+  .lane-tag{font-family:var(--mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-2);white-space:nowrap;}
+  .lane-vibe{font-size:14px;color:var(--ink-2);margin:-6px 0 0;}
+  .strip{display:flex;gap:10px;align-items:center;}
+  .strip .cap{font-family:var(--mono);font-size:11px;color:var(--ink-2);margin-left:auto;}
+  .tech{font-family:var(--mono);font-size:11.5px;color:var(--ink-2);border-top:1px dashed var(--hair);padding-top:12px;margin-top:auto;line-height:1.5;}
+  .tech b{color:var(--ink);font-weight:600;}
+
+  /* ---- Lane A: Cozy Studio ---- */
+  .cardA{background:#fff7ef;border:1px solid #f0dcc9;border-radius:18px;padding:16px;display:flex;gap:14px;align-items:center;font-family:"Nunito",ui-rounded,var(--chrome);}
+  .cardA .nm{font-weight:800;font-size:17px;color:#4a2f21;}
+  .cardA .rl{font-size:13px;color:#9a7358;}
+  .cardA .pill{display:inline-block;margin-top:6px;background:#ffe3cf;color:#b4552f;font-size:12px;font-weight:700;padding:3px 10px;border-radius:20px;}
+
+  /* ---- Lane B: Bold Arcade ---- */
+  .cardB{background:#fff;border:3px solid #111;border-radius:6px;padding:15px;display:flex;gap:14px;align-items:center;box-shadow:6px 6px 0 #111;font-family:"Arial Black",var(--chrome);}
+  .cardB .nm{font-weight:900;font-size:17px;color:#111;text-transform:uppercase;letter-spacing:.02em;}
+  .cardB .rl{font-size:12px;font-weight:700;color:#3b3b3b;text-transform:uppercase;letter-spacing:.04em;}
+  .cardB .pill{display:inline-block;margin-top:7px;background:#ffd23e;border:2px solid #111;color:#111;font-size:11px;font-weight:900;padding:2px 8px;text-transform:uppercase;}
+
+  /* ---- Lane C: Pixel Tycoon ---- */
+  .cardC{background:#12131c;border:2px solid #3a3d5c;border-radius:4px;padding:15px;display:flex;gap:14px;align-items:center;font-family:var(--mono);box-shadow:inset 0 0 0 2px #0a0b12;}
+  .cardC .nm{font-weight:700;font-size:15px;color:#efe6c8;letter-spacing:.02em;}
+  .cardC .rl{font-size:12px;color:#7fd6a6;}
+  .cardC .pill{display:inline-block;margin-top:7px;background:#2a2d44;color:#f0b15a;font-size:11px;padding:3px 8px;border-radius:2px;letter-spacing:.03em;}
+
+  /* ---- Lane D: Ops Control ---- */
+  .cardD{background:#101318;border:1px solid #23303a;border-radius:12px;padding:16px;display:flex;gap:14px;align-items:center;font-family:var(--mono);}
+  .cardD .nm{font-weight:600;font-size:15px;color:#e4edf2;letter-spacing:.01em;}
+  .cardD .rl{font-size:12px;color:#5f7683;}
+  .cardD .st{display:inline-flex;align-items:center;gap:7px;margin-top:8px;font-size:11.5px;color:#59d9b3;letter-spacing:.04em;}
+  .cardD .dot{width:7px;height:7px;border-radius:50%;background:#59d9b3;box-shadow:0 0 0 3px rgba(89,217,179,.18);}
+
+  .av{display:block;border-radius:14px;flex:none;}
+  .avpx{image-rendering:pixelated;}
+  @media (prefers-reduced-motion:no-preference){.lane{animation:rise .5s both;}.lane:nth-child(2){animation-delay:.06s}.lane:nth-child(3){animation-delay:.12s}.lane:nth-child(4){animation-delay:.18s}@keyframes rise{from{opacity:0;transform:translateY(10px)}}}
+</style>
+
+<div class="fm">
+  <div class="fm-head">
+    <p class="fm-eyebrow">Foreman · visual directions</p>
+    <h1 class="fm-title">Pick a face for your company of agents</h1>
+    <p class="fm-sub">The same four teammates — Ada, Rex, Nia, Cole — rendered in four directions. Each avatar is generated from the agent's name, so every hire gets a consistent face automatically. Pick a lane, or mix (e.g. Ops chrome with Pixel avatars).</p>
+    <div class="fm-axis"><span>playful game</span><span class="bar"></span><span>serious tool</span></div>
+  </div>
+
+  <div class="fm-grid">
+    <section class="lane">
+      <div class="lane-h"><h2 class="lane-name">Cozy Studio</h2><span class="lane-tag">warm · friendly</span></div>
+      <p class="lane-vibe">Rounded, warm, human. A company you enjoy running — Notion-soft meets a life-sim.</p>
+      <div class="cardA">
+        <div id="A0"></div>
+        <div><div class="nm">Ada</div><div class="rl">Research Assistant</div><span class="pill">meticulous</span></div>
+      </div>
+      <div class="strip" data-lane="A"></div>
+      <p class="tech"><b>Avatars:</b> soft illustrated faces (skin, hair, expression from seed). Cheap as inline SVG or DiceBear <span>notionists</span>/<span>big-smile</span>.</p>
+    </section>
+
+    <section class="lane">
+      <div class="lane-h"><h2 class="lane-name">Bold Arcade</h2><span class="lane-tag">neo-brutalist</span></div>
+      <p class="lane-vibe">Thick borders, hard shadows, punchy flat color. Energetic and confident — the fun tips toward a game.</p>
+      <div class="cardB">
+        <div id="B0"></div>
+        <div><div class="nm">Ada</div><div class="rl">Research Assistant</div><span class="pill">meticulous</span></div>
+      </div>
+      <div class="strip" data-lane="B"></div>
+      <p class="tech"><b>Avatars:</b> bold geometric "bots" with hard black outlines. Inline SVG or DiceBear <span>bottts</span>/<span>shapes</span>.</p>
+    </section>
+
+    <section class="lane">
+      <div class="lane-h"><h2 class="lane-name">Pixel Tycoon</h2><span class="lane-tag">retro · 8-bit</span></div>
+      <p class="lane-vibe">Pixel sprites and a CRT palette. Straight-up business-tycoon nostalgia (Two Point / Theme Hospital).</p>
+      <div class="cardC">
+        <div id="C0"></div>
+        <div><div class="nm">Ada</div><div class="rl">Research Assistant</div><span class="pill">meticulous</span></div>
+      </div>
+      <div class="strip" data-lane="C"></div>
+      <p class="tech"><b>Avatars:</b> symmetric pixel sprites drawn from a seed grid. Inline SVG rects or DiceBear <span>pixel-art</span>.</p>
+    </section>
+
+    <section class="lane">
+      <div class="lane-h"><h2 class="lane-name">Ops Control</h2><span class="lane-tag">sleek · dark</span></div>
+      <p class="lane-vibe">Dark control-room. Monospace, quiet accents, status at a glance. Reads as a serious professional tool.</p>
+      <div class="cardD">
+        <div id="D0"></div>
+        <div><div class="nm">Ada</div><div class="rl">Research Assistant</div><span class="st"><span class="dot"></span>working · meticulous</span></div>
+      </div>
+      <div class="strip" data-lane="D"></div>
+      <p class="tech"><b>Avatars:</b> geometric identicons, single accent on dark. Inline SVG or DiceBear <span>identicon</span>/<span>glass</span>.</p>
+    </section>
+  </div>
+</div>
+
+<script>
+  const ROSTER=["ada","rex","nia","cole"];
+  function hseed(s){let h=2166136261>>>0;for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619);}return h>>>0;}
+  function mul(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+  function rng(s){return mul(hseed(s));}
+  function pk(r,a){return a[Math.floor(r()*a.length)];}
+  function svg(inner,extra){return '<svg class="av '+(extra||'')+'" width="{W}" height="{W}" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">'+inner+'</svg>';}
+
+  function cozy(seed){const r=rng('cozy'+seed);
+    const bg=pk(r,['#f6c9b8','#f7d9a6','#c3ddb4','#d3c6ee','#f7b7c6']);
+    const skin=pk(r,['#f2cba7','#e3a87c','#c98a5e','#96603c']);
+    const hair=pk(r,['#3a2e27','#6b4a2e','#2b2b33','#c0603a','#9a9aa4']);
+    const smile=r()>.35;
+    return svg('<rect width="100" height="100" rx="16" fill="'+bg+'"/>'
+      +'<rect x="22" y="16" width="56" height="34" rx="20" fill="'+hair+'"/>'
+      +'<rect x="24" y="30" width="52" height="54" rx="24" fill="'+skin+'"/>'
+      +'<circle cx="40" cy="52" r="4" fill="#2b241f"/><circle cx="60" cy="52" r="4" fill="#2b241f"/>'
+      +(smile?'<path d="M40 64 Q50 73 60 64" stroke="#2b241f" stroke-width="4" fill="none" stroke-linecap="round"/>'
+             :'<line x1="43" y1="66" x2="57" y2="66" stroke="#2b241f" stroke-width="4" stroke-linecap="round"/>')
+      +'<circle cx="34" cy="60" r="3.5" fill="#f19a8f" opacity=".5"/><circle cx="66" cy="60" r="3.5" fill="#f19a8f" opacity=".5"/>');}
+
+  function arcade(seed){const r=rng('arc'+seed);
+    const bg=pk(r,['#4d8df0','#ff5da2','#ffd23e','#3ddc84','#ff8c42']);
+    const body=pk(r,['#fff','#111']);const eye=body==='#111'?'#fff':'#111';
+    const acc=pk(r,['#ff5da2','#4d8df0','#3ddc84','#ffd23e']);
+    return svg('<rect x="7" y="7" width="88" height="88" rx="6" fill="#111"/>'
+      +'<rect x="2" y="2" width="88" height="88" rx="6" fill="'+bg+'" stroke="#111" stroke-width="4"/>'
+      +'<line x1="46" y1="30" x2="46" y2="18" stroke="#111" stroke-width="4"/><circle cx="46" cy="15" r="5" fill="'+acc+'" stroke="#111" stroke-width="3"/>'
+      +'<rect x="24" y="30" width="44" height="42" rx="7" fill="'+body+'" stroke="#111" stroke-width="4"/>'
+      +'<rect x="32" y="42" width="9" height="11" fill="'+eye+'"/><rect x="51" y="42" width="9" height="11" fill="'+eye+'"/>'
+      +'<rect x="33" y="61" width="26" height="5" fill="'+eye+'"/>','');}
+
+  function pixel(seed){const r=rng('px'+seed);
+    const skin=pk(r,[['#f2cba7','#d99a6c'],['#e3a87c','#b87a4e'],['#c98a5e','#9a6238']]);
+    const hair=pk(r,['#3a2e27','#c0603a','#2b3a55','#5a5a66','#6b4a2e']);
+    const bg=pk(r,['#12131c','#161a12','#1a1220']);
+    let g='<rect width="100" height="100" fill="'+bg+'"/>';const c=10;
+    for(let y=1;y<9;y++)for(let x=0;x<5;x++){
+      let fill=null;const hairRow=y<=2;const face=y>=3;
+      if(hairRow){if(x>=1||y===2)fill=hair;}
+      else if(face){ if(x===0&&y<7)continue; if(r()>.28)fill=(y===5&&x>=3)?'#1a1a1a':skin[r()>.5?0:1]; if(y===5&&x===4)fill='#1a1a1a';}
+      if(!fill)continue;
+      g+='<rect x="'+(x*10)+'" y="'+(y*10)+'" width="10" height="10" fill="'+fill+'"/>';
+      g+='<rect x="'+((9-x)*10)+'" y="'+(y*10)+'" width="10" height="10" fill="'+fill+'"/>';
+    }
+    return svg(g,'avpx');}
+
+  function ops(seed){const r=rng('ops'+seed);
+    const acc=pk(r,['#59d9b3','#5aa9f0','#f0b15a','#c58bf0']);
+    let g='<rect width="100" height="100" rx="14" fill="#0e1116"/><rect x="1" y="1" width="98" height="98" rx="13" fill="none" stroke="#23303a"/>';
+    for(let y=0;y<5;y++)for(let x=0;x<3;x++){ if(r()>.5){const op=(0.5+r()*0.5).toFixed(2);
+      g+='<rect x="'+(18+x*16)+'" y="'+(18+y*13)+'" width="12" height="9" rx="2" fill="'+acc+'" opacity="'+op+'"/>';
+      g+='<rect x="'+(18+(4-x)*16)+'" y="'+(18+y*13)+'" width="12" height="9" rx="2" fill="'+acc+'" opacity="'+op+'"/>';}}
+    return svg(g,'');}
+
+  const GEN={A:cozy,B:arcade,C:pixel,D:ops};
+  for(const lane of ['A','B','C','D']){
+    const big=document.getElementById(lane+'0');
+    if(big) big.innerHTML=GEN[lane]('ada').replace(/{W}/g,'64');
+    const strip=document.querySelector('.strip[data-lane="'+lane+'"]');
+    if(strip){strip.innerHTML=ROSTER.map(s=>GEN[lane](s).replace(/{W}/g,'40')).join('')+'<span class="cap">ada · rex · nia · cole</span>';}
+  }
+</script>

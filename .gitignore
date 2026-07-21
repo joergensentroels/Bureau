@@ -1,0 +1,16 @@
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+
+# Runtime state & generated output — kept out of the repo so your company's
+# data (org config, deliverables, generated agent bios) isn't published.
+# A fresh clone boots with an empty org from the app's built-in defaults.
+data-foreman.json
+data-bureau.json
+drafts/
+agent-profiles/
+
+# Prototype / scratch pages
+public/_*.html
