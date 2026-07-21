@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Foreman — Phase 1 server.
+// Bureau — Phase 1 server.
 //
 // Serves the Ops Control UI, stores your "company" (CEO role + hired agents),
 // and runs the orchestrator loop proven in spike.mjs — now streamed live to the
@@ -18,7 +18,7 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const PORT = Number(process.env.FOREMAN_PORT || 4173);
+const PORT = Number(process.env.BUREAU_PORT || process.env.FOREMAN_PORT || 4173);
 const LATCH_URL = (process.env.LATCH_URL || "http://127.0.0.1:8787").replace(/\/$/, "");
 const DATA_DIR = process.env.LATCH_DATA
   || path.join(os.homedir(), "Documents", "LLM server", "openclaw-command-center", "data");
@@ -152,18 +152,18 @@ async function fileApproval(agent, action) {
       riskLevel: "low",
       sensitive: false,
       executionPlan: { mode: "browser", summary: query.slice(0, 200), riskLevel: "low", timeoutSeconds: 90, actions: [{ type: "search_web", text: query, maxResults: 3 }] },
-      contextTags: ["foreman", `agent:${agent.seed}`],
+      contextTags: ["bureau", `agent:${agent.seed}`],
     });
     return json;
   }
   if ((action.actionType || "") === "purchase") {
-    // Filed as a Latch "purchase" approval — you decide it in Compass/Latch. Foreman records the
+    // Filed as a Latch "purchase" approval — you decide it in Compass/Latch. Bureau records the
     // authorized spend against the company budget; it does NOT place a real order.
     const cost = Math.max(0, parseFloat(String(action.command || action.details || "").replace(/[^0-9.]/g, "")) || 0);
     const { json } = await latch("POST", "/api/approvals", {
       type: "purchase", title: action.title || "Purchase request", details: action.details || "",
       command: `Amount: $${cost.toFixed(2)}`, riskLevel: "high",
-      contextTags: ["foreman", "purchase", `agent:${agent.seed}`],
+      contextTags: ["bureau", "purchase", `agent:${agent.seed}`],
     });
     return json;
   }
@@ -174,7 +174,7 @@ async function fileApproval(agent, action) {
     details: action.details || "",
     command: action.command || "",
     riskLevel: action.actionType === "shell" ? "high" : "medium",
-    contextTags: ["foreman", `agent:${agent.seed}`],
+    contextTags: ["bureau", `agent:${agent.seed}`],
   });
   return json;
 }
@@ -439,7 +439,7 @@ async function fetchUrl(raw) {
     let res;
     try {
       res = await fetch(current.href, { redirect: "manual", signal: ctrl.signal,
-        headers: { "user-agent": "Foreman-agent/1.0 (+local)", "accept": "text/html,text/plain,application/json,application/xml;q=0.8,*/*;q=0.3" } });
+        headers: { "user-agent": "Bureau-agent/1.0 (+local)", "accept": "text/html,text/plain,application/json,application/xml;q=0.8,*/*;q=0.3" } });
     } catch (e) { clearTimeout(timer); return { ok: false, error: "fetch failed: " + e.message, url: current.href }; }
     clearTimeout(timer);
     if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
@@ -502,7 +502,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
   if (priorWork) history.push({ role: "user", content:
     `Work your teammates have already produced toward this goal. USE it directly — do NOT ask anyone to provide it:\n\n${priorWork}` });
   history.push({ role: "user", content: `Your task: ${objective}` });
-  let tokens = 0, summary = "";
+  let tokens = 0, summary = "", step = 0;
   const artifacts = [], filesWritten = [];
   // Per-agent PAID-model economy. budgetUsd is the agent's dollar allowance for the paid API;
   // paidSpentUsd is what it has already spent (from prior runs). We only route to the paid provider
@@ -542,7 +542,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
       continue;
     }
     history.push({ role: "assistant", content: JSON.stringify(parsed) });
-    emit(run, "say", { agent: who, depth, turn, maxTurns: run.maxTurns, speak: parsed.speak || "…", paid: !!meta.paid });
+    emit(run, "say", { agent: who, depth, turn: ++step, maxTurns: run.maxTurns, speak: parsed.speak || "…", paid: !!meta.paid });
 
     const rawNext = parsed.next || {};
     const origAt = String(rawNext.actionType || "").toLowerCase();
@@ -570,7 +570,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
       }
       const { json: q } = await latch("POST", "/api/approvals", {
         type: "human_verification", title: `Question from ${who}`, details: question,
-        expectedResponse: question, contextTags: ["foreman", "question", `agent:${agent.seed}`],
+        expectedResponse: question, contextTags: ["bureau", "question", `agent:${agent.seed}`],
       });
       emit(run, "escalate", { agent: who, depth, question, approvalId: q.id });
       setAgentState(agent.id, "waiting", "waiting for the CEO to answer in Latch");
@@ -686,7 +686,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
         }
       } else {
         // Not yet a real capability — say so plainly rather than claiming it happened.
-        history.push({ role: "user", content: `The CEO APPROVED this ${next.actionType || "action"}, but Foreman cannot execute that action type yet (only web_research runs for real). Do NOT claim it was carried out. Either continue with what you can actually do (web_research or drafting), or finish and note this step still needs a human.` });
+        history.push({ role: "user", content: `The CEO APPROVED this ${next.actionType || "action"}, but Bureau cannot execute that action type yet (only web_research runs for real). Do NOT claim it was carried out. Either continue with what you can actually do (web_research or drafting), or finish and note this step still needs a human.` });
       }
     } else if (verdict === "denied") {
       history.push({ role: "user", content: "The CEO DENIED the action. Choose a different approach or finish." });
@@ -976,7 +976,7 @@ function renderChecklist({ title, objective, criteria, attempt, verdict }) {
     "",
     ...lines,
     "",
-    "_Auto-maintained by Foreman's Definition-of-Done gate; re-checked and rewritten after each pass._",
+    "_Auto-maintained by Bureau's Definition-of-Done gate; re-checked and rewritten after each pass._",
   ].join("\n");
 }
 // Save/overwrite the checklist markdown for a given base title. Stable base title -> same filename
@@ -1473,7 +1473,7 @@ const server = createServer(async (req, res) => {
       let question = `What should ${agent.name} help ${mate0 ? mate0 + " / " : ""}${toDept} with?`;
       try { const raw = await askLlm(msgs, { maxTokens: 600 }); const q = raw.replace(/<think>[\s\S]*?<\/think>/gi, "").trim(); if (q) question = q.slice(0, 300); } catch {}
       try {
-        await latch("POST", "/api/approvals", { type: "human_verification", title: `${agent.name} joined ${toDept}`, details: question, expectedResponse: question, contextTags: ["foreman", "relocate", `agent:${agent.seed}`] });
+        await latch("POST", "/api/approvals", { type: "human_verification", title: `${agent.name} joined ${toDept}`, details: question, expectedResponse: question, contextTags: ["bureau", "relocate", `agent:${agent.seed}`] });
       } catch {}
       return send(res, 200, { ok: true, question, mates, from: fromDept, to: toDept });
     }
@@ -1621,7 +1621,7 @@ const server = createServer(async (req, res) => {
 loadToken()
   .then((t) => {
     TOKEN = t;
-    server.listen(PORT, "127.0.0.1", () => console.log(`Foreman on http://127.0.0.1:${PORT}`));
+    server.listen(PORT, "127.0.0.1", () => console.log(`Bureau on http://127.0.0.1:${PORT}`));
     setInterval(() => { tickSchedules().catch((e) => console.error("scheduler tick:", e.message)); }, 60000); // check due schedules every minute
   })
   .catch((e) => { console.error("Could not load Latch operator token:", e.message); process.exit(1); });

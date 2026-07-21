@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Foreman</title>
+<title>Bureau</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
@@ -56,7 +56,7 @@
   .muted{color:var(--ink-2)} .dim{color:var(--ink-3)}
   .tag{font-size:11px;letter-spacing:.06em;text-transform:uppercase;padding:2px 8px;border-radius:20px;border:1px solid var(--line-2);color:var(--ink-2)}
 
-  header{display:flex;align-items:center;gap:16px;padding:14px 22px;border-bottom:1px solid var(--line);background:var(--panel-2)}
+  header{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:16px;padding:14px 22px;border-bottom:1px solid var(--line);background:var(--panel-2)}
   .brand{font-weight:700;letter-spacing:.18em;text-transform:uppercase;font-size:15px}
   .brand b{color:var(--accent)}
   header .spacer{flex:1}
@@ -284,7 +284,7 @@
 </head>
 <body>
 <header>
-  <div class="brand">FORE<b>MAN</b></div>
+  <div class="brand">BU<b>REAU</b></div>
   <span class="tag" id="tagline">agent orchestrator</span>
   <div class="spacer"></div>
   <div class="toggle themeswitch"><button data-theme-btn="ops">Ops</button><button data-theme-btn="pixel">Tycoon</button></div>
@@ -362,11 +362,12 @@ async function api(method, route, body){
   try{ return t?JSON.parse(t):{}; }catch{ return {raw:t}; }
 }
 
-function applyTheme(t){ document.documentElement.setAttribute("data-theme", t==="pixel"?"pixel":"ops"); localStorage.setItem("foreman_theme", curTheme()); paintThemeButtons(); }
+function applyTheme(t){ document.documentElement.setAttribute("data-theme", t==="pixel"?"pixel":"ops"); localStorage.setItem("bureau_theme", curTheme()); paintThemeButtons(); }
 function paintThemeButtons(){ const t=curTheme(); document.querySelectorAll("[data-theme-btn]").forEach(b=>b.classList.toggle("on", b.dataset.themeBtn===t)); }
 
 async function boot(){
-  applyTheme(localStorage.getItem("foreman_theme")||"ops");
+  ["theme","orgview","style","layout"].forEach(k=>{ const o=localStorage.getItem("foreman_"+k); if(o!=null&&localStorage.getItem("bureau_"+k)==null) localStorage.setItem("bureau_"+k,o); });   // carry prefs over from the old name
+  applyTheme(localStorage.getItem("bureau_theme")||"ops");
   document.querySelectorAll("[data-theme-btn]").forEach(b=>b.onclick=()=>{ applyTheme(b.dataset.themeBtn); if(ORG) render(); });
   try{ ORG = await api("GET","/api/org"); }
   catch{ return showReconnect(); }               // server briefly unreachable — show a retry screen, not a blank page
@@ -381,7 +382,7 @@ function showReconnect(){
   const app=$("#app"); if(app){
     app.innerHTML="";
     const ov=el("div","overlay"), box=el("div","onb");
-    box.innerHTML=`<h1>Can't reach the Foreman server</h1>
+    box.innerHTML=`<h1>Can't reach the Bureau server</h1>
       <p>The server at this address isn't responding — it may be starting up or restarting. This page keeps trying automatically.</p>
       <div class="row" style="justify-content:flex-end"><button class="primary" id="reconnectNow">Retry now</button></div>`;
     ov.appendChild(box); app.appendChild(ov);
@@ -492,7 +493,7 @@ function renderOnboarding(app){
   const box=el("div","onb");
   box.innerHTML=`
     <h1>Welcome. First — what are <span style="color:var(--accent)">you</span> in charge of?</h1>
-    <p>Describe your role in plain words: what you own, what you're responsible for. Foreman uses this to know what to build your team around.</p>
+    <p>Describe your role in plain words: what you own, what you're responsible for. Bureau uses this to know what to build your team around.</p>
     <div class="fields">
       <textarea id="ceoRole" placeholder="I'm in charge of product and customer research at a small SaaS company. I own the roadmap and I talk to users every week."></textarea>
       <div class="row" style="justify-content:flex-end"><button class="primary" id="ceoGo">Start building your org</button></div>
@@ -507,8 +508,8 @@ function renderOnboarding(app){
   $("#ceoRole").focus();
 }
 
-function orgView(){ return localStorage.getItem("foreman_orgview")||"flat"; }
-function setOrgView(v){ localStorage.setItem("foreman_orgview",v); }
+function orgView(){ return localStorage.getItem("bureau_orgview")||"flat"; }
+function setOrgView(v){ localStorage.setItem("bureau_orgview",v); }
 
 function renderMain(app){
   app.innerHTML="";
@@ -654,10 +655,10 @@ const isoDeskSVG=(c,r)=>{ const {x,y}=iso(c,r); return isoBoxSVG(x,y-1,17,9,7,"v
 
 const DEPT_ORDER=["Leadership","Product & Technology","Sales & Revenue","Marketing","Customer Success & Support","Security","Operations","People","General"];
 const deptOf=(a)=>(a.department||"").trim()||"General";
-function loadLayout(){ try{ return JSON.parse(localStorage.getItem("foreman_layout")||"{}"); }catch{ return {}; } }
-function saveRoomPos(dept,x,y){ const L=loadLayout(); L[dept]={x:Math.round(x),y:Math.round(y)}; localStorage.setItem("foreman_layout",JSON.stringify(L)); }
+function loadLayout(){ try{ return JSON.parse(localStorage.getItem("bureau_layout")||"{}"); }catch{ return {}; } }
+function saveRoomPos(dept,x,y){ const L=loadLayout(); L[dept]={x:Math.round(x),y:Math.round(y)}; localStorage.setItem("bureau_layout",JSON.stringify(L)); }
 const FLOOR_PALETTES=[["#2f6a5a","#286052"],["#41527a","#39496e"],["#6a5330","#5f4a28"],["#6a3560","#5f2e55"],["#356174","#2e5768"],["#6a3a3a","#5f3232"],["#5a6a35","#50602e"],["#4a3f6a","#42385f"],["#565f6b","#4a525d"]];
-function loadStyle(){ try{ return JSON.parse(localStorage.getItem("foreman_style")||"{}"); }catch{ return {}; } }
+function loadStyle(){ try{ return JSON.parse(localStorage.getItem("bureau_style")||"{}"); }catch{ return {}; } }
 
 // isometric room: raised back walls (L-shape), tiled iso floor, sprites standing inside.
 // The office is composited from Kenney Furniture Kit sprites (CC0). Native floor tile = 151x110 px;
@@ -902,7 +903,7 @@ function wireFloor(container){
     sign.addEventListener("pointerup",end); sign.addEventListener("pointercancel",end);
     const paint=room.querySelector(".roompaint");
     if(paint){ paint.addEventListener("pointerdown",(e)=>e.stopPropagation());
-      paint.addEventListener("click",(e)=>{ e.stopPropagation(); const s=loadStyle(); s[room.dataset.dept]=(((s[room.dataset.dept]??-1)+1)%FLOOR_PALETTES.length); localStorage.setItem("foreman_style",JSON.stringify(s)); const ob=document.getElementById("orgbody"); if(ob){ ob.innerHTML=officeHTML(); wireFloor(ob); paintStatus(); } }); }
+      paint.addEventListener("click",(e)=>{ e.stopPropagation(); const s=loadStyle(); s[room.dataset.dept]=(((s[room.dataset.dept]??-1)+1)%FLOOR_PALETTES.length); localStorage.setItem("bureau_style",JSON.stringify(s)); const ob=document.getElementById("orgbody"); if(ob){ ob.innerHTML=officeHTML(); wireFloor(ob); paintStatus(); } }); }
   });
   const recNpc=container.querySelector('.rchar.npc[data-reception-npc]');
   if(recNpc) recNpc.onclick=()=>openTalkToHR();
