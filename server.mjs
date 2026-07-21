@@ -25,6 +25,9 @@ const DATA_DIR = process.env.LATCH_DATA
 const ORG_FILE = path.join(HERE, "data-foreman.json");
 const PROFILES_DIR = path.join(HERE, "agent-profiles");
 const DRAFTS_DIR = path.join(HERE, "drafts");
+// Definition-of-Done checklists ("checklist-*.md") live in drafts/ but are QA internals, not
+// deliverables — keep them out of the deliverables listings (still openable directly by filename).
+const isDeliverableFile = (n) => n.endsWith(".md") && !n.startsWith("checklist-");
 
 let TOKEN = "";
 
@@ -1236,7 +1239,7 @@ const server = createServer(async (req, res) => {
     if (p === "/api/dashboard" && req.method === "GET") {
       const org = await readOrg();
       let deliverables = 0;
-      try { deliverables = (await readdir(DRAFTS_DIR)).filter((n) => n.endsWith(".md")).length; } catch {}
+      try { deliverables = (await readdir(DRAFTS_DIR)).filter(isDeliverableFile).length; } catch {}
       const agents = org.agents || [], schedules = org.schedules || [];
       const topAgents = [...agents].sort((a, b) => (b.tokensUsed || 0) - (a.tokensUsed || 0)).slice(0, 4)
         .map((a) => ({ name: a.name, role: a.role, seed: a.seed, tokensUsed: a.tokensUsed || 0, budgetUsd: a.budgetUsd || 0 }));
@@ -1259,7 +1262,7 @@ const server = createServer(async (req, res) => {
         for (const a of org.agents) for (const m of (a.memory || [])) for (const f of (m.files || [])) if (!authorOf[f]) authorOf[f] = { id: a.id, name: a.name };
         const names = await readdir(DRAFTS_DIR);
         for (const name of names) {
-          if (!name.endsWith(".md")) continue;
+          if (!isDeliverableFile(name)) continue;
           try { const s = await stat(path.join(DRAFTS_DIR, name)); files.push({ name, bytes: s.size, modified: s.mtimeMs, authorId: authorOf[name]?.id || "", authorName: authorOf[name]?.name || "" }); } catch {}
         }
         files.sort((a, b) => b.modified - a.modified);
@@ -1306,7 +1309,7 @@ const server = createServer(async (req, res) => {
         const authorOf = {};
         for (const a of org.agents) for (const m of (a.memory || [])) for (const f of (m.files || [])) if (!authorOf[f]) authorOf[f] = a.name;
         for (const name of await readdir(DRAFTS_DIR)) {
-          if (!name.endsWith(".md")) continue;
+          if (!isDeliverableFile(name)) continue;
           try { const s = await stat(path.join(DRAFTS_DIR, name)); if (s.mtimeMs > seenAt) deliverables.push({ name, bytes: s.size, modified: s.mtimeMs, authorName: authorOf[name] || "" }); } catch {}
         }
         deliverables.sort((a, b) => b.modified - a.modified);
