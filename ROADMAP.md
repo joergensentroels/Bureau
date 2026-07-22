@@ -22,7 +22,7 @@ Make autonomy safe, so we can let agents do more without babysitting.
 - **Audit trail**: an append-only provenance log — every action, its source/result, token & $ cost,
   and who approved it (you / auto / Latch). Surfaced as a filterable history view + run replay.
 
-### 2. Plan-approval gate  _(control before work)_
+### 2. Plan-approval gate  ✅ _done_
 The upfront cousin of the Definition-of-Done gate.
 - Before a company run fans out, the manager's **plan is shown to you** (tasks + assignees + the
   derived acceptance criteria).

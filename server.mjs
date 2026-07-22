@@ -1072,6 +1072,21 @@ async function gatedAgentTask(run, agent, org, objective, prior, depth, tally) {
   return { summary, artifacts, tokens, files, product: workProduct(summary, artifacts) };
 }
 
+// Plan-approval gate: wait for the CEO to approve/reject the plan via POST /api/run/:id/plan
+// (which sets run.planDecision). Resolves "approve" | "reject"; proceeds on timeout so it can't hang.
+function waitForPlan(run, ms = 10 * 60 * 1000) {
+  const deadline = Date.now() + ms;
+  return new Promise((resolve) => {
+    const tick = () => {
+      if (run.stopped) return resolve("reject");
+      if (run.planDecision) return resolve(run.planDecision);
+      if (Date.now() > deadline) return resolve("approve");
+      setTimeout(tick, 1500);
+    };
+    tick();
+  });
+}
+
 // Shared gate: derive criteria, run `worker(objective)` (which produces the work), verify, and
 // remediate the specific gaps up to GATE_MAX_ATTEMPTS. worker returns { product, body, tokens }.
 async function runGated(run, worker, persistExtra, perAgentTally) {
@@ -1089,7 +1104,26 @@ async function runGated(run, worker, persistExtra, perAgentTally) {
     if (r.ok) { run.checklistFile = r.name; emit(run, "checklist", { file: r.name, items: run.criteria, attempt: att, verdict }); }
   };
   await persistChecklist(null, null);   // v0: all unchecked
-  let attempt = 0, objective = run.objective, product = { product: "", body: "" };
+  // ---- Plan-approval gate: on attended runs, the CEO reviews/edits the acceptance criteria BEFORE work ----
+  if (!run.autoApprove && run.criteria.length) {
+    emit(run, "planreview", { items: run.criteria, objective: run.objective });
+    const decision = await waitForPlan(run);
+    if (decision === "reject") {
+      emit(run, "planrejected", {});
+      const b0 = await persistRun(run.objective, tokens, { ...persistExtra, criteria: run.criteria, unmet: run.criteria.length, verdict: "rejected" }, perAgentTally, run.memoryEntries, run.paidTally);
+      emit(run, "budget", { runTokens: tokens, totalTokens: b0.tokens });
+      logAudit({ kind: "run", runId: run.id, agent: persistExtra.agent || "", objective: run.objective, tokens, verdict: "rejected", decision: "you" });
+      finishRun(run, { verdict: "rejected", met: 0, unmet: run.criteria.length, total: run.criteria.length, criteria: run.criteria });
+      return { verdict: "rejected", tokens };
+    }
+    emit(run, "planapproved", { items: run.criteria });
+    await persistChecklist(null, null);   // criteria may have been edited during approval
+  }
+  let attempt = 0, product = { product: "", body: "" };
+  // Feed the (possibly edited) acceptance criteria into the first pass so the work is shaped by them.
+  let objective = run.criteria.length
+    ? `${run.objective}\n\nAcceptance criteria (the definition of done) — aim to satisfy all of these:\n${run.criteria.map((c, i) => `${i + 1}. ${c.text}`).join("\n")}`
+    : run.objective;
   while (true) {
     const w = await worker(objective);
     tokens += w.tokens || 0;
@@ -1678,6 +1712,20 @@ const server = createServer(async (req, res) => {
       const id = p.split("/")[3];
       const run = runs.get(id); if (run) run.stopped = true;
       return send(res, 200, { ok: true });
+    }
+    // Plan-approval gate: the CEO approves (optionally with edited criteria) or rejects the plan.
+    if (p.startsWith("/api/run/") && p.endsWith("/plan") && req.method === "POST") {
+      const id = p.split("/")[3];
+      const run = runs.get(id);
+      if (!run) return send(res, 404, { error: "no such run" });
+      const body = await readBody(req);
+      if (Array.isArray(body.criteria)) {
+        const items = body.criteria.map((t) => String(t || "").slice(0, 240).trim()).filter(Boolean).slice(0, 8)
+          .map((text, i) => ({ id: i, text, status: "open", note: "" }));
+        if (items.length) run.criteria = items;
+      }
+      run.planDecision = body.decision === "reject" ? "reject" : "approve";
+      return send(res, 200, { ok: true, decision: run.planDecision, criteria: run.criteria });
     }
     if (p.startsWith("/api/run/") && p.endsWith("/stream") && req.method === "GET") {
       const id = p.split("/")[3];

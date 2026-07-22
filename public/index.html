@@ -83,6 +83,7 @@
   .allowgrid{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:6px}
   .allowchk{display:inline-flex;align-items:center;gap:5px;font-size:12px;text-transform:none;letter-spacing:0;color:var(--ink-2);cursor:pointer}
   .allowchk input{width:auto;margin:0}
+  .planedit{width:100%;min-height:76px;resize:vertical;background:var(--panel-2);border:1px solid var(--line-2);border-radius:8px;color:var(--ink);font-family:inherit;font-size:12px;padding:8px 10px;line-height:1.55}
   .inboxbtn .ibell{font-size:13px;line-height:1;filter:grayscale(.2)}
   .inboxbtn.hot{border-color:var(--warn);color:var(--ink)}
   .inboxbtn.hot .ibell{animation:ibell .9s ease 1}
@@ -1049,11 +1050,12 @@ function workPanel(){
   return c;
 }
 
-let ES=null;
+let ES=null, CUR_RUN=null;
 async function launchRun(body){
   const rb=$("#runBtn"); if(rb){ rb.disabled=true; rb.textContent="Running…"; }
   const feed=$("#feed"); if(feed) feed.innerHTML="";
   const { runId } = await api("POST","/api/run",body);
+  CUR_RUN=runId;
   if(ES) ES.close();
   ES=new EventSource("/api/run/"+runId+"/stream");
   ES.onmessage=(m)=>{ handleEvent(JSON.parse(m.data)); };
@@ -1244,6 +1246,15 @@ function handleEvent(ev){
   else if(ev.type==="answer") addEv(d.denied?"denied":"approved", who(d.denied?"no answer from CEO":"CEO answered"),`<div>${esc(d.text)}</div>`, dep);
   else if(ev.type==="report") addEv("report",`${esc(d.manager||"manager")} · report`,`<div>${esc(d.text)}</div>`, dep);
   else if(ev.type==="criteria") addEv("dod","QA · definition of done",`<div class="dim" style="font-size:11px;margin-bottom:5px">${(d.items||[]).length} acceptance criteria, set before any work begins</div>${critList(d.items,false)}`, dep);
+  else if(ev.type==="planreview"){
+    const items=d.items||[];
+    const e=addEv("plan","Plan · your approval before work starts",`<div class="dim" style="font-size:12px;margin-bottom:6px">Review the acceptance criteria (one per line). Edit if you want, then approve — or reject to cancel this run before any work happens.</div><textarea class="planedit" id="planEdit">${esc(items.map(c=>c.text).join("\n"))}</textarea><div class="row" style="gap:8px;margin-top:8px"><button class="primary" id="planApprove">Approve &amp; run</button><button id="planReject">Reject</button></div><div class="dim" id="planMsg" style="font-size:11px;margin-top:6px"></div>`);
+    const ap=e.querySelector("#planApprove"), rj=e.querySelector("#planReject"), msg=e.querySelector("#planMsg");
+    ap.onclick=async()=>{ ap.disabled=rj.disabled=true; const crit=e.querySelector("#planEdit").value.split("\n").map(s=>s.trim()).filter(Boolean); try{ await api("POST","/api/run/"+CUR_RUN+"/plan",{decision:"approve",criteria:crit}); msg.textContent="Approved — starting work…"; }catch{ msg.textContent="Couldn't send approval."; ap.disabled=rj.disabled=false; } };
+    rj.onclick=async()=>{ ap.disabled=rj.disabled=true; try{ await api("POST","/api/run/"+CUR_RUN+"/plan",{decision:"reject"}); msg.textContent="Rejected — cancelling."; }catch{ msg.textContent="Couldn't send."; ap.disabled=rj.disabled=false; } };
+  }
+  else if(ev.type==="planapproved") addEv("approved","plan approved",`<div class="dim">Work starting on the approved criteria.</div>`);
+  else if(ev.type==="planrejected") addEv("denied","plan rejected",`<div class="dim">Run cancelled — no work was done.</div>`);
   else if(ev.type==="verify"){ const cls=d.unmet?"dodfail":"dodpass";
     addEv(cls,`QA · verification${d.attempt?` · pass ${d.attempt+1}`:""}`,`<div style="font-size:12px;margin-bottom:5px"><b>${d.met}/${d.total}</b> criteria met${d.unmet?` · <span style="color:var(--danger)">${d.unmet} unmet</span>`:` · <span style="color:var(--ok)">all clear</span>`}</div>${critList(d.items,true)}`, dep); }
   else if(ev.type==="remediate") addEv("dod","QA · sending back",`<div class="dim" style="font-size:12px;margin-bottom:3px">${d.unmet.length} item${d.unmet.length===1?"":"s"} kicked back to the team to fix:</div><div class="dodlist">${d.unmet.map(t=>`<div class="dodrow unmet"><span class="dodic">↩</span><span class="dodt">${esc(t)}</span></div>`).join("")}</div>`, dep);
