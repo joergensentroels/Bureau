@@ -30,7 +30,7 @@ The upfront cousin of the Definition-of-Done gate.
   option for unattended/scheduled runs).
 - Rejected/edited plans feed back into the decomposition. Kills wasted and off-track runs.
 
-### 3. Deliverable lifecycle  _(outputs become tracked work products)_
+### 3. Deliverable lifecycle  ✅ _done_
 - Explicit states: **draft → QA'd (DoD passed) → your sign-off → delivered**.
 - **Versioning + diffs** on revisions (the revise loop already exists; keep history).
 - A clear "awaiting your sign-off" queue in the Inbox.

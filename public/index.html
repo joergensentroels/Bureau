@@ -84,6 +84,17 @@
   .allowchk{display:inline-flex;align-items:center;gap:5px;font-size:12px;text-transform:none;letter-spacing:0;color:var(--ink-2);cursor:pointer}
   .allowchk input{width:auto;margin:0}
   .planedit{width:100%;min-height:76px;resize:vertical;background:var(--panel-2);border:1px solid var(--line-2);border-radius:8px;color:var(--ink);font-family:inherit;font-size:12px;padding:8px 10px;line-height:1.55}
+  .stbadge{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding:1px 6px;border-radius:7px;white-space:nowrap;align-self:center}
+  .stbadge.draft{background:var(--panel-2);color:var(--ink-3);border:1px solid var(--line-2)}
+  .stbadge.qa{background:rgba(90,169,240,.16);color:#5aa9f0;border:1px solid rgba(90,169,240,.4)}
+  .stbadge.approved{background:rgba(89,217,179,.16);color:var(--ok);border:1px solid rgba(89,217,179,.4)}
+  .stbadge.delivered{background:rgba(89,217,179,.30);color:var(--ok);border:1px solid var(--ok)}
+  .vrow{display:flex;align-items:center;gap:8px;padding:5px 8px;border:1px solid var(--line-2);border-radius:7px;margin-bottom:5px;font-size:12px;cursor:pointer;color:var(--ink-2)}
+  .vrow:hover{border-color:var(--accent-2);color:var(--ink)}
+  .diffbox{max-height:48vh;overflow:auto;border:1px solid var(--line-2);border-radius:8px;padding:8px;background:var(--panel-2);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.5}
+  .dl{white-space:pre-wrap;padding:0 4px}
+  .dl.add{background:rgba(89,217,179,.14);color:var(--ok)}
+  .dl.del{background:rgba(224,112,95,.14);color:var(--danger)}
   .inboxbtn .ibell{font-size:13px;line-height:1;filter:grayscale(.2)}
   .inboxbtn.hot{border-color:var(--warn);color:var(--ink)}
   .inboxbtn.hot .ibell{animation:ibell .9s ease 1}
@@ -494,7 +505,7 @@ async function openInbox(){
       + `<div class="ibd" style="margin:6px 2px 0">Approve or decline these in Latch / Compass ${d.latchOk?"":"<b style='color:var(--warn)'>(Latch unreachable right now)</b>"}<a href="#" id="ibLatch" style="color:var(--accent);text-decoration:none"> — open Latch ↗</a></div></div>`;
     }
     if(DV.length){ body+=`<div class="ibsec"><h3>New deliverables <span class="c">${DV.length}</span></h3>`
-      + DV.map(f=>`<div class="ibrow click" data-doc="${esc(f.name)}"><span>📄</span><div class="ibmain"><div class="ibt">${esc(f.name)}</div><div class="ibd">${(f.bytes/1024).toFixed(1)} KB${f.authorName?` · ${esc(f.authorName)}`:""} · ${ago(f.modified)}</div></div><span class="ibd">open ›</span></div>`).join("")+`</div>`;
+      + DV.map(f=>`<div class="ibrow click" data-doc="${esc(f.name)}"><span>📄</span><div class="ibmain"><div class="ibt">${esc(f.name)}</div><div class="ibd">${(f.bytes/1024).toFixed(1)} KB${f.authorName?` · ${esc(f.authorName)}`:""} · ${ago(f.modified)}</div></div>${f.status?delivBadge(f.status):""}</div>`).join("")+`</div>`;
     }
     if(R.length){ const rr=R.slice().sort((a,b)=>(b.verdict==="shortfall")-(a.verdict==="shortfall"));   // shortfalls first — they want you
       body+=`<div class="ibsec"><h3>Runs to review <span class="c">${R.length}</span></h3>`
@@ -1081,7 +1092,7 @@ async function loadDeliverables(){
   let data; try{ data=await api("GET","/api/deliverables"); }catch{ box.innerHTML=`<div class="dim">Couldn't load deliverables.</div>`; return; }
   const files=(data&&data.files)||[];
   if(!files.length){ box.innerHTML=`<div class="dim">No deliverables yet — when an agent saves a document (file_write), it appears here.</div>`; return; }
-  box.innerHTML=files.map(f=>`<div class="delivrow" data-name="${esc(f.name)}" data-author="${esc(f.authorId||"")}" data-authorname="${esc(f.authorName||"")}"><span>📄</span><span class="dn">${esc(f.name)}</span><span class="dm">${(f.bytes/1024).toFixed(1)} KB${f.authorName?` · ${esc(f.authorName)}`:""} · ${new Date(f.modified).toLocaleString()}</span><button class="rvbtn" title="Ask for a revision">Revise</button></div>`).join("");
+  box.innerHTML=files.map(f=>`<div class="delivrow" data-name="${esc(f.name)}" data-author="${esc(f.authorId||"")}" data-authorname="${esc(f.authorName||"")}"><span>📄</span><span class="dn">${esc(f.name)}</span><span class="dm">${(f.bytes/1024).toFixed(1)} KB${f.authorName?` · ${esc(f.authorName)}`:""}${f.versions?` · v${f.versions+1}`:""}</span>${delivBadge(f.status)}<button class="rvbtn" title="Ask for a revision">Revise</button></div>`).join("");
   box.querySelectorAll(".delivrow").forEach(r=>{
     r.onclick=()=>openDeliverable(r.dataset.name);
     const b=r.querySelector(".rvbtn"); if(b) b.onclick=(e)=>{ e.stopPropagation(); openRevise(r.dataset.name, r.dataset.author, r.dataset.authorname); };
@@ -1096,19 +1107,58 @@ function mdLite(src){
     .replace(/^\s*[-*] (.*)$/gm,"<li>$1</li>").replace(/(<li>[\s\S]*?<\/li>)/g,"<ul>$1</ul>")
     .replace(/\n{2,}/g,"<br><br>").replace(/\n/g,"<br>");
 }
+const DELIV_STATUS={draft:"Draft",qa:"QA'd",approved:"Approved",delivered:"Delivered"};
+function delivBadge(st){ return `<span class="stbadge ${esc(st||"draft")}">${DELIV_STATUS[st]||"Draft"}</span>`; }
+// Compact line-level diff (LCS) for the version view. Guarded against very large docs.
+function lineDiff(oldT, newT){
+  const a=String(oldT).split("\n"), b=String(newT).split("\n"), n=a.length, m=b.length;
+  if(n>500||m>500) return [{t:"=",l:"(document too large to diff — showing current version)"}].concat(b.map(l=>({t:"=",l})));
+  const dp=Array.from({length:n+1},()=>new Int32Array(m+1));
+  for(let i=n-1;i>=0;i--)for(let j=m-1;j>=0;j--) dp[i][j]=a[i]===b[j]?dp[i+1][j+1]+1:Math.max(dp[i+1][j],dp[i][j+1]);
+  const out=[]; let i=0,j=0;
+  while(i<n&&j<m){ if(a[i]===b[j]){out.push({t:"=",l:a[i]});i++;j++;} else if(dp[i+1][j]>=dp[i][j+1]){out.push({t:"-",l:a[i]});i++;} else {out.push({t:"+",l:b[j]});j++;} }
+  while(i<n) out.push({t:"-",l:a[i++]}); while(j<m) out.push({t:"+",l:b[j++]});
+  return out;
+}
+function renderDiff(diff){ return `<div class="diffbox">${diff.map(d=>`<div class="dl ${d.t==="+"?"add":d.t==="-"?"del":""}">${d.t==="+"?"+ ":d.t==="-"?"- ":"  "}${esc(d.l)}</div>`).join("")}</div>`; }
 async function openDeliverable(name){
   let data; try{ data=await api("GET","/api/deliverables/"+encodeURIComponent(name)); }catch{ return; }
+  const status=data.status||"draft", nVers=data.versions||0;
+  // status-contextual actions
+  const btns=[];
+  if(status==="draft"||status==="qa") btns.push(`<button class="primary" data-st="approved">✓ Sign off</button>`);
+  if(status==="approved") btns.push(`<button class="primary" data-st="delivered">📦 Mark delivered</button>`);
+  if(status!=="draft") btns.push(`<button data-st="draft">Reopen</button>`);
   const wrap=el("div","modalwrap");
-  wrap.innerHTML=`<div class="modal" style="max-width:640px">
-    <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
-      <h1 style="font-size:16px;margin:0;text-transform:none">📄 ${esc(name)}</h1>
+  wrap.innerHTML=`<div class="modal" style="max-width:660px">
+    <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:6px">
+      <h1 style="font-size:16px;margin:0;text-transform:none">📄 ${esc(name)} ${delivBadge(status)}</h1>
       <div class="row" style="gap:8px"><button id="dl">Download</button><button id="cl">Close</button></div>
     </div>
-    <div class="delivbody">${mdLite(data.content||"")}</div></div>`;
+    <div class="row" style="gap:8px;margin-bottom:10px;flex-wrap:wrap">${btns.join("")}${nVers?`<button id="vtoggle">🕘 Version history (${nVers})</button>`:""}</div>
+    <div id="vpanel"></div>
+    <div class="delivbody" id="dbody">${mdLite(data.content||"")}</div></div>`;
   document.body.appendChild(wrap);
   wrap.onclick=e=>{ if(e.target===wrap) wrap.remove(); };
   wrap.querySelector("#cl").onclick=()=>wrap.remove();
   wrap.querySelector("#dl").onclick=()=>{ const b=new Blob([data.content||""],{type:"text/markdown"}); const u=URL.createObjectURL(b); const a=document.createElement("a"); a.href=u; a.download=name; a.click(); URL.revokeObjectURL(u); };
+  wrap.querySelectorAll("[data-st]").forEach(b=>b.onclick=async()=>{ await api("POST","/api/deliverables/"+encodeURIComponent(name)+"/status",{status:b.dataset.st}); wrap.remove(); loadDeliverables(); loadDashboard(); refreshInbox(); });
+  const vt=wrap.querySelector("#vtoggle");
+  if(vt) vt.onclick=async()=>{
+    const vp=wrap.querySelector("#vpanel");
+    if(vp.dataset.open){ vp.innerHTML=""; vp.dataset.open=""; return; }
+    vp.dataset.open="1"; vp.innerHTML=`<div class="dim" style="font-size:12px">Loading versions…</div>`;
+    let vd; try{ vd=await api("GET","/api/deliverables/"+encodeURIComponent(name)+"/versions"); }catch{ vp.innerHTML=`<div class="dim">Couldn't load versions.</div>`; return; }
+    const vs=(vd&&vd.versions)||[];
+    vp.innerHTML=`<div class="dim" style="font-size:11px;margin-bottom:6px">Click a version to see what changed since then (vs. current).</div>`
+      + vs.map(v=>`<div class="vrow" data-ts="${v.at}">🕘 ${ago(v.at)} · ${(v.bytes/1024).toFixed(1)} KB</div>`).join("")
+      + `<div id="vdiff" style="margin-top:8px"></div>`;
+    vp.querySelectorAll(".vrow").forEach(r=>r.onclick=async()=>{
+      const dd=wrap.querySelector("#vdiff"); dd.innerHTML=`<div class="dim" style="font-size:12px">Diffing…</div>`;
+      let ov; try{ ov=await api("GET","/api/deliverables/"+encodeURIComponent(name)+"/versions/"+r.dataset.ts); }catch{ dd.innerHTML=`<div class="dim">Couldn't load that version.</div>`; return; }
+      dd.innerHTML=renderDiff(lineDiff(ov.content||"", data.content||""));
+    });
+  };
 }
 function openRevise(name, authorId, authorName){
   const base=name.replace(/\.md$/i,"");

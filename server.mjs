@@ -25,6 +25,7 @@ const DATA_DIR = process.env.LATCH_DATA
 const ORG_FILE = path.join(HERE, "data-foreman.json");
 const PROFILES_DIR = path.join(HERE, "agent-profiles");
 const DRAFTS_DIR = path.join(HERE, "drafts");
+const VERSIONS_DIR = path.join(DRAFTS_DIR, ".versions");   // prior versions of each deliverable (name.<ts>)
 // Definition-of-Done checklists ("checklist-*.md") live in drafts/ but are QA internals, not
 // deliverables — keep them out of the deliverables listings (still openable directly by filename).
 const isDeliverableFile = (n) => n.endsWith(".md") && !n.startsWith("checklist-");
@@ -33,7 +34,7 @@ let TOKEN = "";
 
 // ---------- org store --------------------------------------------------------
 
-const EMPTY_ORG = { ceo: null, vision: "", companyName: "", agents: [], budget: { tokens: 0 }, activity: [], schedules: [], purchases: [], audit: [], guardrails: {} };
+const EMPTY_ORG = { ceo: null, vision: "", companyName: "", agents: [], budget: { tokens: 0 }, activity: [], schedules: [], purchases: [], audit: [], guardrails: {}, deliverables: {} };
 // The real "economy": an agent's budget is a DOLLAR allowance for the PAID API model. $0 (default)
 // means the agent may only use the free local model. Token usage is the actual cost, tracked per agent.
 // $ per 1K tokens on the paid model — converts tokens used on paid runs into dollars against an
@@ -48,6 +49,7 @@ function ensureBudget(org) {
   delete org.budget.money; delete org.budget.currency;                 // drop the old fake tycoon money
   if (!Array.isArray(org.purchases)) org.purchases = [];
   if (!Array.isArray(org.audit)) org.audit = [];                        // append-only provenance log (newest first)
+  if (!org.deliverables || typeof org.deliverables !== "object" || Array.isArray(org.deliverables)) org.deliverables = {}; // filename -> {status, versions[], updatedAt, signedOffAt, deliveredAt}
   // Guardrails: autoApproveUnderUsd = purchases/spend below this may auto-approve; maxActionsPerRun =
   // hard cap on real actions per run (0 = unlimited). Per-agent action allowlists live on the agent.
   org.guardrails = { autoApproveUnderUsd: 0, maxActionsPerRun: 0, ...(org.guardrails || {}) };
@@ -500,8 +502,24 @@ async function writeDraft(title, content) {
     await mkdir(DRAFTS_DIR, { recursive: true });
     const full = path.join(DRAFTS_DIR, name);
     if (full !== path.join(DRAFTS_DIR, path.basename(full))) return { ok: false, error: "invalid filename" };
-    await writeFile(full, body.slice(0, 100 * 1024));
-    return { ok: true, name, path: full, bytes: Buffer.byteLength(body.slice(0, 100 * 1024)) };
+    const newBody = body.slice(0, 100 * 1024);
+    // Versioning: snapshot the prior content before overwriting, so revisions keep a history.
+    const prev = await readFile(full, "utf8").catch(() => null);
+    let ver = null;
+    if (prev != null && prev !== newBody) {
+      const ts = Date.now();
+      try { await mkdir(VERSIONS_DIR, { recursive: true }); await writeFile(path.join(VERSIONS_DIR, `${name}.${ts}`), prev); ver = { at: ts, bytes: Buffer.byteLength(prev) }; } catch {}
+    }
+    await writeFile(full, newBody);
+    // Lifecycle: any write returns the doc to 'draft' (its content changed and needs re-review).
+    if (!name.startsWith("checklist-")) {
+      await updateOrg((o) => {
+        const d = (o.deliverables[name] = o.deliverables[name] || { status: "draft", versions: [] });
+        if (ver) d.versions = [...(d.versions || []), ver].slice(-20);
+        d.status = "draft"; d.updatedAt = Date.now();
+      }).catch(() => {});
+    }
+    return { ok: true, name, path: full, bytes: Buffer.byteLength(newBody), versioned: !!ver };
   } catch (e) { return { ok: false, error: e.message }; }
 }
 // Read back a document from foreman/drafts/ (so an agent can revise its own past deliverable).
@@ -1162,6 +1180,10 @@ async function runGated(run, worker, persistExtra, perAgentTally) {
   logAudit({ kind: "run", runId: run.id, agent: persistExtra.agent || "", objective: run.objective,
     tokens, costUsd: paidSpentUsd || 0, verdict, met, unmet: unmet.length, total: run.criteria.length,
     decision: run.autoApprove ? "auto" : "you" });
+  // Lifecycle: a run that passed its Definition of Done promotes its produced docs draft -> qa (awaiting your sign-off).
+  if (verdict === "passed" && (run.producedFiles || []).length) {
+    await updateOrg((o) => { for (const f of run.producedFiles) { const d = o.deliverables[f]; if (d && d.status === "draft") d.status = "qa"; } }).catch(() => {});
+  }
   finishRun(run, { verdict, met, unmet: unmet.length, total: run.criteria.length, criteria: run.criteria });
   return { verdict, tokens };
 }
@@ -1375,19 +1397,55 @@ const server = createServer(async (req, res) => {
         const names = await readdir(DRAFTS_DIR);
         for (const name of names) {
           if (!isDeliverableFile(name)) continue;
-          try { const s = await stat(path.join(DRAFTS_DIR, name)); files.push({ name, bytes: s.size, modified: s.mtimeMs, authorId: authorOf[name]?.id || "", authorName: authorOf[name]?.name || "" }); } catch {}
+          try { const s = await stat(path.join(DRAFTS_DIR, name)); const dm = org.deliverables[name] || {}; files.push({ name, bytes: s.size, modified: s.mtimeMs, authorId: authorOf[name]?.id || "", authorName: authorOf[name]?.name || "", status: dm.status || "draft", versions: (dm.versions || []).length }); } catch {}
         }
         files.sort((a, b) => b.modified - a.modified);
       } catch { /* no drafts dir yet */ }
       return send(res, 200, { files });
+    }
+    // Deliverable lifecycle: set status (sign-off / mark delivered / reopen).
+    if (p.startsWith("/api/deliverables/") && p.endsWith("/status") && req.method === "POST") {
+      const name = path.basename(decodeURIComponent(p.slice("/api/deliverables/".length, -"/status".length)));
+      if (!/^[a-z0-9][a-z0-9._-]*\.md$/i.test(name)) return send(res, 400, { error: "bad name" });
+      const body = await readBody(req);
+      const st = String(body.status || "");
+      if (!["draft", "qa", "approved", "delivered"].includes(st)) return send(res, 400, { error: "bad status" });
+      const org = await updateOrg((o) => {
+        const d = (o.deliverables[name] = o.deliverables[name] || { status: "draft", versions: [] });
+        d.status = st;
+        if (st === "approved") d.signedOffAt = Date.now();
+        if (st === "delivered") d.deliveredAt = Date.now();
+      });
+      logAudit({ kind: "deliverable", name, actionType: "status:" + st, decision: "you" });
+      return send(res, 200, org.deliverables[name]);
+    }
+    // Deliverable version history (list of prior versions, newest first).
+    if (p.startsWith("/api/deliverables/") && p.endsWith("/versions") && req.method === "GET") {
+      const name = path.basename(decodeURIComponent(p.slice("/api/deliverables/".length, -"/versions".length)));
+      if (!/^[a-z0-9][a-z0-9._-]*\.md$/i.test(name)) return send(res, 400, { error: "bad name" });
+      const org = await readOrg();
+      return send(res, 200, { name, versions: (org.deliverables[name]?.versions || []).slice().reverse() });
+    }
+    // A specific prior version's content (for the diff view).
+    if (p.startsWith("/api/deliverables/") && p.includes("/versions/") && req.method === "GET") {
+      const [nm, , ts] = decodeURIComponent(p.slice("/api/deliverables/".length)).split("/");
+      const name = path.basename(nm || "");
+      if (!/^[a-z0-9][a-z0-9._-]*\.md$/i.test(name) || !/^\d+$/.test(ts || "")) return send(res, 400, { error: "bad request" });
+      const full = path.join(VERSIONS_DIR, `${name}.${ts}`);
+      if (path.dirname(full) !== VERSIONS_DIR) return send(res, 403, { error: "forbidden" });
+      try { return send(res, 200, { name, at: Number(ts), content: await readFile(full, "utf8") }); }
+      catch { return send(res, 404, { error: "not found" }); }
     }
     if (p.startsWith("/api/deliverables/") && req.method === "GET") {
       const name = path.basename(decodeURIComponent(p.slice("/api/deliverables/".length)));
       if (!/^[a-z0-9][a-z0-9._-]*\.md$/i.test(name)) return send(res, 400, { error: "bad name" });
       const full = path.join(DRAFTS_DIR, name);
       if (path.dirname(full) !== DRAFTS_DIR) return send(res, 403, { error: "forbidden" });
-      try { return send(res, 200, { name, content: await readFile(full, "utf8") }); }
-      catch { return send(res, 404, { error: "not found" }); }
+      try {
+        const content = await readFile(full, "utf8");
+        const dm = (await readOrg()).deliverables[name] || {};
+        return send(res, 200, { name, content, status: dm.status || "draft", versions: (dm.versions || []).length, signedOffAt: dm.signedOffAt || 0, deliveredAt: dm.deliveredAt || 0 });
+      } catch { return send(res, 404, { error: "not found" }); }
     }
 
     // Inbox: the single "what needs me" surface. Aggregates pending Latch approvals (live), plus
@@ -1422,7 +1480,7 @@ const server = createServer(async (req, res) => {
         for (const a of org.agents) for (const m of (a.memory || [])) for (const f of (m.files || [])) if (!authorOf[f]) authorOf[f] = a.name;
         for (const name of await readdir(DRAFTS_DIR)) {
           if (!isDeliverableFile(name)) continue;
-          try { const s = await stat(path.join(DRAFTS_DIR, name)); if (s.mtimeMs > seenAt) deliverables.push({ name, bytes: s.size, modified: s.mtimeMs, authorName: authorOf[name] || "" }); } catch {}
+          try { const s = await stat(path.join(DRAFTS_DIR, name)); if (s.mtimeMs > seenAt) deliverables.push({ name, bytes: s.size, modified: s.mtimeMs, authorName: authorOf[name] || "", status: (org.deliverables[name]?.status) || "draft" }); } catch {}
         }
         deliverables.sort((a, b) => b.modified - a.modified);
       } catch { /* no drafts dir yet */ }
