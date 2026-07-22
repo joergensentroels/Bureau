@@ -13,7 +13,8 @@ node test/run-all.mjs --e2e    # also the live autonomy e2e
 
 The runner runs the pure suites always, the server suites only if a server is
 reachable on `BUREAU_PORT` (else it skips them with a note), and the live e2e only
-with `--e2e`. Current totals: **116 pure assertions + 44 server assertions**.
+with `--e2e`. Current totals: **127 pure assertions + 57 server assertions** (plus
+the 10-assertion live e2e).
 
 ## `decision.test.mjs` — pure unit tests (fast, no server)
 
@@ -31,12 +32,13 @@ the guarantee that a policy `allow` can never auto-approve a floored action.
 
 ## `units.test.mjs` — pure unit tests for standalone logic (fast, no server)
 
-73 assertions over the exported helpers: the **SSRF guard** (`ipv4Blocked` /
+84 assertions over the exported helpers: the **SSRF guard** (`ipv4Blocked` /
 `ipBlocked` — every private/internal range + IPv6/mapped), `normalizeAction` (the
 "do what the model meant" action corrections), `safeParse` (tolerant JSON),
 `ragTerms`, `expectsDeliverable`, `resolveReport` (tolerant assignee matching, no
-double-assignment), `goalObjective`, `normKRs`, `cadenceMs`, `cleanPolicyWhen`, and
-`htmlToText`.
+double-assignment), `goalObjective`, `normKRs`, `cadenceMs`, `cleanPolicyWhen`,
+`htmlToText`, `ensureBudget` (org normalization + safe agent defaults), and
+`renderChecklist` (the DoD checklist markdown).
 
 ```
 node test/units.test.mjs
@@ -44,11 +46,13 @@ node test/units.test.mjs
 
 ## `api.test.mjs` — model-free API/CRUD + validation (needs a running server)
 
-33 assertions over the management endpoints — company/budget, guardrails (clamping),
+46 assertions over the management endpoints — company/budget, guardrails (clamping),
 notify (url validation), goals lifecycle, policies validation + CRUD, triggers CRUD
-(+ bad-token rejection on the public endpoint), agents (tier validation), and
-deliverable status transitions + name/status validation. Runs entirely **inside a
-throwaway workspace** it creates and deletes, so your real company is never touched.
+(+ bad-token rejection on the public endpoint), agents (tier validation), deliverable
+status transitions + versions endpoint + name/status validation, schedules CRUD, the
+goal-cadence → linked-schedule wiring, and the reporting endpoints (dashboard / runs /
+performance / audit-filtering). Runs entirely **inside a throwaway workspace** it
+creates and deletes, so your real company is never touched.
 
 ```
 BUREAU_PORT=4174 node server.mjs

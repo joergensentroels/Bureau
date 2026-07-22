@@ -3,6 +3,7 @@
 import {
   ipv4Blocked, ipBlocked, normalizeAction, safeParse, ragTerms, expectsDeliverable,
   resolveReport, goalObjective, normKRs, cadenceMs, cleanPolicyWhen, htmlToText,
+  ensureBudget, renderChecklist,
 } from "../server.mjs";
 
 let pass = 0, fail = 0;
@@ -86,6 +87,32 @@ eq("  empty → {}", cleanPolicyWhen({}), {});
 console.log("# htmlToText");
 { const t = htmlToText("<p>Hi <b>there</b></p><script>alert(1)</script>");
   chk("  strips tags + script, keeps text", /Hi\s+there/.test(t) && !t.includes("alert") && !t.includes("<")); }
+
+console.log("# normalizeAction — more edge cases");
+eq("  exec → shell", normalizeAction({ type: "propose_action", actionType: "terminal", command: "ls" }, "").actionType, "shell");
+eq("  http_request → api_call", normalizeAction({ type: "propose_action", actionType: "http_request" }, "").actionType, "api_call");
+{ const r = normalizeAction({ type: "propose_action", actionType: "note" }, "write a detailed onboarding guide for new hires with sections");
+  // 'note' + a write-y objective but no long content and no url → stays note (not enough to infer file_write)
+  chk("  vague 'note' with short content stays note", r.actionType === "note"); }
+{ const long = "x".repeat(200);
+  const r = normalizeAction({ type: "propose_action", actionType: "other", command: long }, "write a report");
+  eq("  'other' + long write content → file_write", r.actionType, "file_write"); }
+
+console.log("# ensureBudget — org normalization + safe defaults");
+{ const o = ensureBudget({ agents: [{ name: "X", salary: 999 }] });
+  const a = o.agents[0];
+  chk("  agent gets safe defaults", a.tier === "supervised" && Array.isArray(a.allow) && Array.isArray(a.lessons) && a.budgetUsd === 0 && a.tokensUsed === 0);
+  chk("  legacy fake salary removed", a.salary === undefined);
+  chk("  budget/guardrails/collections backfilled", o.budget.tokens === 0 && typeof o.guardrails === "object" && Array.isArray(o.policies) && Array.isArray(o.triggers) && Array.isArray(o.goals) && typeof o.deliverables === "object"); }
+{ const o = ensureBudget({ guardrails: { autoApproveUnderUsd: 5 } });
+  chk("  preserves existing guardrail values", o.guardrails.autoApproveUnderUsd === 5 && o.guardrails.maxActionsPerRun === 0); }
+
+console.log("# renderChecklist — DoD checklist markdown");
+{ const md = renderChecklist({ title: "Welcome note", objective: "write it", attempt: 0, verdict: "shortfall",
+    criteria: [{ text: "has a greeting", status: "met" }, { text: "under 200 words", status: "unmet", note: "too long" }, { text: "signed", status: "open" }] });
+  chk("  header + progress line", md.includes("# Checklist — Welcome note") && md.includes("**Progress:** 1/3 met"));
+  chk("  met item checked, unmet shows note", md.includes("- [x] has a greeting") && md.includes("- [ ] under 200 words — ⚠ too long"));
+  chk("  open item marked not-verified", md.includes("- [ ] signed — ⬜ not yet verified")); }
 
 console.log(`\n${fail === 0 ? "ALL PASS ✓" : "FAILURES ✗"} — ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

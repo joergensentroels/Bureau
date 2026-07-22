@@ -140,7 +140,7 @@ export function decideApproval(tier, actType, next, gr, runAutoApprove, policyEf
   return { auto, approver };
 }
 
-function ensureBudget(org) {
+export function ensureBudget(org) {
   org.budget = { tokens: 0, funds: 0, spent: 0, runs: 0, ...(org.budget || {}) }; // funds = real purchasing money the CEO allocates
   delete org.budget.money; delete org.budget.currency;                 // drop the old fake tycoon money
   if (!Array.isArray(org.purchases)) org.purchases = [];
@@ -1313,7 +1313,7 @@ async function verifyRun(objective, product, files, criteria) {
 // producedFiles, so the verifier never reads it back as evidence — the loop can't grade itself.
 const AGENT_GATE_MAX_ATTEMPTS = 1;   // per-agent leaf gate: 1 verify pass, no self-remediation (team gate remediates)
 const shortTitle = (s, n = 6) => String(s || "task").trim().split(/\s+/).slice(0, n).join(" ") || "task";
-function renderChecklist({ title, objective, criteria, attempt, verdict }) {
+export function renderChecklist({ title, objective, criteria, attempt, verdict }) {
   const done = criteria.filter((c) => c.status === "met").length;
   const tag = (c) => c.status === "met" ? "" : c.status === "unmet" ? (c.note ? ` — ⚠ ${c.note}` : " — ⚠ not yet met") : " — ⬜ not yet verified";
   const lines = criteria.map((c) => `- [${c.status === "met" ? "x" : " "}] ${c.text}${tag(c)}`);

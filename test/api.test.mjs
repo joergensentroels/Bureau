@@ -77,6 +77,29 @@ const ok = (c, m) => (c ? pass : fail).push(m);
     ok((await api("POST", "/api/deliverables/report.md/status", { status: "qa" })).j.status === "qa", "deliverable → qa");
     const appr = (await api("POST", "/api/deliverables/report.md/status", { status: "approved" })).j;
     ok(appr.status === "approved" && appr.signedOffAt > 0, "deliverable → approved stamps signedOffAt");
+    { const v = await api("GET", "/api/deliverables/report.md/versions"); ok(v.status === 200 && Array.isArray(v.j.versions), "deliverable versions endpoint returns an array"); }
+    ok((await api("GET", "/api/deliverables/" + encodeURIComponent("bad name.md") + "/versions")).status === 400, "versions rejects a malformed name (400)");
+
+    // ---- schedules CRUD ----
+    ok((await api("POST", "/api/schedules", { objective: "" })).status === 400, "schedule requires an objective (400)");
+    const sc = await api("POST", "/api/schedules", { objective: "nightly digest", cadence: "weekly" });
+    ok(sc.status === 201 && sc.j.id && sc.j.cadence === "weekly" && sc.j.enabled === true && sc.j.nextRunAt > 0, "schedule created (weekly, enabled, has nextRunAt)");
+    ok((await api("GET", "/api/schedules")).j.schedules.length === 1, "schedule listed");
+    ok((await api("PATCH", "/api/schedules/" + sc.j.id, { enabled: false })).j.enabled === false, "schedule disabled");
+    ok((await api("DELETE", "/api/schedules/" + sc.j.id)).status === 200, "schedule deleted");
+
+    // ---- goal cadence auto-links a schedule; deleting the goal removes it ----
+    const gc = await api("POST", "/api/goals", { title: "Cadenced goal", cadence: "daily" });
+    const linked = (await api("GET", "/api/schedules")).j.schedules.filter((s) => s.goalId === gc.j.id);
+    ok(linked.length === 1 && linked[0].cadence === "daily", "goal cadence auto-creates one linked daily schedule");
+    await api("DELETE", "/api/goals/" + gc.j.id);
+    ok((await api("GET", "/api/schedules")).j.schedules.filter((s) => s.goalId === gc.j.id).length === 0, "deleting the goal removes its linked schedule");
+
+    // ---- reporting endpoints: well-formed structures on a fresh workspace ----
+    { const d = (await api("GET", "/api/dashboard")).j; ok(d && d.agents === 0 && typeof d.schedules === "object" && typeof d.goals === "object", "dashboard well-formed (0 agents on a fresh ws)"); }
+    { const r = (await api("GET", "/api/runs")).j; ok(Array.isArray(r.runs) && r.trends && r.trends.total === 0, "runs history empty + trends on a fresh ws"); }
+    { const pf = (await api("GET", "/api/performance")).j; ok(Array.isArray(pf.agents) && typeof pf.auditWindow === "number", "performance well-formed"); }
+    { const au = (await api("GET", "/api/audit?kind=deliverable")).j; ok(Array.isArray(au.audit) && au.totals && au.audit.every((r) => r.kind === "deliverable"), "audit endpoint filters by kind"); }
   } finally {
     // always tear the workspace down
     WS = "default";
