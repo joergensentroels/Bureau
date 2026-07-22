@@ -1577,7 +1577,7 @@ async function loadGoals(){
     const runs=(g.runs||[]).slice(0,6), stcls=g.status==="done"?"delivered":g.status==="paused"?"draft":"qa";
     return `<div class="goalcard" data-id="${esc(g.id)}">
       <div class="row" style="justify-content:space-between;align-items:flex-start;gap:8px">
-        <div style="min-width:0;flex:1"><div class="gtitle">${esc(g.title)} <span class="stbadge ${stcls}">${esc(g.status)}</span>${g.cadence&&g.cadence!=="off"?` <span class="stbadge qa" title="auto-advances ${esc(g.cadence)}">⏱ ${esc(g.cadence)}</span>`:""}</div>${g.detail?`<div class="dim" style="font-size:11px;margin-top:2px">${esc(g.detail)}</div>`:""}</div>
+        <div style="min-width:0;flex:1"><div class="gtitle">${g.hush?`<span title="hush — local model only">🤫 </span>`:""}${esc(g.title)} <span class="stbadge ${stcls}">${esc(g.status)}</span>${g.cadence&&g.cadence!=="off"?` <span class="stbadge qa" title="auto-advances ${esc(g.cadence)}">⏱ ${esc(g.cadence)}</span>`:""}</div>${g.detail?`<div class="dim" style="font-size:11px;margin-top:2px">${esc(g.detail)}</div>`:""}</div>
         <div class="row" style="gap:6px;flex:none"><button class="miniadd gwork">▶ Work on it</button><button class="miniadd gedit">Edit</button></div>
       </div>
       ${krs.length?`<div class="gbar"><div class="gbarfill" style="width:${pct}%"></div></div>
@@ -1608,6 +1608,8 @@ function openGoalDialog(g){
       <div><label>Detail (optional)</label><textarea id="gdetail" placeholder="Context, constraints, what 'good' looks like.">${isEdit?esc(g.detail||""):""}</textarea></div>
       <div><label>Key results (one per line)</label><textarea id="gkrs" placeholder="Publish 4 blog posts&#10;Launch the referral program&#10;Get 20 signups from outreach">${isEdit?esc((g.keyResults||[]).map(k=>k.text).join("\n")):""}</textarea></div>
       <div><label>Auto-advance <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">— have Bureau work toward it on a schedule</span></label><select id="gcadence"><option value="off"${(!isEdit||(g.cadence||"off")==="off")?" selected":""}>off</option><option value="daily"${isEdit&&g.cadence==="daily"?" selected":""}>every day</option><option value="weekly"${isEdit&&g.cadence==="weekly"?" selected":""}>every week</option></select></div>
+      <label class="row" style="text-transform:none;letter-spacing:0;color:var(--ink-2);gap:8px;cursor:pointer" title="Hush: every run toward this goal (manual or auto-advance) stays on the local model — no agent may use the paid/external LLM, whatever its budget.">
+        <input id="ghush" type="checkbox" style="width:auto"${isEdit&&g.hush?" checked":""}> 🤫 hush (local model only)</label>
       ${isEdit?`<div><label>Status</label><select id="gstatus"><option value="active"${g.status==="active"?" selected":""}>active</option><option value="paused"${g.status==="paused"?" selected":""}>paused</option><option value="done"${g.status==="done"?" selected":""}>done</option></select></div>`:""}
     </div>
     <div class="row" style="justify-content:flex-end;gap:10px;margin-top:16px"><button id="gcancel">Cancel</button><button class="primary" id="gsave">${isEdit?"Save":"Add goal"}</button></div></div>`;
@@ -1619,7 +1621,7 @@ function openGoalDialog(g){
     const title=wrap.querySelector("#gtitle").value.trim(); if(!title){ wrap.querySelector("#gtitle").focus(); return; }
     const existing=isEdit?(g.keyResults||[]):[];
     const keyResults=wrap.querySelector("#gkrs").value.split("\n").map(s=>s.trim()).filter(Boolean).map(text=>{ const e=existing.find(k=>k.text===text); return {text, done: e?!!e.done:false}; });
-    const payload={ title, detail:wrap.querySelector("#gdetail").value.trim(), keyResults, cadence:wrap.querySelector("#gcadence").value };
+    const payload={ title, detail:wrap.querySelector("#gdetail").value.trim(), keyResults, cadence:wrap.querySelector("#gcadence").value, hush:wrap.querySelector("#ghush").checked };
     if(isEdit){ payload.status=wrap.querySelector("#gstatus").value; await api("PATCH","/api/goals/"+g.id,payload); }
     else await api("POST","/api/goals",payload);
     wrap.remove(); loadGoals(); loadDashboard();
@@ -1633,7 +1635,7 @@ async function loadTriggers(){
   if(!list.length){ box.innerHTML=`<div class="dim">No triggers. Create one to let an external event (a webhook POST) start a run.</div>`; return; }
   box.innerHTML=list.map(t=>{
     const url=location.origin+"/api/trigger/"+t.token;
-    return `<div class="delivrow" style="cursor:default;align-items:flex-start"><span>${t.enabled?"⚡":"⏸️"}</span><span style="flex:1;min-width:0"><span class="dn" style="display:block">${esc(t.name)}${t.fires?` <span class="dim" style="font-weight:400">· fired ${t.fires}×</span>`:""}</span><span class="dim" style="font-size:11px;display:block;white-space:normal">${esc(t.objective.slice(0,80))}${t.objective.length>80?"…":""}</span><span style="font-size:10px;display:flex;gap:6px;align-items:center;margin-top:4px"><code style="font-size:10px;overflow:hidden;text-overflow:ellipsis;max-width:210px;white-space:nowrap;color:var(--ink-3)">${esc(url)}</code><button class="rvbtn tcopy" data-u="${esc(url)}">copy URL</button></span></span><span class="row" style="gap:6px;flex:none"><button class="rvbtn ttoggle" data-id="${t.id}" data-en="${t.enabled?1:0}">${t.enabled?"Pause":"Enable"}</button><button class="rvbtn tdel" data-id="${t.id}">Delete</button></span></div>`;
+    return `<div class="delivrow" style="cursor:default;align-items:flex-start"><span>${t.enabled?"⚡":"⏸️"}</span><span style="flex:1;min-width:0"><span class="dn" style="display:block">${t.hush?`<span title="hush — local model only">🤫 </span>`:""}${esc(t.name)}${t.fires?` <span class="dim" style="font-weight:400">· fired ${t.fires}×</span>`:""}</span><span class="dim" style="font-size:11px;display:block;white-space:normal">${esc(t.objective.slice(0,80))}${t.objective.length>80?"…":""}</span><span style="font-size:10px;display:flex;gap:6px;align-items:center;margin-top:4px"><code style="font-size:10px;overflow:hidden;text-overflow:ellipsis;max-width:210px;white-space:nowrap;color:var(--ink-3)">${esc(url)}</code><button class="rvbtn tcopy" data-u="${esc(url)}">copy URL</button></span></span><span class="row" style="gap:6px;flex:none"><button class="rvbtn ttoggle" data-id="${t.id}" data-en="${t.enabled?1:0}">${t.enabled?"Pause":"Enable"}</button><button class="rvbtn tdel" data-id="${t.id}">Delete</button></span></div>`;
   }).join("");
   box.querySelectorAll(".tcopy").forEach(b=>b.onclick=()=>{ try{ navigator.clipboard.writeText(b.dataset.u); }catch{} b.textContent="copied ✓"; setTimeout(()=>b.textContent="copy URL",1200); });
   box.querySelectorAll(".ttoggle").forEach(b=>b.onclick=async()=>{ await api("PATCH","/api/triggers/"+b.dataset.id,{enabled:b.dataset.en!=="1"}); loadTriggers(); });
@@ -1648,6 +1650,8 @@ function openTriggerDialog(){
       <div><label>Name</label><input id="tname" placeholder="New GitHub issue"></div>
       <div><label>Run this objective</label><textarea id="tobj" placeholder="Triage the incoming issue and draft a first response."></textarea></div>
       <div><label>Run as</label><select id="twho">${agentOpts}</select></div>
+      <label class="row" style="text-transform:none;letter-spacing:0;color:var(--ink-2);gap:8px;cursor:pointer" title="Hush: every run this trigger fires stays on the local model — no agent may use the paid/external LLM, whatever its budget.">
+        <input id="thush" type="checkbox" style="width:auto"> 🤫 hush (local model only)</label>
     </div>
     <div class="row" style="justify-content:flex-end;gap:10px;margin-top:16px"><button id="tc">Cancel</button><button class="primary" id="ts">Create</button></div></div>`;
   document.body.appendChild(wrap);
@@ -1655,8 +1659,8 @@ function openTriggerDialog(){
   wrap.querySelector("#tc").onclick=()=>wrap.remove();
   wrap.querySelector("#ts").onclick=async()=>{
     const objective=wrap.querySelector("#tobj").value.trim(); if(!objective){ wrap.querySelector("#tobj").focus(); return; }
-    const who=wrap.querySelector("#twho").value, name=wrap.querySelector("#tname").value.trim()||"Trigger";
-    const body=who==="__company__"?{name,objective,mode:"company"}:{name,objective,mode:"single",agentId:who};
+    const who=wrap.querySelector("#twho").value, name=wrap.querySelector("#tname").value.trim()||"Trigger", hush=wrap.querySelector("#thush").checked;
+    const body=who==="__company__"?{name,objective,mode:"company",hush}:{name,objective,mode:"single",agentId:who,hush};
     await api("POST","/api/triggers",body); wrap.remove(); loadTriggers();
   };
   wrap.querySelector("#tname").focus();
@@ -1669,7 +1673,7 @@ async function loadSchedules(){
   box.innerHTML=list.map(s=>{ const who=s.mode==="company"?"whole company":((ORG.agents.find(a=>a.id===s.agentId)||{}).name||"an agent");
     const next=s.enabled?`next ${new Date(s.nextRunAt).toLocaleString()}`:"paused";
     return `<div class="delivrow" style="cursor:default"><span>${s.enabled?"⏱️":"⏸️"}</span>
-      <span style="flex:1;min-width:0"><span class="dn" style="display:block;white-space:normal">${esc(s.objective)}</span><span class="dim" style="font-size:11px">${CADENCE_LABEL[s.cadence]||s.cadence} · ${esc(who)} · ${next}</span></span>
+      <span style="flex:1;min-width:0"><span class="dn" style="display:block;white-space:normal">${s.hush?`<span title="hush — local model only">🤫 </span>`:""}${esc(s.objective)}</span><span class="dim" style="font-size:11px">${CADENCE_LABEL[s.cadence]||s.cadence} · ${esc(who)} · ${next}${s.hush?" · local only":""}</span></span>
       <button class="rvbtn" data-act="run" data-id="${s.id}">Run now</button>
       <button class="rvbtn" data-act="toggle" data-id="${s.id}" data-en="${s.enabled?1:0}">${s.enabled?"Pause":"Resume"}</button>
       <button class="rvbtn" data-act="del" data-id="${s.id}" title="Delete">✕</button></div>`;
@@ -1689,6 +1693,8 @@ function openScheduleDialog(){
       <div><label>Objective</label><textarea id="scobj" placeholder="Summarize any new customer feedback and save it as a report."></textarea></div>
       <div><label>Assign to</label><select id="scwho"><option value="__company__">The whole company — Manager delegates</option>${ORG.agents.map(a=>`<option value="${a.id}">${esc(a.name)} — ${esc(a.role)}</option>`).join("")}</select></div>
       <div><label>How often</label><select id="sccad"><option value="hourly">Every hour</option><option value="daily" selected>Every day</option><option value="weekly">Every week</option></select></div>
+      <label class="row" style="text-transform:none;letter-spacing:0;color:var(--ink-2);gap:8px;cursor:pointer" title="Hush: every run of this schedule stays on the local model — no agent may use the paid/external LLM, whatever its budget.">
+        <input id="schush" type="checkbox" style="width:auto"> 🤫 hush (local model only)</label>
       <div class="dim" style="font-size:11px">Scheduled runs auto-approve their actions (they run unattended). First run happens one interval from now; use “Run now” to fire immediately.</div>
     </div>
     <div class="row" style="justify-content:flex-end;gap:10px;margin-top:16px"><button id="scc">Cancel</button><button class="primary" id="scg">Add schedule</button></div></div>`;
@@ -1696,8 +1702,8 @@ function openScheduleDialog(){
   wrap.onclick=e=>{ if(e.target===wrap) wrap.remove(); };
   wrap.querySelector("#scc").onclick=()=>wrap.remove();
   wrap.querySelector("#scg").onclick=async()=>{ const objective=wrap.querySelector("#scobj").value.trim(); if(!objective){wrap.querySelector("#scobj").focus();return;}
-    const who=wrap.querySelector("#scwho").value, cadence=wrap.querySelector("#sccad").value;
-    const body=who==="__company__"?{mode:"company",objective,cadence}:{mode:"single",agentId:who,objective,cadence};
+    const who=wrap.querySelector("#scwho").value, cadence=wrap.querySelector("#sccad").value, hush=wrap.querySelector("#schush").checked;
+    const body=who==="__company__"?{mode:"company",objective,cadence,hush}:{mode:"single",agentId:who,objective,cadence,hush};
     await api("POST","/api/schedules",body); wrap.remove(); loadSchedules();
   };
   wrap.querySelector("#scobj").focus();
