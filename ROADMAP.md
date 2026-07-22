@@ -8,14 +8,14 @@ _Last updated 2026-07-22._
 
 ---
 
-## Phase 2 — Next (in progress)
+## Phase 2 — Complete ✅
 
 Raise what Bureau produces and how it reaches you.
 
 1. **Fix delegation breadth** ✅ — Manager fans work out to several agents (dependency-ordered); plain-text fallback decomposition prevents single-task collapse when the model's JSON fails.
 2. **Broaden real actions** ✅ — `api_call` (guarded outbound HTTP) + `shell` (VM command via the worker), both approval-gated and NEVER auto-approved. (email stays as the existing approval-gated `email_draft`.)
 3. **Richer outputs + RAG memory** ✅ — richer file types (csv/json/code/etc.) + HTML/print export; keyword RAG injects relevant past deliverables into agent context so work compounds.
-4. **Real notifications** ⬜ — push to you (desktop/email) when something needs a decision or a run finishes.
+4. **Real notifications** ✅ — browser desktop alerts when a decision is waiting (on the inbox poll, permission-gated) + an optional outgoing webhook fired on run-done / needs-approval (wire to Slack/email yourself).
 
 ---
 

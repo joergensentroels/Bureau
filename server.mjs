@@ -35,7 +35,7 @@ let TOKEN = "";
 
 // ---------- org store --------------------------------------------------------
 
-const EMPTY_ORG = { ceo: null, vision: "", companyName: "", agents: [], budget: { tokens: 0 }, activity: [], schedules: [], purchases: [], audit: [], guardrails: {}, deliverables: {}, goals: [] };
+const EMPTY_ORG = { ceo: null, vision: "", companyName: "", agents: [], budget: { tokens: 0 }, activity: [], schedules: [], purchases: [], audit: [], guardrails: {}, deliverables: {}, goals: [], notify: {} };
 // The real "economy": an agent's budget is a DOLLAR allowance for the PAID API model. $0 (default)
 // means the agent may only use the free local model. Token usage is the actual cost, tracked per agent.
 // $ per 1K tokens on the paid model — converts tokens used on paid runs into dollars against an
@@ -52,6 +52,7 @@ function ensureBudget(org) {
   if (!Array.isArray(org.audit)) org.audit = [];                        // append-only provenance log (newest first)
   if (!org.deliverables || typeof org.deliverables !== "object" || Array.isArray(org.deliverables)) org.deliverables = {}; // filename -> {status, versions[], updatedAt, signedOffAt, deliveredAt}
   if (!Array.isArray(org.goals)) org.goals = [];                        // OKR-style goals: {id,title,detail,status,keyResults[],runs[]}
+  org.notify = { webhook: "", ...(org.notify || {}) };                  // optional outgoing webhook for external push (Slack/email/etc.)
   // Guardrails: autoApproveUnderUsd = purchases/spend below this may auto-approve; maxActionsPerRun =
   // hard cap on real actions per run (0 = unlimited). Per-agent action allowlists live on the agent.
   org.guardrails = { autoApproveUnderUsd: 0, maxActionsPerRun: 0, ...(org.guardrails || {}) };
@@ -95,6 +96,18 @@ function logAudit(entry) {
   return updateOrg((o) => {
     o.audit = [{ id: newId("a"), at: Date.now(), ...entry }, ...(o.audit || [])].slice(0, 400);
   }).catch(() => {});
+}
+// Optional outgoing webhook for external push (Slack/email relay/etc.). User-configured URL, so
+// this is not model-controlled; fire-and-forget with a short timeout. No-op if unset.
+async function fireWebhook(event, payload) {
+  let url = "";
+  try { url = (await readOrg()).notify?.webhook || ""; } catch { return; }
+  if (!/^https?:\/\//i.test(url)) return;
+  try {
+    const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 5000);
+    await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ event, at: Date.now(), ...payload }), signal: ctl.signal }).catch(() => {});
+    clearTimeout(to);
+  } catch {}
 }
 // Emit a real-action result to the run stream AND record it in the audit log (one provenance row
 // per action the company actually took, with how it was decided).
@@ -748,6 +761,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
       title: next.title || "", details: next.details || "", command: next.command || "",
       corrected, autoApprove: effectiveAuto,
     });
+    if (!effectiveAuto) fireWebhook("needs_approval", { actionType: next.actionType || "other", title: next.title || "", agent: who });
 
     let verdict = "pending";
     if (effectiveAuto) {
@@ -1311,6 +1325,7 @@ async function runGated(run, worker, persistExtra, perAgentTally) {
     await updateOrg((o) => { const g = (o.goals || []).find((x) => x.id === run.goalId); if (g) g.runs = [{ runId: run.id, at: Date.now(), verdict, objective: String(run.objective).slice(0, 120) }, ...(g.runs || [])].slice(0, 20); }).catch(() => {});
   }
   finishRun(run, { verdict, met, unmet: unmet.length, total: run.criteria.length, criteria: run.criteria });
+  fireWebhook("run_done", { objective: run.objective, verdict, agent: persistExtra.agent || "", tokens });
   return { verdict, tokens };
 }
 
@@ -1493,6 +1508,17 @@ const server = createServer(async (req, res) => {
     if (p === "/api/guardrails" && req.method === "GET") {
       const org = await readOrg();
       return send(res, 200, org.guardrails || {});
+    }
+    // Notification webhook (optional external push).
+    if (p === "/api/notify" && req.method === "GET") {
+      return send(res, 200, (await readOrg()).notify || {});
+    }
+    if (p === "/api/notify" && req.method === "POST") {
+      const body = await readBody(req);
+      const url = String(body.webhook || "").trim().slice(0, 500);
+      if (url && !/^https?:\/\//i.test(url)) return send(res, 400, { error: "webhook must be an http(s) URL" });
+      const org = await updateOrg((o) => { o.notify.webhook = url; });
+      return send(res, 200, org.notify);
     }
     if (p === "/api/guardrails" && req.method === "POST") {
       const body = await readBody(req);
