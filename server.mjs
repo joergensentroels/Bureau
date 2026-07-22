@@ -890,9 +890,23 @@ async function delegate(run, org, managerName, managerId, reports, objective, pr
   let tasks = (Array.isArray(plan?.tasks) ? plan.tasks : [])
     .map((t) => ({ agent: resolveReport(reports, t.assignee, used), task: String(t.task || "").slice(0, 500) }))
     .filter((t) => t.agent && t.task).slice(0, 4);
+  if (!tasks.length && reports.length >= 2) {
+    // STRICT JSON decompose produced nothing usable (the weak local model often emits empty/garbled
+    // JSON). Retry as a PLAIN-TEXT list — one sub-task per line — which the model handles far more
+    // reliably, then distribute the lines round-robin across the reports so the work still fans out.
+    try {
+      const msgs = [
+        { role: "system", content: "List 2 to 4 short, concrete sub-tasks that together accomplish the objective. ONE sub-task per line. No numbering, no preamble, no blank lines." },
+        { role: "user", content: `Objective: ${objective}\n\n/no_think` },
+      ];
+      const raw = await askLlm(msgs, { maxTokens: 500 });
+      const t = estTokens(msgs) + Math.ceil(raw.length / 4); tokens += t; addTally(tally, managerId, t);
+      const lines = String(raw).replace(/<think>[\s\S]*?<\/think>/gi, "").split("\n").map((l) => l.replace(/^[\s\-*0-9.)]+/, "").trim()).filter((l) => l.length > 8).slice(0, 4);
+      if (lines.length >= 2) tasks = lines.map((task, i) => ({ agent: reports[i % reports.length], task: task.slice(0, 500) }));
+    } catch {}
+  }
   if (!tasks.length) {
-    // Fallback: the model returned no usable tasks (empty plan, or assignees that matched no report).
-    // Log it so the collapse-to-one-task case is visible instead of silently swallowed.
+    // Last resort: assign the whole objective to one report. Logged so the collapse is visible.
     const why = Array.isArray(plan?.tasks) && plan.tasks.length ? "no assignee matched a direct report" : "planner returned no tasks";
     emit(run, "report", { manager: managerName, depth, text: `Delegation fell back to a single task (${why}); assigned the whole objective to ${reports[0]?.name || "the first report"}.` });
     console.warn(`[delegate] single-task fallback for "${managerName}" — ${why}; raw plan.tasks=${JSON.stringify(plan?.tasks ?? null)?.slice(0, 300)}`);

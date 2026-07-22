@@ -12,7 +12,7 @@ _Last updated 2026-07-22._
 
 Raise what Bureau produces and how it reaches you.
 
-1. **Fix delegation breadth** ⬜ — Manager fans work out to several agents in parallel (dependency-ordered) instead of collapsing to one task. Foundational.
+1. **Fix delegation breadth** ✅ — Manager fans work out to several agents (dependency-ordered); plain-text fallback decomposition prevents single-task collapse when the model's JSON fails.
 2. **Broaden real actions** ⬜ — email-via-approval, structured API calls, shell/code execution on the VM.
 3. **Richer outputs + RAG memory** ⬜ — export (PDF/code/spreadsheets); agents read past deliverables so work compounds.
 4. **Real notifications** ⬜ — push to you (desktop/email) when something needs a decision or a run finishes.
