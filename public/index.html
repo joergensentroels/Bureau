@@ -478,11 +478,37 @@ function auditLine(r){
   const ic={file_write:"📄",web_search:"🔎",web_research:"🌐",read_file:"📖",purchase:"🛒"}[r.actionType]||"•";
   return `<div class="ibrow"><span>${ic}</span><div class="ibmain"><div class="ibt">${esc(r.agent||"")} · ${esc(r.actionType||"action")}</div><div class="ibd">${r.ok?"✓":"✗"} ${esc(r.url||r.error||"")}${r.bytes?` · ${(r.bytes/1024).toFixed(1)} KB`:""} · ${ago(r.at)}</div></div>${dec}</div>`;
 }
+const POL_ACTIONS=[["","(any action)"],["web_search","web search"],["web_research","fetch page"],["read_file","read file"],["file_write","write file"],["note","note"],["purchase","purchase"],["api_call","API call"],["shell","shell"],["email_draft","send email"]];
+const POL_EFFECTS={block:"🚫 Block",require:"✋ Require me",allow:"✅ Auto-allow"};
+function policySummary(r){
+  const w=r.when||{}; const parts=[];
+  if(w.actionType) parts.push(`action is <b>${esc(w.actionType)}</b>`); else parts.push("<b>any action</b>");
+  if(w.agentId){ const a=ORG.agents.find(x=>x.id===w.agentId); parts.push(`by <b>${esc(a?a.name:w.agentId)}</b>`); }
+  if(w.costOver!=null) parts.push(`cost &gt; <b>$${w.costOver}</b>`);
+  if(w.costUnder!=null) parts.push(`cost &lt; <b>$${w.costUnder}</b>`);
+  if(w.titleContains) parts.push(`title contains "<b>${esc(w.titleContains)}</b>"`);
+  if(w.urlHost) parts.push(`host is <b>${esc(w.urlHost)}</b>`);
+  const eff=POL_EFFECTS[r.then]||r.then;
+  return `<b>${eff.split(" ")[0]}</b> ${eff.split(" ").slice(1).join(" ")} when ${parts.join(" and ")}${r.note?` <span class="dim">— ${esc(r.note)}</span>`:""}`;
+}
+async function renderPolicies(box){
+  let list=[]; try{ list=(await api("GET","/api/policies")).policies||[]; }catch{}
+  if(!list.length){ box.innerHTML=`<div class="dim" style="font-size:12px">No policy rules. Rules are checked top-to-bottom; the first match wins. A rule can <b>block</b> an action, <b>require</b> your approval, or <b>auto-allow</b> it — but auto-allow can never override the hard floor (shell / API / email / over-ceiling always ask you).</div>`; return; }
+  box.innerHTML=list.map((r,i)=>`<div class="ibrow" style="align-items:center">
+      <span class="dim" style="font-size:11px;width:16px">${i+1}</span>
+      <div class="ibmain"><div class="ibt" style="font-weight:400;font-size:12px">${policySummary(r)}</div></div>
+      <label class="allowchk" title="enabled"><input type="checkbox" data-pt="${r.id}" ${r.enabled!==false?"checked":""}></label>
+      <button data-pd="${r.id}" style="padding:2px 8px">✕</button>
+    </div>`).join("");
+  box.querySelectorAll("[data-pt]").forEach(c=>c.onchange=async()=>{ await api("PATCH","/api/policies/"+c.dataset.pt,{enabled:c.checked}); renderPolicies(box); });
+  box.querySelectorAll("[data-pd]").forEach(b=>b.onclick=async()=>{ await api("DELETE","/api/policies/"+b.dataset.pd); renderPolicies(box); });
+}
 async function openGuardrails(){
   let g; try{ g=await api("GET","/api/guardrails"); }catch{ g={}; }
   let nt; try{ nt=await api("GET","/api/notify"); }catch{ nt={}; }
+  const agentOpts=`<option value="">(any agent)</option>`+ORG.agents.map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join("");
   const wrap=el("div","modalwrap");
-  wrap.innerHTML=`<div class="modal" style="max-width:440px">
+  wrap.innerHTML=`<div class="modal" style="max-width:560px">
     <h1 style="font-size:16px;margin:0 0 4px;text-transform:none">🛡️ Guardrails</h1>
     <div class="dim" style="font-size:12px;margin-bottom:14px">Company-wide limits on what agents can do unattended.</div>
     <div class="fields">
@@ -491,14 +517,54 @@ async function openGuardrails(){
       <div><label>Notification webhook <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">— optional; POSTed on run-done &amp; needs-approval</span></label><input id="gWebhook" type="text" placeholder="https://hooks.slack.com/… (blank = none)" value="${esc(nt.webhook||"")}"></div>
     </div>
     <div class="dim" style="font-size:11px;margin-top:8px">Purchases over the threshold always require your decision in Latch — even on auto-approve or scheduled runs. Which action types each agent may use is set per-agent (open an agent → Advanced).</div>
-    <div class="row" style="justify-content:flex-end;gap:10px;margin-top:16px"><button id="gc">Cancel</button><button class="primary" id="gs">Save</button></div></div>`;
+    <div class="row" style="justify-content:flex-end;gap:10px;margin-top:12px"><button class="primary" id="gs">Save limits</button></div>
+    <hr style="border:none;border-top:1px solid var(--line-2);margin:14px 0">
+    <h2 style="font-size:14px;margin:0 0 4px;text-transform:none">📜 Policy rules</h2>
+    <div class="dim" style="font-size:11px;margin-bottom:8px">Checked top-to-bottom; first match wins. Layered on top of the guardrails above and each agent's autonomy tier.</div>
+    <div id="pollist" style="margin-bottom:10px"></div>
+    <div style="background:var(--panel-2);border:1px solid var(--line-2);border-radius:8px;padding:10px">
+      <div class="dim" style="font-size:11px;margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Add a rule</div>
+      <div class="row" style="gap:6px;flex-wrap:wrap;align-items:center;font-size:12px">
+        <select id="pThen" style="width:auto">${Object.entries(POL_EFFECTS).map(([v,l])=>`<option value="${v}">${l}</option>`).join("")}</select>
+        <span>when</span>
+        <select id="pAction" style="width:auto">${POL_ACTIONS.map(([v,l])=>`<option value="${v}">${l}</option>`).join("")}</select>
+        <span>by</span>
+        <select id="pAgent" style="width:auto">${agentOpts}</select>
+      </div>
+      <div class="row" style="gap:6px;flex-wrap:wrap;align-items:center;font-size:12px;margin-top:6px">
+        <span>cost &gt; $</span><input id="pOver" type="number" min="0" step="1" style="width:64px" placeholder="—">
+        <span>cost &lt; $</span><input id="pUnder" type="number" min="0" step="1" style="width:64px" placeholder="—">
+        <input id="pTitle" type="text" placeholder="title contains…" style="width:130px">
+        <input id="pHost" type="text" placeholder="url host…" style="width:130px">
+      </div>
+      <div class="row" style="gap:6px;align-items:center;margin-top:6px">
+        <input id="pNote" type="text" placeholder="note (why — optional)" style="flex:1">
+        <button class="primary" id="pAdd">Add rule</button>
+      </div>
+    </div>
+    <div class="row" style="justify-content:flex-end;gap:10px;margin-top:16px"><button id="gc">Close</button></div></div>`;
   document.body.appendChild(wrap);
+  const polbox=wrap.querySelector("#pollist"); renderPolicies(polbox);
   wrap.onclick=e=>{ if(e.target===wrap) wrap.remove(); };
   wrap.querySelector("#gc").onclick=()=>wrap.remove();
   wrap.querySelector("#gs").onclick=async()=>{
     await api("POST","/api/guardrails",{ autoApproveUnderUsd:parseFloat(wrap.querySelector("#gAuto").value)||0, maxActionsPerRun:parseInt(wrap.querySelector("#gCap").value)||0 });
     await api("POST","/api/notify",{ webhook: wrap.querySelector("#gWebhook").value.trim() });
-    wrap.remove();
+    const b=wrap.querySelector("#gs"); const t=b.textContent; b.textContent="Saved ✓"; setTimeout(()=>{ b.textContent=t; },1200);
+  };
+  wrap.querySelector("#pAdd").onclick=async()=>{
+    const when={}; const v=id=>wrap.querySelector(id).value.trim();
+    if(v("#pAction")) when.actionType=v("#pAction");
+    if(v("#pAgent")) when.agentId=v("#pAgent");
+    if(v("#pOver")!=="") when.costOver=parseFloat(v("#pOver"));
+    if(v("#pUnder")!=="") when.costUnder=parseFloat(v("#pUnder"));
+    if(v("#pTitle")) when.titleContains=v("#pTitle");
+    if(v("#pHost")) when.urlHost=v("#pHost");
+    if(!Object.keys(when).length){ alert("Add at least one condition (action, agent, cost, title, or host)."); return; }
+    try{ await api("POST","/api/policies",{ then:wrap.querySelector("#pThen").value, when, note:v("#pNote") });
+      wrap.querySelector("#pTitle").value=wrap.querySelector("#pHost").value=wrap.querySelector("#pNote").value=wrap.querySelector("#pOver").value=wrap.querySelector("#pUnder").value="";
+      renderPolicies(polbox);
+    }catch(e){ alert("Could not add rule: "+(e.message||e)); }
   };
 }
 const ORG_TEMPLATES={
@@ -1561,7 +1627,7 @@ function handleEvent(ev){
        ${d.autoApprove?`<div class="waiting">auto-approving (playtest)…</div>`
                       :`<div class="waiting">⏳ waiting on you — decide it in <a href="${latch}" target="_blank">Latch ↗</a></div>`}`, dep);
   }
-  else if(ev.type==="verdict"){ const how = d.approver&&d.approver.indexOf("tier:")===0 ? `auto-approved by autonomy tier (${esc(d.approver.split(":")[1])})` : d.auto?"auto-approved (playtest)":"decided in Latch"; addEv(d.verdict==="approved"?"approved":"denied", who(d.verdict==="approved"?"approved":"denied"),`<div class="dim">${how}</div>`, dep); }
+  else if(ev.type==="verdict"){ const how = d.approver&&d.approver.indexOf("tier:")===0 ? `auto-approved by autonomy tier (${esc(d.approver.split(":")[1])})` : d.approver==="policy" ? "auto-approved by company policy" : d.auto?"auto-approved (playtest)":"decided in Latch"; addEv(d.verdict==="approved"?"approved":"denied", who(d.verdict==="approved"?"approved":"denied"),`<div class="dim">${how}</div>`, dep); }
   else if(ev.type==="result"){ const at=d.actionType;
     const meta={ file_write:{icon:"📄",ok:"saved file",fail:"save failed"}, web_search:{icon:"🔎",ok:"web search (worker VM)",fail:"search failed"}, read_file:{icon:"📖",ok:"read past document",fail:"read failed"}, purchase:{icon:"🛒",ok:"purchase authorized",fail:"purchase failed"}, shell:{icon:"⌨️",ok:"ran command (worker VM)",fail:"command failed"}, api_call:{icon:"🔌",ok:"API call",fail:"API call failed"} }[at]||{icon:"🌐",ok:"fetched web page",fail:"fetch failed"};
     const okDetail = at==="file_write"?`${d.bytes.toLocaleString()} bytes written to ${esc(d.url)}`

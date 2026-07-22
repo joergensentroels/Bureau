@@ -70,16 +70,56 @@ function requiresCeoAlways(actType, next, gr) {
   }
   return false;
 }
+const POLICY_ACTIONS = ["web_search", "web_research", "read_file", "file_write", "note", "purchase", "api_call", "shell", "email_draft"];
+// Sanitize a rule's condition clause: keep only recognized, well-typed conditions.
+function cleanPolicyWhen(w) {
+  const out = {};
+  if (w && typeof w === "object") {
+    if (w.actionType && POLICY_ACTIONS.includes(String(w.actionType).toLowerCase())) out.actionType = String(w.actionType).toLowerCase();
+    if (w.agentId) out.agentId = String(w.agentId).slice(0, 40);
+    if (w.costOver != null && Number.isFinite(+w.costOver) && +w.costOver >= 0) out.costOver = +w.costOver;
+    if (w.costUnder != null && Number.isFinite(+w.costUnder) && +w.costUnder >= 0) out.costUnder = +w.costUnder;
+    if (w.titleContains) out.titleContains = String(w.titleContains).slice(0, 80);
+    if (w.urlHost) out.urlHost = String(w.urlHost).slice(0, 120).toLowerCase();
+  }
+  return out;
+}
+
+// Declarative policy rules — a reviewable, ordered rule table layered on top of guardrails + tiers.
+// First matching enabled rule wins. `then`: "block" (refuse the action outright), "require" (force
+// CEO approval, overriding any tier/run-auto), "allow" (auto-approve — still clamped by the hard floor).
+// ctx = { actionType, agentId, cost, title, urlHost }. Returns { effect, rule }.
+export function evaluatePolicy(policies, ctx) {
+  for (const r of policies || []) {
+    if (!r || r.enabled === false) continue;
+    const w = r.when || {};
+    if (w.actionType && String(w.actionType).toLowerCase() !== ctx.actionType) continue;
+    if (w.agentId && w.agentId !== ctx.agentId) continue;
+    if (w.costOver != null && !(Number(ctx.cost) > Number(w.costOver))) continue;
+    if (w.costUnder != null && !(Number(ctx.cost) < Number(w.costUnder))) continue;
+    if (w.titleContains && !String(ctx.title || "").toLowerCase().includes(String(w.titleContains).toLowerCase())) continue;
+    if (w.urlHost && String(ctx.urlHost || "").toLowerCase() !== String(w.urlHost).toLowerCase()) continue;
+    if (!["block", "require", "allow"].includes(r.then)) continue;   // ignore malformed effect
+    return { effect: r.then, rule: r };
+  }
+  return { effect: "none", rule: null };
+}
+
 // The single source of truth for "may this action run without the CEO?". Returns { auto, approver }.
-// approver: "run" (run-level auto), "tier:trusted"/"tier:autonomous", or "" (needs you).
-// Order matters: tier can GRANT auto in an attended run, then the hard floor CLAMPS it back.
-export function decideApproval(tier, actType, next, gr, runAutoApprove) {
+// approver: "run" (run-level auto), "tier:trusted"/"tier:autonomous", "policy", or "" (needs you).
+// Precedence: tier can GRANT auto → a matching policy can loosen ("allow") or tighten ("require") →
+// then the HARD FLOOR clamps everything back (shell/api/email/over-ceiling can never auto). The floor
+// is absolute: a policy "allow" can NOT auto-approve a floored action. ("block" is handled by the
+// caller, which refuses the action before it is ever filed.)
+export function decideApproval(tier, actType, next, gr, runAutoApprove, policyEffect = "none") {
   let auto = !!runAutoApprove;
   let approver = auto ? "run" : "";
   if (!auto) {
     if (tier === "autonomous") { auto = true; approver = "tier:autonomous"; }
     else if (tier === "trusted" && SAFE_TIER_ACTIONS.has(actType)) { auto = true; approver = "tier:trusted"; }
   }
+  if (policyEffect === "allow") { auto = true; approver = "policy"; }         // policy loosens
+  else if (policyEffect === "require") { auto = false; approver = ""; }        // policy tightens (overrides tier/run)
   if (requiresCeoAlways(actType, next, gr)) { auto = false; approver = ""; }   // hard floor — nothing crosses it
   return { auto, approver };
 }
@@ -93,6 +133,7 @@ function ensureBudget(org) {
   if (!Array.isArray(org.goals)) org.goals = [];                        // OKR-style goals: {id,title,detail,status,keyResults[],runs[]}
   org.notify = { webhook: "", ...(org.notify || {}) };                  // optional outgoing webhook for external push (Slack/email/etc.)
   if (!Array.isArray(org.triggers)) org.triggers = [];                  // inbound webhooks: {id,name,objective,mode,agentId,token,enabled,lastFiredAt}
+  if (!Array.isArray(org.policies)) org.policies = [];                  // declarative rules: {id,enabled,when{...},then:block|require|allow,note}
   // Guardrails: autoApproveUnderUsd = purchases/spend below this may auto-approve; maxActionsPerRun =
   // hard cap on real actions per run (0 = unlimited). Per-agent action allowlists live on the agent.
   org.guardrails = { autoApproveUnderUsd: 0, maxActionsPerRun: 0, ...(org.guardrails || {}) };
@@ -804,22 +845,34 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
       history.push({ role: "user", content: `BLOCKED: this run has hit its action limit (${actCap}). Finish with what you already have.` });
       continue;
     }
+    // ---- Declarative policy rules (company-wide, ordered; first match wins) ----
+    const polCost = actType === "purchase" ? Math.max(0, parseFloat(String(next.command || next.details || "").replace(/[^0-9.]/g, "")) || 0) : 0;
+    const polHost = (() => { const m = String(next.command || "").match(/https?:\/\/([^/\s"'<>)\]]+)/i); return m ? m[1].toLowerCase() : ""; })();
+    const { effect: polEffect, rule: polRule } = evaluatePolicy(org.policies, { actionType: actType, agentId: agent.id, cost: polCost, title: next.title || "", urlHost: polHost });
+    if (polEffect === "block") {
+      const reason = `blocked by policy${polRule?.note ? ` (${polRule.note})` : ""}`;
+      emit(run, "blocked", { agent: who, depth, actionType: actType, reason });
+      logAudit({ kind: "blocked", runId: run.id, agentId: agent.id, agent: who, actionType: actType, error: reason, decision: "denied" });
+      history.push({ role: "user", content: `BLOCKED by company policy: "${actType}" is not allowed here${polRule?.note ? ` — ${polRule.note}` : ""}. Take a different action or finish.` });
+      continue;
+    }
     run.actionCount = (run.actionCount || 0) + 1;
     const tier = String(agent.tier || "supervised").toLowerCase();
-    // The autonomy tier + hard-floor decision lives in one place (decideApproval) so it's auditable
-    // and unit-tested. Tier can grant auto in an attended run; the floor (shell/api/email/over-ceiling) clamps it back.
-    const { auto: effectiveAuto, approver } = decideApproval(tier, actType, next, gr, run.autoApprove);
+    // The autonomy tier + policy + hard-floor decision lives in one place (decideApproval) so it's
+    // auditable and unit-tested. Tier can grant auto; a policy can loosen/tighten; the floor
+    // (shell/api/email/over-ceiling) always clamps it back.
+    const { auto: effectiveAuto, approver } = decideApproval(tier, actType, next, gr, run.autoApprove, polEffect);
     const approval = await fileApproval(agent, next);
     emit(run, "propose", {
       agent: who, depth, approvalId: approval.id, actionType: next.actionType || "other",
       title: next.title || "", details: next.details || "", command: next.command || "",
-      corrected, autoApprove: effectiveAuto, tier, approver,
+      corrected, autoApprove: effectiveAuto, tier, approver, policy: polEffect !== "none" ? polEffect : "",
     });
     if (!effectiveAuto) fireWebhook("needs_approval", { actionType: next.actionType || "other", title: next.title || "", agent: who });
 
     let verdict = "pending";
     if (effectiveAuto) {
-      await latch("PATCH", `/api/approvals/${approval.id}`, { status: "approved", note: approver.startsWith("tier:") ? `auto-approved by autonomy ${approver}` : "playtest auto-approve" });
+      await latch("PATCH", `/api/approvals/${approval.id}`, { status: "approved", note: approver.startsWith("tier:") ? `auto-approved by autonomy ${approver}` : approver === "policy" ? "auto-approved by company policy" : "playtest auto-approve" });
       verdict = "approved";
     } else {
       setAgentState(agent.id, "waiting", "waiting for your approval in Latch");
@@ -2147,6 +2200,42 @@ const server = createServer(async (req, res) => {
     if (p.startsWith("/api/triggers/") && req.method === "DELETE") {
       const id = p.split("/")[3];
       await updateOrg((o) => { o.triggers = (o.triggers || []).filter((x) => x.id !== id); });
+      return send(res, 200, { ok: true });
+    }
+
+    // ----- policies (declarative rule table over guardrails + tiers) -----
+    if (p === "/api/policies" && req.method === "GET") {
+      return send(res, 200, { policies: (await readOrg()).policies || [] });
+    }
+    if (p === "/api/policies" && req.method === "POST") {
+      const body = await readBody(req);
+      if (!["block", "require", "allow"].includes(body.then)) return send(res, 400, { error: "then must be block|require|allow" });
+      const when = cleanPolicyWhen(body.when);
+      if (!Object.keys(when).length) return send(res, 400, { error: "at least one condition required" });
+      const r = await updateOrg((o) => {
+        const rule = { id: newId("pol"), enabled: true, when, then: body.then, note: String(body.note || "").slice(0, 120), createdAt: Date.now() };
+        o.policies = [...(o.policies || []), rule].slice(0, 40);   // appended: order = priority, first match wins
+        return rule;
+      });
+      return send(res, 201, r);
+    }
+    if (p.startsWith("/api/policies/") && req.method === "PATCH") {
+      const id = p.split("/")[3];
+      const body = await readBody(req);
+      const r = await updateOrg((o) => {
+        const rule = (o.policies || []).find((x) => x.id === id);
+        if (!rule) return null;
+        if (body.enabled !== undefined) rule.enabled = !!body.enabled;
+        if (body.then !== undefined && ["block", "require", "allow"].includes(body.then)) rule.then = body.then;
+        if (body.note !== undefined) rule.note = String(body.note).slice(0, 120);
+        if (body.when !== undefined) { const w = cleanPolicyWhen(body.when); if (Object.keys(w).length) rule.when = w; }
+        return rule;
+      });
+      return r ? send(res, 200, r) : send(res, 404, { error: "not_found" });
+    }
+    if (p.startsWith("/api/policies/") && req.method === "DELETE") {
+      const id = p.split("/")[3];
+      await updateOrg((o) => { o.policies = (o.policies || []).filter((x) => x.id !== id); });
       return send(res, 200, { ok: true });
     }
 
