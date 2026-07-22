@@ -35,9 +35,24 @@ Do these on your side; Bureau needs none of the secrets.
 ## Using it
 
 An agent proposes a `github_file` (title = repo file path, e.g. `reports/q3.md`; content =
-the document) or `github_repo` (title = new repo name). You approve in the Inbox (or
-Latch/Compass), and Latch commits it. Restrict which agents may do this per-agent under
-*Advanced → Allowed actions → 🐙 GitHub publish*.
+the document) or `github_repo` (title = new repo name). Latch commits it. Restrict which
+agents may publish at all under *Advanced → Allowed actions → 🐙 GitHub publish*.
+
+## Autonomy vs. protection — where the guard lives
+
+File commits (`github_file`) are **not** hard-floored — they follow the normal autonomy model:
+
+- **Supervised** agent → each commit still asks you.
+- **Autonomous** agent (or a policy rule `allow github_file`) → commits go through **without asking**.
+
+So to let agents publish freely, set the relevant agents to **Autonomous** (or add one policy
+rule allowing `github_file`). Then protect only the repos that matter — **on GitHub, not in
+Bureau**: enable **branch protection / required pull-request review** on the important repo's
+default branch. Latch commits directly (it doesn't open PRs), so a protected branch simply
+**blocks** an agent's commit — nothing lands in your product repo without you, while sandboxes
+and working repos get full autonomy.
+
+Creating a **repo** (`github_repo`) always asks you — that's still hard-floored.
 
 ## Status
 

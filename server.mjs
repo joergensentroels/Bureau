@@ -61,13 +61,27 @@ let TOKEN = "";
 const emptyOrg = () => ({ ceo: null, vision: "", companyName: "", agents: [], budget: { tokens: 0 }, activity: [], schedules: [], purchases: [], audit: [], guardrails: {}, deliverables: {}, goals: [], notify: {}, triggers: [], policies: [], github: { repo: "", owner: "" } });
 // The real "economy": an agent's budget is a DOLLAR allowance for the PAID API model. $0 (default)
 // means the agent may only use the free local model. Token usage is the actual cost, tracked per agent.
-// $ per 1K tokens on the paid model — converts tokens used on paid runs into dollars against an
-// agent's budgetUsd. This MUST match the model configured in Latch's llm-provider.json `fallback`.
-// Set for Claude Sonnet 5 ($3 / 1M input, $15 / 1M output): a blended, input-heavy estimate
-// (~75% input / 25% output, since each agent turn resends the growing history) = ~$6 / 1M = $0.006/1K.
-// If you configure a different fallback model, update this: Haiku 4.5 ≈ 0.002, Opus 4.8 ≈ 0.010.
-// (Sonnet 5 has intro pricing of $2/$10 per 1M through 2026-08-31 → ~0.004/1K if you prefer that.)
-const PAID_PRICE_PER_1K = 0.006;
+//
+// ---- Paid model TIERS ----
+// One paid PROVIDER (Latch's llm-provider.json `fallback` — e.g. Moonshot/Kimi, whose models all
+// live behind one endpoint + one key), multiple MODELS: Bureau sends an explicit `model` per paid
+// call and Latch passes it through. An agent's `modelTier` picks which — the "seniority" mechanic:
+// a heavy-tier agent is smarter but burns its budgetUsd faster. Prices are blended $/1K-token
+// estimates (~75% input / 25% output, since each turn resends the growing history); they convert
+// tokens on paid runs into dollars against the agent's budget. Tune when Moonshot reprices.
+//   Kimi K2.5: ~$0.60/$2.50 per 1M in/out  → blend ~ $1.1/1M ≈ 0.0015/1K (with a little margin)
+//   Kimi K2.6: ~$0.66-0.95/$3.41-4.00 per 1M → blend ~ $1.5/1M ≈ 0.002/1K
+// (K3 exists but pricing is still unstable — add a tier for it once it settles.)
+const PAID_TIERS = {
+  standard: { label: "Standard · Kimi K2.5", model: "kimi-k2.5", pricePer1K: 0.0015 },
+  heavy:    { label: "Heavy · Kimi K2.6",    model: "kimi-k2.6", pricePer1K: 0.002 },
+};
+const DEFAULT_TIER = "standard";
+const tierOf = (a) => PAID_TIERS[a?.modelTier] || PAID_TIERS[DEFAULT_TIER];
+// Cost is booked against the model that ACTUALLY served the call (Latch reports it back); fall back
+// to the requested tier's price if the reported model isn't one of ours (e.g. provider default).
+const priceForModel = (model, fallbackTier) =>
+  (Object.values(PAID_TIERS).find((t) => t.model === model) || fallbackTier).pricePer1K;
 
 // ---- Autonomy tiers (per-agent) ----
 // How much an agent may do WITHOUT the CEO approving each action. Everything is clamped by the
@@ -84,7 +98,9 @@ const SAFE_TIER_ACTIONS = new Set(["web_search", "web_research", "read_file", "f
 // shell + api_call (real-world reach), spend over the guardrail ceiling, and sending email.
 function requiresCeoAlways(actType, next, gr) {
   if (actType === "shell" || actType === "api_call" || actType === "email_draft") return true;
-  if (actType === "github_file" || actType === "github_repo") return true;   // outbound write to a real repo — always you
+  if (actType === "github_repo") return true;   // CREATING a repo always asks. A file COMMIT does not:
+  // it's reversible (git history) and scoped to a repo — protect the repos that matter with GitHub
+  // branch protection / required PR review, and let agents commit freely elsewhere (tier/policy govern it).
   if (actType === "purchase" && Number(gr.autoApproveUnderUsd) > 0) {
     const pc = Math.max(0, parseFloat(String(next.command || next.details || "").replace(/[^0-9.]/g, "")) || 0);
     if (pc > Number(gr.autoApproveUnderUsd)) return true;   // over ceiling → you
@@ -170,6 +186,7 @@ export function ensureBudget(org) {
     if (!Array.isArray(a.allow)) a.allow = [];                          // allowed action types ([] = no restriction)
     if (!Array.isArray(a.lessons)) a.lessons = [];                      // coaching notes from CEO feedback, injected into prompts
     if (!TIERS.includes(a.tier)) a.tier = "supervised";                 // autonomy tier: supervised (default) | trusted | autonomous
+    if (!PAID_TIERS[a.modelTier]) a.modelTier = DEFAULT_TIER;           // paid model tier: which paid model this agent uses when funded
     delete a.salary;                                                    // remove the old fake salary
   });
   return org;
@@ -284,7 +301,9 @@ async function latchHealth() {
       pending = list.filter((a) => a.status === "pending").length;
     } catch {}
     const paid = cfg.json.fallback ? { model: cfg.json.fallback.model || "", provider: cfg.json.fallback.provider || "" } : null;
-    return { ok: true, latchUrl: LATCH_URL, model: cfg.json.model, provider: cfg.json.provider, enabled: cfg.json.enabled, paid, pending };
+    // tiers: the paid-model catalog (label/model/price per tier) so the UI can render tier pickers
+    const tiers = Object.fromEntries(Object.entries(PAID_TIERS).map(([k, t]) => [k, { label: t.label, model: t.model, pricePer1K: t.pricePer1K }]));
+    return { ok: true, latchUrl: LATCH_URL, model: cfg.json.model, provider: cfg.json.provider, enabled: cfg.json.enabled, paid, tiers, defaultTier: DEFAULT_TIER, pending };
   } catch (e) { return { ok: false, latchUrl: LATCH_URL, pending: 0, reason: e.message }; }
 }
 
@@ -293,6 +312,7 @@ async function askLlm(messages, opts = {}) {
   // temperature (the gate/JSON calls use near-0 via askJsonReliable). ?? so an explicit 0 is honored.
   const { json } = await latch("POST", "/api/llm/chat", {
     messages, routingPreference: opts.routingPreference || "local", temperature: opts.temperature ?? 0.3, maxTokens: opts.maxTokens || 700,
+    ...(opts.model ? { model: opts.model } : {}),   // per-call model override (paid tiers) — Latch passes it to the external provider
   });
   if (json && json.ok && typeof json.text === "string") {
     // Let a caller learn whether Latch actually served this from the PAID provider (routing.mode
@@ -382,7 +402,7 @@ async function fileApproval(agent, action) {
       githubCommitMessage: (String(action.details || "").slice(0, 200) || `Add ${filePath} (via Bureau)`),
       githubRepoName: String(action.repo || tgt.repo || "").slice(0, 120),   // blank → Latch uses its configured default repo
       githubOwner: String(action.owner || tgt.owner || "").slice(0, 120),    // blank → Latch's default owner (org or authed user)
-      riskLevel: "high", sensitive: true,
+      riskLevel: "medium",   // a file commit is reversible (git history); repo CREATION (below) stays high
       contextTags: ["bureau", "github", `agent:${agent.seed}`],
     });
     return json;
@@ -840,6 +860,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
   // to local for the rest of the task. Real dollars are attributed on the run for persist.
   const budgetUsd = Number(agent.budgetUsd) || 0;
   const startPaidSpent = Number(agent.paidSpentUsd) || 0;
+  const tier = tierOf(agent);   // which paid model this agent uses (its "seniority") + its price
   let paidThisRun = 0, paidTokensThisRun = 0;
   const canUsePaid = () => run.paidAvailable && !run.hush && budgetUsd > 0 && (startPaidSpent + paidThisRun) < budgetUsd;
   // reliability guards: the weak local model tends to "finish" claiming it did work it never did.
@@ -851,16 +872,16 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
     let raw;
     const usePaid = canUsePaid();
     const meta = {};
-    try { raw = await askLlm(history, { maxTokens: 1000, routingPreference: usePaid ? "external" : "local", meta }); }
+    try { raw = await askLlm(history, { maxTokens: 1000, routingPreference: usePaid ? "external" : "local", ...(usePaid && tier.model ? { model: tier.model } : {}), meta }); }
     catch (e) { emit(run, "error", { agent: who, depth, message: e.message }); break; }
     const callTokens = estTokens(history) + Math.ceil((raw.length) / 4);
     tokens += callTokens;
     if (meta.paid) {
       // Latch really served this turn from the paid provider. Prefer the provider's reported total
-      // usage (real money) over our estimate; convert tokens -> $ and hold it against the budget.
+      // usage (real money) over our estimate; price by the model that actually served it.
       const paidTokens = meta.usage?.total_tokens || callTokens;
       paidTokensThisRun += paidTokens;
-      paidThisRun += (paidTokens / 1000) * PAID_PRICE_PER_1K;
+      paidThisRun += (paidTokens / 1000) * priceForModel(meta.model, tier);
       run.ranPaid = true;
     }
 
@@ -871,7 +892,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
       continue;
     }
     history.push({ role: "assistant", content: JSON.stringify(parsed) });
-    emit(run, "say", { agent: who, depth, turn: ++step, maxTurns: run.maxTurns, speak: parsed.speak || "…", paid: !!meta.paid });
+    emit(run, "say", { agent: who, depth, turn: ++step, maxTurns: run.maxTurns, speak: parsed.speak || "…", paid: !!meta.paid, paidModel: meta.paid ? (meta.model || tier.model || "") : "" });
 
     const rawNext = parsed.next || {};
     const origAt = String(rawNext.actionType || "").toLowerCase();
@@ -2240,6 +2261,7 @@ const server = createServer(async (req, res) => {
           department: String(body.department || "").slice(0, 60),
           bio: String(body.bio || "").slice(0, 4000),
           budgetUsd: Number.isFinite(+body.budgetUsd) && +body.budgetUsd >= 0 ? +body.budgetUsd : 0, // $0 = local only
+          modelTier: PAID_TIERS[body.modelTier] ? String(body.modelTier) : DEFAULT_TIER,             // which paid model when funded
           tokensUsed: 0, paidSpentUsd: 0,
           tier: "supervised",                                          // autonomy: new hires start fully gated
           createdAt: Date.now(),
@@ -2263,6 +2285,7 @@ const server = createServer(async (req, res) => {
         if (body.hr !== undefined) agent.hr = Boolean(body.hr);
         if (body.department !== undefined) agent.department = String(body.department).slice(0, 60);
         if (body.budgetUsd !== undefined && Number.isFinite(+body.budgetUsd) && +body.budgetUsd >= 0) agent.budgetUsd = +body.budgetUsd;
+        if (body.modelTier !== undefined && PAID_TIERS[body.modelTier]) agent.modelTier = String(body.modelTier);   // paid model tier
         if (body.allow !== undefined) agent.allow = Array.isArray(body.allow) ? [...new Set(body.allow.map((x) => String(x).toLowerCase().slice(0, 24)).filter(Boolean))].slice(0, 12) : [];
         if (body.tier !== undefined) agent.tier = TIERS.includes(String(body.tier)) ? String(body.tier) : agent.tier;   // autonomy tier
         if (body.addLesson) agent.lessons = [{ text: String(body.addLesson).slice(0, 240), at: Date.now() }, ...(agent.lessons || [])].slice(0, 8);   // append CEO coaching from feedback
