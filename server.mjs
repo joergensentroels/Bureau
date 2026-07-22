@@ -743,6 +743,13 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
     }
 
     artifacts.push({ title: next.title || "action", detail: next.command || next.details || "" });
+    // ---- Dry-run: simulate the action (no Latch, no execution, no spend) and let the agent continue ----
+    if (run.dryRun) {
+      emit(run, "dryaction", { agent: who, depth, actionType: next.actionType || "other", title: next.title || "", details: next.details || "", command: String(next.command || "").slice(0, 200) });
+      didExecute = true;
+      history.push({ role: "user", content: `SIMULATED (dry-run preview) — assume your ${next.actionType || "action"} "${next.title || ""}" succeeded. This is a preview; nothing was really done. Continue toward the objective or finish.` });
+      continue;
+    }
     // ---- Guardrails: per-agent action allowlist, per-run action cap, purchase auto-approve ceiling ----
     const actType = String(next.actionType || "").toLowerCase();
     if (Array.isArray(agent.allow) && agent.allow.length && !agent.allow.includes(actType)) {
@@ -1254,6 +1261,7 @@ function waitForPlan(run, ms = 10 * 60 * 1000) {
 // Shared gate: derive criteria, run `worker(objective)` (which produces the work), verify, and
 // remediate the specific gaps up to GATE_MAX_ATTEMPTS. worker returns { product, body, tokens }.
 async function runGated(run, worker, persistExtra, perAgentTally) {
+  if (run.dryRun) emit(run, "dryrun", {});   // preview: plan + intended actions, nothing real happens
   const crit = await deriveCriteria(run.objective);
   run.criteria = crit.items;
   let tokens = crit.tokens;
@@ -1263,13 +1271,13 @@ async function runGated(run, worker, persistExtra, perAgentTally) {
   // Kept OUT of producedFiles so the verifier never reads its own checklist back as evidence.
   const checklistBase = shortTitle(run.objective);
   const persistChecklist = async (att, verdict) => {
-    if (!run.criteria.length) return;
+    if (!run.criteria.length || run.dryRun) return;   // dry-run writes nothing to disk
     const r = await saveChecklist(checklistBase, renderChecklist({ title: checklistBase, objective: run.objective, criteria: run.criteria, attempt: att, verdict }));
     if (r.ok) { run.checklistFile = r.name; emit(run, "checklist", { file: r.name, items: run.criteria, attempt: att, verdict }); }
   };
   await persistChecklist(null, null);   // v0: all unchecked
   // ---- Plan-approval gate: on attended runs, the CEO reviews/edits the acceptance criteria BEFORE work ----
-  if (!run.autoApprove && run.criteria.length) {
+  if (!run.autoApprove && !run.dryRun && run.criteria.length) {
     emit(run, "planreview", { items: run.criteria, objective: run.objective });
     const decision = await waitForPlan(run);
     if (decision === "reject") {
@@ -1335,7 +1343,7 @@ async function runGated(run, worker, persistExtra, perAgentTally) {
     await updateOrg((o) => { const g = (o.goals || []).find((x) => x.id === run.goalId); if (g) g.runs = [{ runId: run.id, at: Date.now(), verdict, objective: String(run.objective).slice(0, 120) }, ...(g.runs || [])].slice(0, 20); }).catch(() => {});
   }
   finishRun(run, { verdict, met, unmet: unmet.length, total: run.criteria.length, criteria: run.criteria });
-  fireWebhook("run_done", { objective: run.objective, verdict, agent: persistExtra.agent || "", tokens });
+  if (!run.dryRun) fireWebhook("run_done", { objective: run.objective, verdict, agent: persistExtra.agent || "", tokens });
   return { verdict, tokens };
 }
 
@@ -1431,7 +1439,7 @@ function beginRun(spec) {
     id: newId("run"), mode, agentId: spec.agentId,
     objective: String(spec.objective || "").slice(0, 1000),
     maxTurns: Math.max(1, Math.min(20, Number(spec.maxTurns) || 6)),
-    autoApprove: Boolean(spec.autoApprove), scheduleId: spec.scheduleId || "", goalId: spec.goalId || "",
+    autoApprove: Boolean(spec.autoApprove), scheduleId: spec.scheduleId || "", goalId: spec.goalId || "", dryRun: Boolean(spec.dryRun),
     events: [], listeners: new Set(), done: false, stopped: false,
   };
   runs.set(run.id, run);

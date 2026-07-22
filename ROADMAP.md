@@ -24,9 +24,11 @@ Make the company smarter, connected, and shareable.
    - ✅ **Company templates**: one-click preset teams ("SaaS startup", "content studio", "research lab") with roles + a starter goal, added non-destructively (reuses hire-plan + goals).
    - ⬜ **Persistence beyond JSON**: a real datastore (the single JSON + mutex is already straining under multi-process use). Deferred — most structural change; do carefully when the paused sessions are done.
 
-**Extra (delivered):** ✅ **Run history & replay UI** — `GET /api/runs` (+ `/:id`) rebuilds past runs from the audit log with trends (runs/passed/shortfall/tokens/cost); a "📜 History" modal lists them and drills into each run's trace (live events if still in memory, else reconstructed from audit actions).
+**Extra (delivered):**
+- ✅ **Run history & replay UI** — `GET /api/runs` (+ `/:id`) rebuilds past runs from the audit log with trends (runs/passed/shortfall/tokens/cost); a "📜 History" modal lists them and drills into each run's trace (live events if still in memory, else reconstructed from audit actions).
+- ✅ **Dry-run / simulation mode** — a "dry run" toggle on the work panel previews a full run (plan, DoD criteria, and each intended action rendered as "would …") while executing **nothing**: no real actions, no disk writes (drafts/checklists skipped), no webhooks. Verified: 0 real results, draft count unchanged. Lets you inspect what a company *would* do before letting it loose.
 
-_Parked but available:_ **paid-model activation / smart routing** — the biggest lever on output quality (local qwen3:8b is the ceiling); starts whenever a paid provider/API key is configured in Latch. Also still in the backlog: dry-run mode, in-app approval seam, declarative policy rules, autonomy tiers, multi-workspace, office-view revamp.
+_Parked but available:_ **paid-model activation / smart routing** — the biggest lever on output quality (local qwen3:8b is the ceiling); starts whenever a paid provider/API key is configured in Latch. Also still in the backlog: in-app approval seam, declarative policy rules, autonomy tiers, multi-workspace, office-view revamp.
 
 ---
 
