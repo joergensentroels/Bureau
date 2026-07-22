@@ -12,9 +12,6 @@ _Forward-looking only — the detail of what's shipped lives in the code, the te
 
 Nothing is in active development. The remaining backlog, roughly by value:
 
-- **Paid-model activation / smart routing** — the biggest lever on output quality (the local
-  qwen3:8b model is the ceiling). Per-task routing so funded agents use a paid provider; track
-  `paidSpentUsd`. _Blocked on: a paid provider / API key configured in Latch._
 - **Outbound integrations** — ◐ partial. **GitHub publish is done** (`github_file` / `github_repo`
   actions → Latch's native GitHub connector; Latch holds the token and commits on approval, Bureau
   stores nothing; always CEO-gated) with a **per-workspace target repo/owner** (Guardrails → GitHub
@@ -33,7 +30,7 @@ Nothing is in active development. The remaining backlog, roughly by value:
 ## Shipped
 
 The core vision — *point Bureau at a goal and let it run itself, only surfacing finished, QA'd
-work* — is built, and guarded by an automated suite (`node test/run-all.mjs` — 262 headless
+work* — is built, and guarded by an automated suite (`node test/run-all.mjs` — 278 headless
 assertions + a live `--e2e`; see `test/README.md`).
 
 - **Safe autonomy** — per-agent allowlists → autonomy tiers → declarative policy rules, all under
@@ -47,6 +44,9 @@ assertions + a live `--e2e`; see `test/README.md`).
 - **Deliverable lifecycle** — draft → QA'd → your sign-off → delivered, with versioning.
 - **Dry-run mode**, **run history & replay**, **company templates**.
 - **Multi-workspace** — each workspace is a fully isolated company.
+- **Paid-model routing** — funded agents route to a paid provider (Moonshot/Kimi) with per-agent
+  model tiers (Standard K2.6 / Coder K2.7 / Heavy K3); cost booked against the model that served the
+  call, capped by each agent's `budgetUsd`. Unfunded agents stay on the free local model. _Verified working._
 
 ---
 
