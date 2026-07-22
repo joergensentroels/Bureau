@@ -44,6 +44,11 @@ const versionsDir = (ws = currentWs()) => path.join(draftsDir(ws), ".versions");
 // deliverables — keep them out of the deliverables listings (still openable directly by filename).
 const DELIV_EXT = new Set(["md", "txt", "csv", "json", "js", "mjs", "ts", "py", "html", "sql", "yaml", "yml", "xml", "sh"]);
 const isDeliverableFile = (n) => { const m = /\.([a-z0-9]{1,6})$/i.exec(n); return !!m && DELIV_EXT.has(m[1].toLowerCase()) && !n.startsWith("checklist-"); };
+// A safe deliverable filename for the API surface: starts alphanumeric, and has a real dotted
+// extension (the dot is escaped — an unescaped `.` would let a dotless name through). Endpoints
+// path.basename() first, so this is a secondary validation, but it should mean what it says.
+const DELIV_NAME_RE = /^[a-z0-9][a-z0-9._-]*\.[a-z0-9]{1,6}$/i;
+export function validDeliverableName(name) { return DELIV_NAME_RE.test(String(name)); }
 
 let TOKEN = "";
 
@@ -621,7 +626,7 @@ export function htmlToText(html) {
     .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/[ \t]+/g, " ");
 }
-async function fetchUrl(raw) {
+export async function fetchUrl(raw) {
   let current;
   try { current = new URL(raw); } catch { return { ok: false, error: "not a valid URL" }; }
   if (current.protocol !== "http:" && current.protocol !== "https:") return { ok: false, error: "only http(s) URLs are allowed" };
@@ -660,7 +665,7 @@ async function fetchUrl(raw) {
 // ---------- real capability: approved outbound API call (public hosts only) ----------
 // Parses either a JSON request {method,url,headers?,body?} or a plain https URL (GET). Reuses the
 // SSRF guard (assertPublicHost) and does not follow redirects (a public URL can't bounce to internal).
-async function apiCall(raw) {
+export async function apiCall(raw) {
   const s = String(raw || "").trim();
   let method = "GET", url = "", body = null, headers = {};
   try { const j = JSON.parse(s); if (j && j.url) { url = String(j.url); method = String(j.method || "GET").toUpperCase(); body = j.body != null ? (typeof j.body === "string" ? j.body : JSON.stringify(j.body)) : null; if (j.headers && typeof j.headers === "object") headers = j.headers; } }
@@ -732,19 +737,29 @@ async function readDraftFile(nameOrTitle) {
 // many significant query terms appear in each deliverable (filename + head).
 const RAG_STOP = new Set("the a an and or of to in for on with is are be this that it as by from at into you your our we they will can should draft document report note guide plan".split(" "));
 export function ragTerms(s) { return [...new Set(String(s).toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w.length > 3 && !RAG_STOP.has(w)))]; }
-async function retrieveRelevant(query, limit = 3, excludeName = "") {
+// Pure keyword ranker (no disk): score each doc by how many significant query terms appear in its
+// name+content, keep those scoring >= 2, best first. Split out so it can be unit-tested directly.
+export function rankDeliverables(query, docs, limit = 3, excludeName = "") {
   const q = ragTerms(query); if (!q.length) return [];
-  let names = []; try { names = (await readdir(draftsDir())).filter(isDeliverableFile); } catch { return []; }
   const scored = [];
-  for (const name of names) {
-    if (name === excludeName) continue;
-    let content = ""; try { content = await readFile(path.join(draftsDir(), name), "utf8"); } catch { continue; }
-    const hay = (name + " " + content.slice(0, 3000)).toLowerCase();
+  for (const doc of docs || []) {
+    if (!doc || doc.name === excludeName) continue;
+    const content = String(doc.content || "");
+    const hay = (doc.name + " " + content.slice(0, 3000)).toLowerCase();
     let score = 0; for (const w of q) if (hay.includes(w)) score++;
-    if (score >= 2) scored.push({ name, score, excerpt: content.slice(0, 600) });
+    if (score >= 2) scored.push({ name: doc.name, score, excerpt: content.slice(0, 600) });
   }
   scored.sort((a, b) => b.score - a.score);
   return scored.slice(0, limit);
+}
+async function retrieveRelevant(query, limit = 3, excludeName = "") {
+  if (!ragTerms(query).length) return [];
+  let names = []; try { names = (await readdir(draftsDir())).filter(isDeliverableFile); } catch { return []; }
+  const docs = [];
+  for (const name of names) {
+    try { docs.push({ name, content: await readFile(path.join(draftsDir(), name), "utf8") }); } catch { continue; }
+  }
+  return rankDeliverables(query, docs, limit, excludeName);
 }
 
 // One agent working one objective through the propose -> Latch approval -> resume loop.
@@ -1845,7 +1860,7 @@ const server = createServer(async (req, res) => {
     // Deliverable lifecycle: set status (sign-off / mark delivered / reopen).
     if (p.startsWith("/api/deliverables/") && p.endsWith("/status") && req.method === "POST") {
       const name = path.basename(decodeURIComponent(p.slice("/api/deliverables/".length, -"/status".length)));
-      if (!/^[a-z0-9][a-z0-9._-]*.[a-z0-9]{1,6}$/i.test(name)) return send(res, 400, { error: "bad name" });
+      if (!validDeliverableName(name)) return send(res, 400, { error: "bad name" });
       const body = await readBody(req);
       const st = String(body.status || "");
       if (!["draft", "qa", "approved", "delivered"].includes(st)) return send(res, 400, { error: "bad status" });
@@ -1861,7 +1876,7 @@ const server = createServer(async (req, res) => {
     // Deliverable version history (list of prior versions, newest first).
     if (p.startsWith("/api/deliverables/") && p.endsWith("/versions") && req.method === "GET") {
       const name = path.basename(decodeURIComponent(p.slice("/api/deliverables/".length, -"/versions".length)));
-      if (!/^[a-z0-9][a-z0-9._-]*.[a-z0-9]{1,6}$/i.test(name)) return send(res, 400, { error: "bad name" });
+      if (!validDeliverableName(name)) return send(res, 400, { error: "bad name" });
       const org = await readOrg();
       return send(res, 200, { name, versions: (org.deliverables[name]?.versions || []).slice().reverse() });
     }
@@ -1869,7 +1884,7 @@ const server = createServer(async (req, res) => {
     if (p.startsWith("/api/deliverables/") && p.includes("/versions/") && req.method === "GET") {
       const [nm, , ts] = decodeURIComponent(p.slice("/api/deliverables/".length)).split("/");
       const name = path.basename(nm || "");
-      if (!/^[a-z0-9][a-z0-9._-]*.[a-z0-9]{1,6}$/i.test(name) || !/^\d+$/.test(ts || "")) return send(res, 400, { error: "bad request" });
+      if (!validDeliverableName(name) || !/^\d+$/.test(ts || "")) return send(res, 400, { error: "bad request" });
       const full = path.join(versionsDir(), `${name}.${ts}`);
       if (path.dirname(full) !== versionsDir()) return send(res, 403, { error: "forbidden" });
       try { return send(res, 200, { name, at: Number(ts), content: await readFile(full, "utf8") }); }
@@ -1877,7 +1892,7 @@ const server = createServer(async (req, res) => {
     }
     if (p.startsWith("/api/deliverables/") && req.method === "GET") {
       const name = path.basename(decodeURIComponent(p.slice("/api/deliverables/".length)));
-      if (!/^[a-z0-9][a-z0-9._-]*.[a-z0-9]{1,6}$/i.test(name)) return send(res, 400, { error: "bad name" });
+      if (!validDeliverableName(name)) return send(res, 400, { error: "bad name" });
       const full = path.join(draftsDir(), name);
       if (path.dirname(full) !== draftsDir()) return send(res, 403, { error: "forbidden" });
       try {

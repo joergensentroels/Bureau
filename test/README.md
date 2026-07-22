@@ -13,7 +13,7 @@ node test/run-all.mjs --e2e    # also the live autonomy e2e
 
 The runner runs the pure suites always, the server suites only if a server is
 reachable on `BUREAU_PORT` (else it skips them with a note), and the live e2e only
-with `--e2e`. Current totals: **127 pure assertions + 57 server assertions** (plus
+with `--e2e`. Current totals: **157 pure assertions + 57 server assertions** (plus
 the 10-assertion live e2e).
 
 ## `decision.test.mjs` — pure unit tests (fast, no server)
@@ -32,13 +32,25 @@ the guarantee that a policy `allow` can never auto-approve a floored action.
 
 ## `units.test.mjs` — pure unit tests for standalone logic (fast, no server)
 
-84 assertions over the exported helpers: the **SSRF guard** (`ipv4Blocked` /
+101 assertions over the exported helpers: the **SSRF guard** (`ipv4Blocked` /
 `ipBlocked` — every private/internal range + IPv6/mapped), `normalizeAction` (the
 "do what the model meant" action corrections), `safeParse` (tolerant JSON),
 `ragTerms`, `expectsDeliverable`, `resolveReport` (tolerant assignee matching, no
 double-assignment), `goalObjective`, `normKRs`, `cadenceMs`, `cleanPolicyWhen`,
-`htmlToText`, `ensureBudget` (org normalization + safe agent defaults), and
-`renderChecklist` (the DoD checklist markdown).
+`htmlToText`, `ensureBudget` (org normalization + safe agent defaults),
+`renderChecklist` (the DoD checklist markdown), `validDeliverableName` (the API
+filename gate), and `rankDeliverables` (the pure RAG keyword ranker).
+
+## `net.test.mjs` — outbound-network helpers, offline (fast, no server)
+
+13 assertions over `apiCall` and `fetchUrl`: input parsing (JSON request vs plain
+URL), protocol rejection, and the **SSRF guard** refusing loopback / link-local /
+cloud-metadata / private hosts. Every case short-circuits before any real network
+I/O (DNS on an IP literal resolves locally), so it needs no live hosts.
+
+```
+node test/net.test.mjs
+```
 
 ```
 node test/units.test.mjs

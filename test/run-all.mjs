@@ -10,7 +10,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.BUREAU_PORT || 4174;
 const wantE2E = process.argv.includes("--e2e");
 
-const PURE = ["decision.test.mjs", "units.test.mjs"];
+const PURE = ["decision.test.mjs", "units.test.mjs", "net.test.mjs"];
 const SERVER = ["api.test.mjs", "workspaces.test.mjs"];
 const LIVE = ["e2e-autonomy.mjs"];
 

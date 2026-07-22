@@ -3,7 +3,7 @@
 import {
   ipv4Blocked, ipBlocked, normalizeAction, safeParse, ragTerms, expectsDeliverable,
   resolveReport, goalObjective, normKRs, cadenceMs, cleanPolicyWhen, htmlToText,
-  ensureBudget, renderChecklist,
+  ensureBudget, renderChecklist, validDeliverableName, rankDeliverables,
 } from "../server.mjs";
 
 let pass = 0, fail = 0;
@@ -113,6 +113,22 @@ console.log("# renderChecklist — DoD checklist markdown");
   chk("  header + progress line", md.includes("# Checklist — Welcome note") && md.includes("**Progress:** 1/3 met"));
   chk("  met item checked, unmet shows note", md.includes("- [x] has a greeting") && md.includes("- [ ] under 200 words — ⚠ too long"));
   chk("  open item marked not-verified", md.includes("- [ ] signed — ⬜ not yet verified")); }
+
+console.log("# validDeliverableName — API filename gate (requires a real dotted extension)");
+for (const n of ["report.md", "a_b-c.csv", "data.json", "x.y", "Notes.TXT"]) chk(`  accepts ${n}`, validDeliverableName(n) === true);
+for (const n of ["noextension", "bad name.md", "-leading.md", "a.", ".hidden", "", "a/b.md"]) chk(`  rejects ${JSON.stringify(n)}`, validDeliverableName(n) === false);
+
+console.log("# rankDeliverables — pure RAG keyword ranker (score >= 2, best first)");
+{ const docs = [
+    { name: "pricing.md", content: "our pricing tiers and competitor pricing comparison" },
+    { name: "hello.md", content: "hi there, welcome" },
+    { name: "market.md", content: "competitor pricing analysis of the market" } ];
+  const r = rankDeliverables("competitor pricing analysis", docs, 3);
+  chk("  only docs matching >=2 terms are returned", r.length === 2 && r.every((x) => x.name !== "hello.md"));
+  chk("  best score first", r[0].name === "market.md");
+  eq("  no query terms → []", rankDeliverables("the a of to", docs), []);
+  eq("  excludeName is skipped", rankDeliverables("competitor pricing analysis", docs, 3, "market.md").map((x) => x.name), ["pricing.md"]);
+  chk("  limit respected", rankDeliverables("competitor pricing analysis", docs, 1).length === 1); }
 
 console.log(`\n${fail === 0 ? "ALL PASS ✓" : "FAILURES ✗"} — ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
