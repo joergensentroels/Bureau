@@ -8,6 +8,26 @@ _Last updated 2026-07-22._
 
 ---
 
+## Phase 3 — Next (planned)
+
+Make the company smarter, connected, and shareable.
+
+1. **Self-optimizing org** ⬜
+   - Per-agent **scorecards** from existing data: DoD pass-rate, throughput, token/$ cost, guardrail-block rate.
+   - **HR recommendations**: promote / reassign / coach / let-go based on the scorecards.
+   - **Learn from your feedback**: rejected plans, revisions, and denied actions are captured (with reason) and folded into that agent's future prompts — quality compounds.
+   - (Stretch) **goal retrospectives** — a "what worked / what to change" note when a goal closes.
+2. **Real integrations** ⬜
+   - Push work OUT: GitHub (PRs/issues), Slack (updates), Drive/Notion (publish deliverables) — built on `api_call`/webhook + credentials.
+   - **Inbound triggers**: an external event (email / GitHub issue / webhook-in) starts a run. Bureau becomes reactive.
+3. **Product-ization** ⬜
+   - **Company templates**: one-click preset orgs ("SaaS startup", "content studio", "research lab") with roles/goals/schedules pre-wired.
+   - **Persistence beyond JSON**: a real datastore (the single JSON + mutex is already straining under multi-process use).
+
+_Parked but available:_ **paid-model activation / smart routing** — the biggest lever on output quality (local qwen3:8b is the ceiling); starts whenever a paid provider/API key is configured in Latch. Also still in the backlog: dry-run mode, in-app approval seam, declarative policy rules, run-history/replay UI, multi-workspace, office-view revamp.
+
+---
+
 ## Phase 2 — Complete ✅
 
 Raise what Bureau produces and how it reaches you.
