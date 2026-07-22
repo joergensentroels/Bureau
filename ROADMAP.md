@@ -13,7 +13,7 @@ _Last updated 2026-07-22._
 Picked together. Theme: **point Bureau at a goal and safely let it run.** Suggested build order
 below (foundations first).
 
-### 1. Guardrails + audit trail  _(foundational)_
+### 1. Guardrails + audit trail  ✅ _done — commits 56e597b, 944b38c, 1f4a889_
 Make autonomy safe, so we can let agents do more without babysitting.
 - Per-agent **action allowlist** (which action types an agent may even propose).
 - **Spend caps** (per-agent paid budget hard stop; company-funds cap) and an **approval threshold**
