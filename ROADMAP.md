@@ -8,7 +8,18 @@ _Last updated 2026-07-22._
 
 ---
 
-## Phase 1 — Now
+## Phase 2 — Next (in progress)
+
+Raise what Bureau produces and how it reaches you.
+
+1. **Fix delegation breadth** ⬜ — Manager fans work out to several agents in parallel (dependency-ordered) instead of collapsing to one task. Foundational.
+2. **Broaden real actions** ⬜ — email-via-approval, structured API calls, shell/code execution on the VM.
+3. **Richer outputs + RAG memory** ⬜ — export (PDF/code/spreadsheets); agents read past deliverables so work compounds.
+4. **Real notifications** ⬜ — push to you (desktop/email) when something needs a decision or a run finishes.
+
+---
+
+## Phase 1 — Complete ✅
 
 Picked together. Theme: **point Bureau at a goal and safely let it run.** Suggested build order
 below (foundations first).
