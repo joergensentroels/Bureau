@@ -69,12 +69,16 @@ const emptyOrg = () => ({ ceo: null, vision: "", companyName: "", agents: [], bu
 // a heavy-tier agent is smarter but burns its budgetUsd faster. Prices are blended $/1K-token
 // estimates (~75% input / 25% output, since each turn resends the growing history); they convert
 // tokens on paid runs into dollars against the agent's budget. Tune when Moonshot reprices.
-//   Kimi K2.5: ~$0.60/$2.50 per 1M in/out  → blend ~ $1.1/1M ≈ 0.0015/1K (with a little margin)
-//   Kimi K2.6: ~$0.66-0.95/$3.41-4.00 per 1M → blend ~ $1.5/1M ≈ 0.002/1K
-// (K3 exists but pricing is still unstable — add a tier for it once it settles.)
+// Models actually served by the Moonshot key (checked 2026-07-22 via GET /v1/models — K2.5 is gone):
+//   kimi-k2.6:       ~$0.95/$4.00 per 1M in/out → blend ≈ 0.002/1K   (general)
+//   kimi-k2.7-code:  ~$0.95/$4.00 per 1M        → blend ≈ 0.002/1K   (coding/agentic specialist)
+//   kimi-k3:         ~$3.00/$15.00 per 1M       → blend ≈ 0.006/1K   (frontier tier)
+// NOTE: Kimi K2.5+ models only accept temperature 1 — the fallback block in llm-provider.json
+// carries "temperature": 1, which Latch's callExternalLlm now honors as a forced override.
 const PAID_TIERS = {
-  standard: { label: "Standard · Kimi K2.5", model: "kimi-k2.5", pricePer1K: 0.0015 },
-  heavy:    { label: "Heavy · Kimi K2.6",    model: "kimi-k2.6", pricePer1K: 0.002 },
+  standard: { label: "Standard · Kimi K2.6", model: "kimi-k2.6",      pricePer1K: 0.002 },
+  coder:    { label: "Coder · Kimi K2.7",    model: "kimi-k2.7-code", pricePer1K: 0.002 },
+  heavy:    { label: "Heavy · Kimi K3",      model: "kimi-k3",        pricePer1K: 0.006 },
 };
 const DEFAULT_TIER = "standard";
 const tierOf = (a) => PAID_TIERS[a?.modelTier] || PAID_TIERS[DEFAULT_TIER];
@@ -860,7 +864,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
   // to local for the rest of the task. Real dollars are attributed on the run for persist.
   const budgetUsd = Number(agent.budgetUsd) || 0;
   const startPaidSpent = Number(agent.paidSpentUsd) || 0;
-  const tier = tierOf(agent);   // which paid model this agent uses (its "seniority") + its price
+  const paidTier = tierOf(agent);   // which paid model this agent uses (its "seniority") + its price — NOT the autonomy `tier` used further down
   let paidThisRun = 0, paidTokensThisRun = 0;
   const canUsePaid = () => run.paidAvailable && !run.hush && budgetUsd > 0 && (startPaidSpent + paidThisRun) < budgetUsd;
   // reliability guards: the weak local model tends to "finish" claiming it did work it never did.
@@ -872,7 +876,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
     let raw;
     const usePaid = canUsePaid();
     const meta = {};
-    try { raw = await askLlm(history, { maxTokens: 1000, routingPreference: usePaid ? "external" : "local", ...(usePaid && tier.model ? { model: tier.model } : {}), meta }); }
+    try { raw = await askLlm(history, { maxTokens: 1000, routingPreference: usePaid ? "external" : "local", ...(usePaid && paidTier.model ? { model: paidTier.model } : {}), meta }); }
     catch (e) { emit(run, "error", { agent: who, depth, message: e.message }); break; }
     const callTokens = estTokens(history) + Math.ceil((raw.length) / 4);
     tokens += callTokens;
@@ -881,7 +885,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
       // usage (real money) over our estimate; price by the model that actually served it.
       const paidTokens = meta.usage?.total_tokens || callTokens;
       paidTokensThisRun += paidTokens;
-      paidThisRun += (paidTokens / 1000) * priceForModel(meta.model, tier);
+      paidThisRun += (paidTokens / 1000) * priceForModel(meta.model, paidTier);
       run.ranPaid = true;
     }
 
@@ -892,7 +896,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
       continue;
     }
     history.push({ role: "assistant", content: JSON.stringify(parsed) });
-    emit(run, "say", { agent: who, depth, turn: ++step, maxTurns: run.maxTurns, speak: parsed.speak || "…", paid: !!meta.paid, paidModel: meta.paid ? (meta.model || tier.model || "") : "" });
+    emit(run, "say", { agent: who, depth, turn: ++step, maxTurns: run.maxTurns, speak: parsed.speak || "…", paid: !!meta.paid, paidModel: meta.paid ? (meta.model || paidTier.model || "") : "" });
 
     const rawNext = parsed.next || {};
     const origAt = String(rawNext.actionType || "").toLowerCase();
