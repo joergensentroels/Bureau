@@ -35,12 +35,12 @@ The upfront cousin of the Definition-of-Done gate.
 - **Versioning + diffs** on revisions (the revise loop already exists; keep history).
 - A clear "awaiting your sign-off" queue in the Inbox.
 
-### 4. Company goals / OKRs  ✅ _v1 done_  ⬜ _scheduled auto-advance still to add_
+### 4. Company goals / OKRs  ✅ _done_
 - ✅ Persistent **goals/objectives** (OKR-style: title + detail + key results) that live above runs.
 - ✅ **"Work on it"** launches a company run toward a goal; the run + its DoD verdict link back.
 - ✅ Progress rolls up: key-result checklist + % bar + recent-run verdicts + a dashboard card.
-- ⬜ **Scheduled auto-advance** — a goal cadence that creates a schedule to advance it automatically
-  (the scheduler exists; needs goalId threaded through it + a cadence control on the goal). Fast-follow.
+- ✅ **Scheduled auto-advance** — a goal cadence (off/daily/weekly) auto-creates a goalId-linked
+  schedule; the scheduler regenerates the objective from the live goal each fire and links runs back.
 
 ---
 

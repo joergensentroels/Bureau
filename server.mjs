@@ -1239,6 +1239,18 @@ function normKRs(v) {
     return text ? { id: i, text, done: !!(k && k.done) } : null;
   }).filter(Boolean).slice(0, 10);
 }
+// Goal auto-advance: keep a schedule (goalId-linked) in sync with the goal's cadence. "off" removes it.
+function setGoalCadence(o, g, cad) {
+  cad = ["off", "hourly", "daily", "weekly"].includes(cad) ? cad : "off";
+  g.cadence = cad;
+  const existing = (o.schedules || []).find((s) => s.goalId === g.id);
+  if (cad === "off") { if (existing) o.schedules = o.schedules.filter((s) => s.id !== existing.id); g.scheduleId = ""; return; }
+  if (existing) { existing.cadence = cad; existing.enabled = true; existing.nextRunAt = Date.now() + cadenceMs(cad); g.scheduleId = existing.id; }
+  else {
+    const s = { id: newId("sched"), objective: `Advance goal: ${g.title}`.slice(0, 1000), mode: "company", agentId: "", maxTurns: 6, cadence: cad, enabled: true, goalId: g.id, createdAt: Date.now(), lastRunAt: 0, nextRunAt: Date.now() + cadenceMs(cad) };
+    o.schedules = [s, ...(o.schedules || [])].slice(0, 50); g.scheduleId = s.id;
+  }
+}
 
 function beginRun(spec) {
   // Prune finished runs so the in-memory map (and its retained event history) can't grow without
@@ -1277,7 +1289,13 @@ async function tickSchedules() {
         const sch = (fresh.schedules || []).find((x) => x.id === s.id);
         if (sch) { sch.lastRunAt = now; sch.nextRunAt = now + cadenceMs(sch.cadence); }
       });
-      const { done } = beginRun({ mode: s.mode, agentId: s.agentId, objective: s.objective, maxTurns: s.maxTurns || 6, autoApprove: true, scheduleId: s.id });
+      let objective = s.objective;
+      if (s.goalId) {   // goal-driven schedule: use the live goal objective; skip if the goal isn't active
+        const goal = (org.goals || []).find((g) => g.id === s.goalId);
+        if (!goal || goal.status !== "active") continue;
+        objective = goalObjective(goal);
+      }
+      const { done } = beginRun({ mode: s.mode, agentId: s.agentId, objective, maxTurns: s.maxTurns || 6, autoApprove: true, scheduleId: s.id, goalId: s.goalId || "" });
       await done;
     } catch (e) { console.error("scheduled run failed:", e); }
     finally { runningSchedules.delete(s.id); }
@@ -1750,8 +1768,9 @@ const server = createServer(async (req, res) => {
       const title = String(body.title || "").trim().slice(0, 160);
       if (!title) return send(res, 400, { error: "title required" });
       const goal = await updateOrg((o) => {
-        const g = { id: newId("goal"), title, detail: String(body.detail || "").slice(0, 600), status: "active", keyResults: normKRs(body.keyResults), runs: [], createdAt: Date.now() };
+        const g = { id: newId("goal"), title, detail: String(body.detail || "").slice(0, 600), status: "active", keyResults: normKRs(body.keyResults), runs: [], cadence: "off", scheduleId: "", createdAt: Date.now() };
         o.goals.unshift(g);
+        if (body.cadence) setGoalCadence(o, g, body.cadence);
         return g;
       });
       return send(res, 201, goal);
@@ -1775,13 +1794,19 @@ const server = createServer(async (req, res) => {
         if (body.detail !== undefined) g.detail = String(body.detail).slice(0, 600);
         if (body.status !== undefined && ["active", "done", "paused"].includes(body.status)) g.status = body.status;
         if (body.keyResults !== undefined) g.keyResults = normKRs(body.keyResults);
+        if (body.title !== undefined && g.scheduleId) { const sc = (o.schedules || []).find((s) => s.id === g.scheduleId); if (sc) sc.objective = `Advance goal: ${g.title}`.slice(0, 1000); }
+        if (body.cadence !== undefined) setGoalCadence(o, g, body.cadence);
         return g;
       });
       return goal ? send(res, 200, goal) : send(res, 404, { error: "not_found" });
     }
     if (p.startsWith("/api/goals/") && req.method === "DELETE") {
       const id = p.split("/")[3];
-      await updateOrg((o) => { o.goals = (o.goals || []).filter((x) => x.id !== id); });
+      await updateOrg((o) => {
+        const g = (o.goals || []).find((x) => x.id === id);
+        if (g && g.scheduleId) o.schedules = (o.schedules || []).filter((s) => s.id !== g.scheduleId);   // remove the linked auto-advance schedule
+        o.goals = (o.goals || []).filter((x) => x.id !== id);
+      });
       return send(res, 200, { ok: true });
     }
 
@@ -1808,7 +1833,9 @@ const server = createServer(async (req, res) => {
       const org = await readOrg();
       const s = (org.schedules || []).find((x) => x.id === id);
       if (!s) return send(res, 404, { error: "not found" });
-      const { run } = beginRun({ mode: s.mode, agentId: s.agentId, objective: s.objective, maxTurns: s.maxTurns, autoApprove: true, scheduleId: s.id });
+      let objective = s.objective;
+      if (s.goalId) { const goal = (org.goals || []).find((g) => g.id === s.goalId); if (goal) objective = goalObjective(goal); }
+      const { run } = beginRun({ mode: s.mode, agentId: s.agentId, objective, maxTurns: s.maxTurns, autoApprove: true, scheduleId: s.id, goalId: s.goalId || "" });
       return send(res, 200, { runId: run.id });
     }
     if (p.startsWith("/api/schedules/") && req.method === "PATCH") {

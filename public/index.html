@@ -1245,7 +1245,7 @@ async function loadGoals(){
     const runs=(g.runs||[]).slice(0,6), stcls=g.status==="done"?"delivered":g.status==="paused"?"draft":"qa";
     return `<div class="goalcard" data-id="${esc(g.id)}">
       <div class="row" style="justify-content:space-between;align-items:flex-start;gap:8px">
-        <div style="min-width:0;flex:1"><div class="gtitle">${esc(g.title)} <span class="stbadge ${stcls}">${esc(g.status)}</span></div>${g.detail?`<div class="dim" style="font-size:11px;margin-top:2px">${esc(g.detail)}</div>`:""}</div>
+        <div style="min-width:0;flex:1"><div class="gtitle">${esc(g.title)} <span class="stbadge ${stcls}">${esc(g.status)}</span>${g.cadence&&g.cadence!=="off"?` <span class="stbadge qa" title="auto-advances ${esc(g.cadence)}">⏱ ${esc(g.cadence)}</span>`:""}</div>${g.detail?`<div class="dim" style="font-size:11px;margin-top:2px">${esc(g.detail)}</div>`:""}</div>
         <div class="row" style="gap:6px;flex:none"><button class="miniadd gwork">▶ Work on it</button><button class="miniadd gedit">Edit</button></div>
       </div>
       ${krs.length?`<div class="gbar"><div class="gbarfill" style="width:${pct}%"></div></div>
@@ -1274,6 +1274,7 @@ function openGoalDialog(g){
       <div><label>Goal</label><input id="gtitle" placeholder="Reach 100 active users this quarter" value="${isEdit?esc(g.title):""}"></div>
       <div><label>Detail (optional)</label><textarea id="gdetail" placeholder="Context, constraints, what 'good' looks like.">${isEdit?esc(g.detail||""):""}</textarea></div>
       <div><label>Key results (one per line)</label><textarea id="gkrs" placeholder="Publish 4 blog posts&#10;Launch the referral program&#10;Get 20 signups from outreach">${isEdit?esc((g.keyResults||[]).map(k=>k.text).join("\n")):""}</textarea></div>
+      <div><label>Auto-advance <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">— have Bureau work toward it on a schedule</span></label><select id="gcadence"><option value="off"${(!isEdit||(g.cadence||"off")==="off")?" selected":""}>off</option><option value="daily"${isEdit&&g.cadence==="daily"?" selected":""}>every day</option><option value="weekly"${isEdit&&g.cadence==="weekly"?" selected":""}>every week</option></select></div>
       ${isEdit?`<div><label>Status</label><select id="gstatus"><option value="active"${g.status==="active"?" selected":""}>active</option><option value="paused"${g.status==="paused"?" selected":""}>paused</option><option value="done"${g.status==="done"?" selected":""}>done</option></select></div>`:""}
     </div>
     <div class="row" style="justify-content:flex-end;gap:10px;margin-top:16px"><button id="gcancel">Cancel</button><button class="primary" id="gsave">${isEdit?"Save":"Add goal"}</button></div></div>`;
@@ -1285,7 +1286,7 @@ function openGoalDialog(g){
     const title=wrap.querySelector("#gtitle").value.trim(); if(!title){ wrap.querySelector("#gtitle").focus(); return; }
     const existing=isEdit?(g.keyResults||[]):[];
     const keyResults=wrap.querySelector("#gkrs").value.split("\n").map(s=>s.trim()).filter(Boolean).map(text=>{ const e=existing.find(k=>k.text===text); return {text, done: e?!!e.done:false}; });
-    const payload={ title, detail:wrap.querySelector("#gdetail").value.trim(), keyResults };
+    const payload={ title, detail:wrap.querySelector("#gdetail").value.trim(), keyResults, cadence:wrap.querySelector("#gcadence").value };
     if(isEdit){ payload.status=wrap.querySelector("#gstatus").value; await api("PATCH","/api/goals/"+g.id,payload); }
     else await api("POST","/api/goals",payload);
     wrap.remove(); loadGoals(); loadDashboard();
