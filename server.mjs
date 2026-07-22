@@ -28,7 +28,8 @@ const DRAFTS_DIR = path.join(HERE, "drafts");
 const VERSIONS_DIR = path.join(DRAFTS_DIR, ".versions");   // prior versions of each deliverable (name.<ts>)
 // Definition-of-Done checklists ("checklist-*.md") live in drafts/ but are QA internals, not
 // deliverables — keep them out of the deliverables listings (still openable directly by filename).
-const isDeliverableFile = (n) => n.endsWith(".md") && !n.startsWith("checklist-");
+const DELIV_EXT = new Set(["md", "txt", "csv", "json", "js", "mjs", "ts", "py", "html", "sql", "yaml", "yml", "xml", "sh"]);
+const isDeliverableFile = (n) => { const m = /\.([a-z0-9]{1,6})$/i.exec(n); return !!m && DELIV_EXT.has(m[1].toLowerCase()) && !n.startsWith("checklist-"); };
 
 let TOKEN = "";
 
@@ -545,9 +546,15 @@ async function apiCall(raw) {
 async function writeDraft(title, content) {
   const body = String(content || "");
   if (!body.trim()) return { ok: false, error: "empty document — nothing to save" };
-  let base = String(title || "draft").trim().replace(/\.md$/i, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
+  // Honor a file extension in the title (e.g. "data.csv", "script.py") from the safe allowlist;
+  // default to markdown. Lets agents produce richer outputs than just prose docs.
+  let raw = String(title || "draft").trim();
+  let ext = "md";
+  const em = /\.([a-z0-9]{1,6})$/i.exec(raw);
+  if (em && DELIV_EXT.has(em[1].toLowerCase())) { ext = em[1].toLowerCase(); raw = raw.slice(0, -em[0].length); }
+  let base = raw.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
   if (!base) base = "draft";
-  const name = `${base}.md`;
+  const name = `${base}.${ext}`;
   try {
     await mkdir(DRAFTS_DIR, { recursive: true });
     const full = path.join(DRAFTS_DIR, name);
@@ -575,11 +582,31 @@ async function writeDraft(title, content) {
 // Read back a document from foreman/drafts/ (so an agent can revise its own past deliverable).
 async function readDraftFile(nameOrTitle) {
   let name = path.basename(String(nameOrTitle || "").trim());
-  if (!/\.md$/i.test(name)) name = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) + ".md";
+  if (!/\.[a-z0-9]{1,6}$/i.test(name)) name = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) + ".md";
   const full = path.join(DRAFTS_DIR, name);
   if (path.dirname(full) !== DRAFTS_DIR) return { ok: false, error: "invalid filename" };
   try { return { ok: true, name, content: await readFile(full, "utf8") }; }
   catch { return { ok: false, error: "no such document: " + name }; }
+}
+
+// Lightweight keyword retrieval over past deliverables so work COMPOUNDS — an agent sees relevant
+// prior company work and builds on it instead of starting cold. No embeddings/deps: score by how
+// many significant query terms appear in each deliverable (filename + head).
+const RAG_STOP = new Set("the a an and or of to in for on with is are be this that it as by from at into you your our we they will can should draft document report note guide plan".split(" "));
+function ragTerms(s) { return [...new Set(String(s).toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w.length > 3 && !RAG_STOP.has(w)))]; }
+async function retrieveRelevant(query, limit = 3, excludeName = "") {
+  const q = ragTerms(query); if (!q.length) return [];
+  let names = []; try { names = (await readdir(DRAFTS_DIR)).filter(isDeliverableFile); } catch { return []; }
+  const scored = [];
+  for (const name of names) {
+    if (name === excludeName) continue;
+    let content = ""; try { content = await readFile(path.join(DRAFTS_DIR, name), "utf8"); } catch { continue; }
+    const hay = (name + " " + content.slice(0, 3000)).toLowerCase();
+    let score = 0; for (const w of q) if (hay.includes(w)) score++;
+    if (score >= 2) scored.push({ name, score, excerpt: content.slice(0, 600) });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, limit);
 }
 
 // One agent working one objective through the propose -> Latch approval -> resume loop.
@@ -592,6 +619,12 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
     agent.memory.slice(0, 5).map((m) => `- "${m.objective}" → ${m.summary}${(m.files || []).length ? ` [files: ${m.files.join(", ")}]` : ""}`).join("\n") });
   if (priorWork) history.push({ role: "user", content:
     `Work your teammates have already produced toward this goal. USE it directly — do NOT ask anyone to provide it:\n\n${priorWork}` });
+  // RAG: surface relevant PAST company deliverables so work compounds (reuse/extend, don't duplicate).
+  try {
+    const rel = await retrieveRelevant(objective, 3);
+    if (rel.length) history.push({ role: "user", content:
+      `Relevant existing company deliverables — build on or reuse these; do NOT redo work already done:\n\n${rel.map((r) => `### ${r.name}\n${r.excerpt}`).join("\n\n")}` });
+  } catch {}
   history.push({ role: "user", content: `Your task: ${objective}` });
   let tokens = 0, summary = "", step = 0;
   const gr = org.guardrails || {};   // company guardrails: allowlist (per-agent) + action cap + purchase ceiling
@@ -1531,7 +1564,7 @@ const server = createServer(async (req, res) => {
     // Deliverable lifecycle: set status (sign-off / mark delivered / reopen).
     if (p.startsWith("/api/deliverables/") && p.endsWith("/status") && req.method === "POST") {
       const name = path.basename(decodeURIComponent(p.slice("/api/deliverables/".length, -"/status".length)));
-      if (!/^[a-z0-9][a-z0-9._-]*\.md$/i.test(name)) return send(res, 400, { error: "bad name" });
+      if (!/^[a-z0-9][a-z0-9._-]*.[a-z0-9]{1,6}$/i.test(name)) return send(res, 400, { error: "bad name" });
       const body = await readBody(req);
       const st = String(body.status || "");
       if (!["draft", "qa", "approved", "delivered"].includes(st)) return send(res, 400, { error: "bad status" });
@@ -1547,7 +1580,7 @@ const server = createServer(async (req, res) => {
     // Deliverable version history (list of prior versions, newest first).
     if (p.startsWith("/api/deliverables/") && p.endsWith("/versions") && req.method === "GET") {
       const name = path.basename(decodeURIComponent(p.slice("/api/deliverables/".length, -"/versions".length)));
-      if (!/^[a-z0-9][a-z0-9._-]*\.md$/i.test(name)) return send(res, 400, { error: "bad name" });
+      if (!/^[a-z0-9][a-z0-9._-]*.[a-z0-9]{1,6}$/i.test(name)) return send(res, 400, { error: "bad name" });
       const org = await readOrg();
       return send(res, 200, { name, versions: (org.deliverables[name]?.versions || []).slice().reverse() });
     }
@@ -1555,7 +1588,7 @@ const server = createServer(async (req, res) => {
     if (p.startsWith("/api/deliverables/") && p.includes("/versions/") && req.method === "GET") {
       const [nm, , ts] = decodeURIComponent(p.slice("/api/deliverables/".length)).split("/");
       const name = path.basename(nm || "");
-      if (!/^[a-z0-9][a-z0-9._-]*\.md$/i.test(name) || !/^\d+$/.test(ts || "")) return send(res, 400, { error: "bad request" });
+      if (!/^[a-z0-9][a-z0-9._-]*.[a-z0-9]{1,6}$/i.test(name) || !/^\d+$/.test(ts || "")) return send(res, 400, { error: "bad request" });
       const full = path.join(VERSIONS_DIR, `${name}.${ts}`);
       if (path.dirname(full) !== VERSIONS_DIR) return send(res, 403, { error: "forbidden" });
       try { return send(res, 200, { name, at: Number(ts), content: await readFile(full, "utf8") }); }
@@ -1563,7 +1596,7 @@ const server = createServer(async (req, res) => {
     }
     if (p.startsWith("/api/deliverables/") && req.method === "GET") {
       const name = path.basename(decodeURIComponent(p.slice("/api/deliverables/".length)));
-      if (!/^[a-z0-9][a-z0-9._-]*\.md$/i.test(name)) return send(res, 400, { error: "bad name" });
+      if (!/^[a-z0-9][a-z0-9._-]*.[a-z0-9]{1,6}$/i.test(name)) return send(res, 400, { error: "bad name" });
       const full = path.join(DRAFTS_DIR, name);
       if (path.dirname(full) !== DRAFTS_DIR) return send(res, 403, { error: "forbidden" });
       try {

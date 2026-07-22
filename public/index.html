@@ -1154,6 +1154,8 @@ function renderDiff(diff){ return `<div class="diffbox">${diff.map(d=>`<div clas
 async function openDeliverable(name){
   let data; try{ data=await api("GET","/api/deliverables/"+encodeURIComponent(name)); }catch{ return; }
   const status=data.status||"draft", nVers=data.versions||0;
+  const isMd=/\.md$/i.test(name);
+  const bodyHtml=isMd?mdLite(data.content||""):`<pre style="white-space:pre-wrap;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.5;margin:0">${esc(data.content||"")}</pre>`;
   // status-contextual actions
   const btns=[];
   if(status==="draft"||status==="qa") btns.push(`<button class="primary" data-st="approved">✓ Sign off</button>`);
@@ -1163,15 +1165,20 @@ async function openDeliverable(name){
   wrap.innerHTML=`<div class="modal" style="max-width:660px">
     <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:6px">
       <h1 style="font-size:16px;margin:0;text-transform:none">📄 ${esc(name)} ${delivBadge(status)}</h1>
-      <div class="row" style="gap:8px"><button id="dl">Download</button><button id="cl">Close</button></div>
+      <div class="row" style="gap:8px"><button id="dlhtml" title="Export a styled HTML file — open it and print to PDF">Export HTML</button><button id="dl">Download</button><button id="cl">Close</button></div>
     </div>
     <div class="row" style="gap:8px;margin-bottom:10px;flex-wrap:wrap">${btns.join("")}${nVers?`<button id="vtoggle">🕘 Version history (${nVers})</button>`:""}</div>
     <div id="vpanel"></div>
-    <div class="delivbody" id="dbody">${mdLite(data.content||"")}</div></div>`;
+    <div class="delivbody" id="dbody">${bodyHtml}</div></div>`;
   document.body.appendChild(wrap);
   wrap.onclick=e=>{ if(e.target===wrap) wrap.remove(); };
   wrap.querySelector("#cl").onclick=()=>wrap.remove();
-  wrap.querySelector("#dl").onclick=()=>{ const b=new Blob([data.content||""],{type:"text/markdown"}); const u=URL.createObjectURL(b); const a=document.createElement("a"); a.href=u; a.download=name; a.click(); URL.revokeObjectURL(u); };
+  const dlFile=(content,fname,type)=>{ const b=new Blob([content],{type}); const u=URL.createObjectURL(b); const a=document.createElement("a"); a.href=u; a.download=fname; a.click(); URL.revokeObjectURL(u); };
+  wrap.querySelector("#dl").onclick=()=>dlFile(data.content||"",name,"text/plain");
+  wrap.querySelector("#dlhtml").onclick=()=>{
+    const doc=`<!doctype html><html><head><meta charset="utf-8"><title>${esc(name)}</title><style>body{font-family:system-ui,-apple-system,sans-serif;max-width:760px;margin:40px auto;padding:0 22px;line-height:1.6;color:#1a1a1a}h1,h2,h3,h4{line-height:1.25}pre{white-space:pre-wrap;background:#f4f4f4;padding:12px;border-radius:6px;overflow:auto}ul{padding-left:20px}@media print{body{margin:0}}</style></head><body>${bodyHtml}</body></html>`;
+    dlFile(doc,name.replace(/\.[a-z0-9]+$/i,"")+".html","text/html");
+  };
   wrap.querySelectorAll("[data-st]").forEach(b=>b.onclick=async()=>{ await api("POST","/api/deliverables/"+encodeURIComponent(name)+"/status",{status:b.dataset.st}); wrap.remove(); loadDeliverables(); loadDashboard(); refreshInbox(); });
   const vt=wrap.querySelector("#vtoggle");
   if(vt) vt.onclick=async()=>{
