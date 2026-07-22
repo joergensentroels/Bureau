@@ -95,6 +95,16 @@
   .dl{white-space:pre-wrap;padding:0 4px}
   .dl.add{background:rgba(89,217,179,.14);color:var(--ok)}
   .dl.del{background:rgba(224,112,95,.14);color:var(--danger)}
+  .goalcard{background:var(--panel-2);border:1px solid var(--line-2);border-radius:10px;padding:11px 12px;margin-bottom:8px}
+  .gtitle{font-size:13px;color:var(--ink);font-weight:600}
+  .gbar{height:6px;background:var(--line-2);border-radius:4px;overflow:hidden;margin-top:8px}
+  .gbarfill{height:100%;background:var(--accent-2);border-radius:4px;transition:width .3s}
+  .krlist{display:flex;flex-direction:column;gap:3px}
+  .krchk{display:flex;align-items:flex-start;gap:6px;font-size:12px;color:var(--ink-2);cursor:pointer;text-transform:none;letter-spacing:0}
+  .krchk input{width:auto;margin:2px 0 0;flex:none}
+  .grow{display:flex;align-items:center;gap:3px;margin-top:7px}
+  .rdotv{width:9px;height:9px;border-radius:2px;display:inline-block;background:var(--idle)}
+  .rdotv.passed{background:var(--ok)} .rdotv.shortfall{background:var(--warn)} .rdotv.rejected{background:var(--danger)} .rdotv.unverified{background:var(--ink-3)}
   .inboxbtn .ibell{font-size:13px;line-height:1;filter:grayscale(.2)}
   .inboxbtn.hot{border-color:var(--warn);color:var(--ink)}
   .inboxbtn.hot .ibell{animation:ibell .9s ease 1}
@@ -622,6 +632,12 @@ function renderMain(app){
   feed.innerHTML=`<div class="dim">No activity yet. Give an agent an objective and press run.</div>`;
   work.appendChild(feed);
 
+  const goalH=el("div"); goalH.style.cssText="display:flex;align-items:center;justify-content:space-between;margin-top:22px";
+  goalH.innerHTML=`<h2 style="margin:0">Goals</h2><button class="miniadd" id="goalAdd">+ Goal</button>`;
+  work.appendChild(goalH);
+  const goals=el("div"); goals.id="goals"; goals.className="delivlist";
+  work.appendChild(goals);
+
   const delivH=el("div"); delivH.style.cssText="display:flex;align-items:center;justify-content:space-between;margin-top:22px";
   delivH.innerHTML=`<h2 style="margin:0">Deliverables</h2><button class="miniadd" id="delivRefresh">Refresh</button>`;
   work.appendChild(delivH);
@@ -648,6 +664,8 @@ function renderMain(app){
   delivH.querySelector("#delivRefresh").onclick=loadDeliverables;
   schedH.querySelector("#schedAdd").onclick=openScheduleDialog;
   buyH.querySelector("#buyBudget").onclick=setCompanyBudget;
+  goalH.querySelector("#goalAdd").onclick=()=>openGoalDialog();
+  loadGoals();
   loadDeliverables();
   loadSchedules();
   loadPurchases();
@@ -1062,6 +1080,18 @@ function workPanel(){
 }
 
 let ES=null, CUR_RUN=null;
+async function launchGoalRun(id){
+  try{ const { runId } = await api("POST","/api/goals/"+id+"/run",{autoApprove:false}); streamRun(runId); }catch{}
+}
+function streamRun(runId){
+  const rb=$("#runBtn"); if(rb){ rb.disabled=true; rb.textContent="Running…"; }
+  const feed=$("#feed"); if(feed) feed.innerHTML="";
+  CUR_RUN=runId;
+  if(ES) ES.close();
+  ES=new EventSource("/api/run/"+runId+"/stream");
+  ES.onmessage=(m)=>{ handleEvent(JSON.parse(m.data)); };
+  ES.onerror=()=>{ ES.close(); resetRun(); };
+}
 async function launchRun(body){
   const rb=$("#runBtn"); if(rb){ rb.disabled=true; rb.textContent="Running…"; }
   const feed=$("#feed"); if(feed) feed.innerHTML="";
@@ -1184,6 +1214,7 @@ async function loadDashboard(){
   const card=(label,value,sub)=>`<div class="dashcard"><div class="dcv">${value}</div><div class="dck">${esc(label)}</div>${sub?`<div class="dcs">${sub}</div>`:""}</div>`;
   const cards=[
     card("Team",d.agents,`${d.schedules.active} schedule${d.schedules.active===1?"":"s"} active`),
+    ...(d.goals&&d.goals.total?[card("Goals",d.goals.active+" active",`${d.goals.total} total`)]:[]),
     card("Runs completed",(d.runs||0).toLocaleString(),`${d.deliverables} deliverable${d.deliverables===1?"":"s"}`),
     card("Tokens used",(d.tokens||0).toLocaleString(),"the real compute cost"),
     card("Paid budget",d.paidAllocated>0?fmtUsd(d.paidAllocated):"local only",(HEALTH&&HEALTH.paid)?"paid model active":"no paid provider"),
@@ -1204,6 +1235,63 @@ async function loadPurchases(){
   box.innerHTML=head+rows;
 }
 const CADENCE_LABEL={hourly:"every hour",daily:"every day",weekly:"every week"};
+async function loadGoals(){
+  const box=document.getElementById("goals"); if(!box) return;
+  let data; try{ data=await api("GET","/api/goals"); }catch{ box.innerHTML=`<div class="dim">Couldn't load goals.</div>`; return; }
+  const list=(data&&data.goals)||[];
+  if(!list.length){ box.innerHTML=`<div class="dim">No goals yet. Add a company goal — Bureau can work toward it and track progress.</div>`; return; }
+  box.innerHTML=list.map(g=>{
+    const krs=g.keyResults||[], done=krs.filter(k=>k.done).length, pct=krs.length?Math.round(done/krs.length*100):(g.status==="done"?100:0);
+    const runs=(g.runs||[]).slice(0,6), stcls=g.status==="done"?"delivered":g.status==="paused"?"draft":"qa";
+    return `<div class="goalcard" data-id="${esc(g.id)}">
+      <div class="row" style="justify-content:space-between;align-items:flex-start;gap:8px">
+        <div style="min-width:0;flex:1"><div class="gtitle">${esc(g.title)} <span class="stbadge ${stcls}">${esc(g.status)}</span></div>${g.detail?`<div class="dim" style="font-size:11px;margin-top:2px">${esc(g.detail)}</div>`:""}</div>
+        <div class="row" style="gap:6px;flex:none"><button class="miniadd gwork">▶ Work on it</button><button class="miniadd gedit">Edit</button></div>
+      </div>
+      ${krs.length?`<div class="gbar"><div class="gbarfill" style="width:${pct}%"></div></div>
+        <div class="dim" style="font-size:10px;margin:3px 0 5px">${done}/${krs.length} key results · ${pct}%</div>
+        <div class="krlist">${krs.map(k=>`<label class="krchk"><input type="checkbox" data-kr="${k.id}" ${k.done?"checked":""}><span>${esc(k.text)}</span></label>`).join("")}</div>`:`<div class="dim" style="font-size:10px;margin-top:4px">No key results yet — add some to track progress.</div>`}
+      ${runs.length?`<div class="grow">${runs.map(r=>`<span class="rdotv ${esc(r.verdict||"")}" title="${esc(r.objective||"")} — ${esc(r.verdict||"")}"></span>`).join("")}<span class="dim" style="font-size:10px;margin-left:5px">${runs.length} run${runs.length===1?"":"s"} toward this</span></div>`:""}
+    </div>`;
+  }).join("");
+  box.querySelectorAll(".goalcard").forEach(card=>{
+    const id=card.dataset.id;
+    card.querySelector(".gwork").onclick=()=>launchGoalRun(id);
+    card.querySelector(".gedit").onclick=()=>openGoalDialog(list.find(x=>x.id===id));
+    card.querySelectorAll("input[data-kr]").forEach(cb=>cb.onclick=async()=>{
+      const g=list.find(x=>x.id===id);
+      const krs=(g.keyResults||[]).map(k=>({text:k.text, done: String(k.id)===cb.dataset.kr ? cb.checked : !!k.done}));
+      await api("PATCH","/api/goals/"+id,{keyResults:krs}); loadGoals(); loadDashboard();
+    });
+  });
+}
+function openGoalDialog(g){
+  const isEdit=!!g;
+  const wrap=el("div","modalwrap");
+  wrap.innerHTML=`<div class="modal" style="max-width:520px">
+    <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:10px"><h1 style="font-size:16px;margin:0;text-transform:none">${isEdit?"Edit goal":"New goal"}</h1>${isEdit?`<button id="gdel" style="color:var(--danger)">Delete</button>`:""}</div>
+    <div class="fields">
+      <div><label>Goal</label><input id="gtitle" placeholder="Reach 100 active users this quarter" value="${isEdit?esc(g.title):""}"></div>
+      <div><label>Detail (optional)</label><textarea id="gdetail" placeholder="Context, constraints, what 'good' looks like.">${isEdit?esc(g.detail||""):""}</textarea></div>
+      <div><label>Key results (one per line)</label><textarea id="gkrs" placeholder="Publish 4 blog posts&#10;Launch the referral program&#10;Get 20 signups from outreach">${isEdit?esc((g.keyResults||[]).map(k=>k.text).join("\n")):""}</textarea></div>
+      ${isEdit?`<div><label>Status</label><select id="gstatus"><option value="active"${g.status==="active"?" selected":""}>active</option><option value="paused"${g.status==="paused"?" selected":""}>paused</option><option value="done"${g.status==="done"?" selected":""}>done</option></select></div>`:""}
+    </div>
+    <div class="row" style="justify-content:flex-end;gap:10px;margin-top:16px"><button id="gcancel">Cancel</button><button class="primary" id="gsave">${isEdit?"Save":"Add goal"}</button></div></div>`;
+  document.body.appendChild(wrap);
+  wrap.onclick=e=>{ if(e.target===wrap) wrap.remove(); };
+  wrap.querySelector("#gcancel").onclick=()=>wrap.remove();
+  const gd=wrap.querySelector("#gdel"); if(gd) gd.onclick=async()=>{ if(confirm("Delete this goal?")){ await api("DELETE","/api/goals/"+g.id); wrap.remove(); loadGoals(); loadDashboard(); } };
+  wrap.querySelector("#gsave").onclick=async()=>{
+    const title=wrap.querySelector("#gtitle").value.trim(); if(!title){ wrap.querySelector("#gtitle").focus(); return; }
+    const existing=isEdit?(g.keyResults||[]):[];
+    const keyResults=wrap.querySelector("#gkrs").value.split("\n").map(s=>s.trim()).filter(Boolean).map(text=>{ const e=existing.find(k=>k.text===text); return {text, done: e?!!e.done:false}; });
+    const payload={ title, detail:wrap.querySelector("#gdetail").value.trim(), keyResults };
+    if(isEdit){ payload.status=wrap.querySelector("#gstatus").value; await api("PATCH","/api/goals/"+g.id,payload); }
+    else await api("POST","/api/goals",payload);
+    wrap.remove(); loadGoals(); loadDashboard();
+  };
+  wrap.querySelector("#gtitle").focus();
+}
 async function loadSchedules(){
   const box=document.getElementById("schedules"); if(!box) return;
   let data; try{ data=await api("GET","/api/schedules"); }catch{ box.innerHTML=`<div class="dim">Couldn't load schedules.</div>`; return; }
@@ -1322,7 +1410,7 @@ function handleEvent(ev){
         unverified:{c:"dod",t:"Finished — unverified",s:"The QA verifier was unavailable, so this wasn't checked. Please spot-check it."} }[d.verdict];
       if(m) addEv(m.c,`definition of done · ${esc(d.verdict)}`,`<div style="font-size:13px"><b>${m.t}</b></div><div class="dim" style="font-size:11px;margin-top:3px">${m.s}</div>`);
     }
-    if(ES)ES.close(); resetRun(); loadDeliverables(); loadPurchases(); loadDashboard(); refreshInbox(); api("GET","/api/org").then(o=>{ORG=o; render();}).catch(()=>{});
+    if(ES)ES.close(); resetRun(); loadDeliverables(); loadPurchases(); loadDashboard(); loadGoals(); refreshInbox(); api("GET","/api/org").then(o=>{ORG=o; render();}).catch(()=>{});
   }
 }
 

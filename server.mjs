@@ -34,7 +34,7 @@ let TOKEN = "";
 
 // ---------- org store --------------------------------------------------------
 
-const EMPTY_ORG = { ceo: null, vision: "", companyName: "", agents: [], budget: { tokens: 0 }, activity: [], schedules: [], purchases: [], audit: [], guardrails: {}, deliverables: {} };
+const EMPTY_ORG = { ceo: null, vision: "", companyName: "", agents: [], budget: { tokens: 0 }, activity: [], schedules: [], purchases: [], audit: [], guardrails: {}, deliverables: {}, goals: [] };
 // The real "economy": an agent's budget is a DOLLAR allowance for the PAID API model. $0 (default)
 // means the agent may only use the free local model. Token usage is the actual cost, tracked per agent.
 // $ per 1K tokens on the paid model — converts tokens used on paid runs into dollars against an
@@ -50,6 +50,7 @@ function ensureBudget(org) {
   if (!Array.isArray(org.purchases)) org.purchases = [];
   if (!Array.isArray(org.audit)) org.audit = [];                        // append-only provenance log (newest first)
   if (!org.deliverables || typeof org.deliverables !== "object" || Array.isArray(org.deliverables)) org.deliverables = {}; // filename -> {status, versions[], updatedAt, signedOffAt, deliveredAt}
+  if (!Array.isArray(org.goals)) org.goals = [];                        // OKR-style goals: {id,title,detail,status,keyResults[],runs[]}
   // Guardrails: autoApproveUnderUsd = purchases/spend below this may auto-approve; maxActionsPerRun =
   // hard cap on real actions per run (0 = unlimited). Per-agent action allowlists live on the agent.
   org.guardrails = { autoApproveUnderUsd: 0, maxActionsPerRun: 0, ...(org.guardrails || {}) };
@@ -1184,6 +1185,10 @@ async function runGated(run, worker, persistExtra, perAgentTally) {
   if (verdict === "passed" && (run.producedFiles || []).length) {
     await updateOrg((o) => { for (const f of run.producedFiles) { const d = o.deliverables[f]; if (d && d.status === "draft") d.status = "qa"; } }).catch(() => {});
   }
+  // Goals: link this run + its verdict back to the goal it was working toward (newest first).
+  if (run.goalId) {
+    await updateOrg((o) => { const g = (o.goals || []).find((x) => x.id === run.goalId); if (g) g.runs = [{ runId: run.id, at: Date.now(), verdict, objective: String(run.objective).slice(0, 120) }, ...(g.runs || [])].slice(0, 20); }).catch(() => {});
+  }
   finishRun(run, { verdict, met, unmet: unmet.length, total: run.criteria.length, criteria: run.criteria });
   return { verdict, tokens };
 }
@@ -1222,6 +1227,19 @@ function finishRun(run, done = {}) {
 
 // Create a run object and kick it off. Returns { run, done } where done resolves when it finishes.
 // Reused by POST /api/run and the scheduler.
+// Turn a goal into a concrete run objective (used by "Work on it" and goal schedules).
+function goalObjective(g) {
+  const open = (g.keyResults || []).filter((k) => !k.done).map((k) => `- ${k.text}`).join("\n");
+  return `Advance the company goal: "${g.title}".${g.detail ? " " + g.detail : ""}${open ? `\n\nKey results still open:\n${open}` : ""}\n\nMake concrete progress toward it and produce a deliverable capturing the work.`.slice(0, 1000);
+}
+// Normalize a key-results payload (array of strings or {text,done}) into stored {id,text,done}.
+function normKRs(v) {
+  return (Array.isArray(v) ? v : []).map((k, i) => {
+    const text = String((typeof k === "string" ? k : k?.text) || "").trim().slice(0, 160);
+    return text ? { id: i, text, done: !!(k && k.done) } : null;
+  }).filter(Boolean).slice(0, 10);
+}
+
 function beginRun(spec) {
   // Prune finished runs so the in-memory map (and its retained event history) can't grow without
   // bound on a long-lived, self-driving server. Keep the 20 most recent finished runs for replay.
@@ -1234,7 +1252,7 @@ function beginRun(spec) {
     id: newId("run"), mode, agentId: spec.agentId,
     objective: String(spec.objective || "").slice(0, 1000),
     maxTurns: Math.max(1, Math.min(20, Number(spec.maxTurns) || 6)),
-    autoApprove: Boolean(spec.autoApprove), scheduleId: spec.scheduleId || "",
+    autoApprove: Boolean(spec.autoApprove), scheduleId: spec.scheduleId || "", goalId: spec.goalId || "",
     events: [], listeners: new Set(), done: false, stopped: false,
   };
   runs.set(run.id, run);
@@ -1383,6 +1401,7 @@ const server = createServer(async (req, res) => {
         funds: org.budget.funds || 0, spent: org.budget.spent || 0, purchases: (org.purchases || []).length,
         paidAllocated: agents.reduce((s, a) => s + (a.budgetUsd || 0), 0),
         schedules: { total: schedules.length, active: schedules.filter((s) => s.enabled).length },
+        goals: { total: (org.goals || []).length, active: (org.goals || []).filter((g) => g.status === "active").length },
         topAgents,
       });
     }
@@ -1719,6 +1738,51 @@ const server = createServer(async (req, res) => {
       const body = await readBody(req);
       const { run } = beginRun(body);
       return send(res, 201, { runId: run.id });
+    }
+
+    // ----- goals / OKRs: the persistent strategy layer above individual runs -----
+    if (p === "/api/goals" && req.method === "GET") {
+      const org = await readOrg();
+      return send(res, 200, { goals: org.goals || [] });
+    }
+    if (p === "/api/goals" && req.method === "POST") {
+      const body = await readBody(req);
+      const title = String(body.title || "").trim().slice(0, 160);
+      if (!title) return send(res, 400, { error: "title required" });
+      const goal = await updateOrg((o) => {
+        const g = { id: newId("goal"), title, detail: String(body.detail || "").slice(0, 600), status: "active", keyResults: normKRs(body.keyResults), runs: [], createdAt: Date.now() };
+        o.goals.unshift(g);
+        return g;
+      });
+      return send(res, 201, goal);
+    }
+    if (p.startsWith("/api/goals/") && p.endsWith("/run") && req.method === "POST") {
+      const id = p.split("/")[3];
+      const org = await readOrg();
+      const g = (org.goals || []).find((x) => x.id === id);
+      if (!g) return send(res, 404, { error: "not_found" });
+      const body = await readBody(req);
+      const { run } = beginRun({ mode: "company", objective: goalObjective(g), goalId: id, autoApprove: !!body.autoApprove, maxTurns: 6 });
+      return send(res, 201, { runId: run.id });
+    }
+    if (p.startsWith("/api/goals/") && req.method === "PATCH") {
+      const id = p.split("/")[3];
+      const body = await readBody(req);
+      const goal = await updateOrg((o) => {
+        const g = (o.goals || []).find((x) => x.id === id);
+        if (!g) return null;
+        if (body.title !== undefined) g.title = String(body.title).trim().slice(0, 160) || g.title;
+        if (body.detail !== undefined) g.detail = String(body.detail).slice(0, 600);
+        if (body.status !== undefined && ["active", "done", "paused"].includes(body.status)) g.status = body.status;
+        if (body.keyResults !== undefined) g.keyResults = normKRs(body.keyResults);
+        return g;
+      });
+      return goal ? send(res, 200, goal) : send(res, 404, { error: "not_found" });
+    }
+    if (p.startsWith("/api/goals/") && req.method === "DELETE") {
+      const id = p.split("/")[3];
+      await updateOrg((o) => { o.goals = (o.goals || []).filter((x) => x.id !== id); });
+      return send(res, 200, { ok: true });
     }
 
     // ----- schedules -----
