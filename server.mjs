@@ -1968,6 +1968,31 @@ const server = createServer(async (req, res) => {
       const { run } = beginRun(body);
       return send(res, 201, { runId: run.id });
     }
+    // Run history: past runs reconstructed from the audit log (persistent), + in-memory replay flag.
+    if (p === "/api/runs" && req.method === "GET") {
+      const audit = (await readOrg()).audit || [];
+      const runEntries = audit.filter((r) => r.kind === "run");
+      const actionByRun = {};
+      for (const a of audit) if (a.kind === "action" && a.runId) actionByRun[a.runId] = (actionByRun[a.runId] || 0) + 1;
+      const list = runEntries.slice(0, 100).map((r) => ({ runId: r.runId, agent: r.agent || "", objective: r.objective || "", verdict: r.verdict || "", tokens: r.tokens || 0, costUsd: r.costUsd || 0, at: r.at || 0, actions: actionByRun[r.runId] || 0, replayable: runs.has(r.runId) }));
+      const trends = {
+        total: runEntries.length,
+        passed: runEntries.filter((r) => r.verdict === "passed").length,
+        shortfall: runEntries.filter((r) => r.verdict === "shortfall").length,
+        other: runEntries.filter((r) => !["passed", "shortfall"].includes(r.verdict)).length,
+        tokens: runEntries.reduce((s, r) => s + (r.tokens || 0), 0),
+        costUsd: Math.round(runEntries.reduce((s, r) => s + (r.costUsd || 0), 0) * 1e6) / 1e6,
+      };
+      return send(res, 200, { runs: list, trends });
+    }
+    if (p.startsWith("/api/runs/") && req.method === "GET") {
+      const id = p.slice("/api/runs/".length);
+      const audit = (await readOrg()).audit || [];
+      const summary = audit.find((r) => r.kind === "run" && r.runId === id) || null;
+      const actions = audit.filter((r) => r.kind === "action" && r.runId === id);
+      const run = runs.get(id);
+      return send(res, 200, { runId: id, summary, actions, events: run ? run.events : [], replayable: !!run });
+    }
     // Public inbound trigger: an external event fires a preset run. Authed by the secret token in the
     // URL (not the operator). Runs autoApprove like a schedule — but shell/api_call/over-ceiling
     // purchases still require your explicit approval, and all guardrails apply.

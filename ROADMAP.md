@@ -24,7 +24,9 @@ Make the company smarter, connected, and shareable.
    - ✅ **Company templates**: one-click preset teams ("SaaS startup", "content studio", "research lab") with roles + a starter goal, added non-destructively (reuses hire-plan + goals).
    - ⬜ **Persistence beyond JSON**: a real datastore (the single JSON + mutex is already straining under multi-process use). Deferred — most structural change; do carefully when the paused sessions are done.
 
-_Parked but available:_ **paid-model activation / smart routing** — the biggest lever on output quality (local qwen3:8b is the ceiling); starts whenever a paid provider/API key is configured in Latch. Also still in the backlog: dry-run mode, in-app approval seam, declarative policy rules, run-history/replay UI, multi-workspace, office-view revamp.
+**Extra (delivered):** ✅ **Run history & replay UI** — `GET /api/runs` (+ `/:id`) rebuilds past runs from the audit log with trends (runs/passed/shortfall/tokens/cost); a "📜 History" modal lists them and drills into each run's trace (live events if still in memory, else reconstructed from audit actions).
+
+_Parked but available:_ **paid-model activation / smart routing** — the biggest lever on output quality (local qwen3:8b is the ceiling); starts whenever a paid provider/API key is configured in Latch. Also still in the backlog: dry-run mode, in-app approval seam, declarative policy rules, autonomy tiers, multi-workspace, office-view revamp.
 
 ---
 

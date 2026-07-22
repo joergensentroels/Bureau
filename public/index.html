@@ -330,6 +330,7 @@
   <button class="inboxbtn" id="inboxBtn" title="What needs you"><span class="ibell">🔔</span><span>Inbox</span><span class="nbadge" id="inboxBadge">0</span></button>
   <button class="inboxbtn" id="auditBtn" title="Audit log — everything the company has done"><span class="ibell">🧾</span><span>Log</span></button>
   <button class="inboxbtn" id="reviewsBtn" title="Performance reviews — per-agent scorecards + HR recommendations"><span class="ibell">📈</span><span>Reviews</span></button>
+  <button class="inboxbtn" id="historyBtn" title="Run history — browse past runs + replay their traces"><span class="ibell">📜</span><span>History</span></button>
   <a class="stat latchlink" id="latchLink" target="_blank" rel="noopener" title="Open Latch"><span class="k">Latch ↗</span><span class="v"><span class="dot" id="hdot"></span> <span id="hmodel" class="muted">checking…</span><span class="nbadge" id="latchBadge">0</span></span></a>
   <div class="stat" id="fundsStat" style="cursor:pointer" title="Set the company purchasing budget"><span class="k">Company funds</span><span class="v" id="funds">—</span></div>
   <div class="stat"><span class="k" id="balanceK">Paid budget</span><span class="v" id="balance">—</span></div>
@@ -415,6 +416,7 @@ async function boot(){
   const ib=$("#inboxBtn"); if(ib) ib.onclick=openInbox;
   const ab=$("#auditBtn"); if(ab) ab.onclick=openAudit;
   const rvb=$("#reviewsBtn"); if(rvb) rvb.onclick=openReviews;
+  const hib=$("#historyBtn"); if(hib) hib.onclick=openHistory;
   refreshHealth();
   refreshInbox();
   render();
@@ -541,6 +543,42 @@ async function openTemplates(){
       setTimeout(()=>{ wrap.remove(); render(); loadGoals(); }, 700);
     }catch{ b.disabled=false; b.textContent="Add to company"; }
   });
+}
+function histEventLine(ev){
+  const d=ev.data||{}; const w=d.agent||d.manager||"";
+  const m={ start:"▶ start", plan:`plan → ${(d.tasks||[]).map(t=>t.agent).join(", ")}`, assign:`assign → ${d.agent||""}`, say:`turn ${d.turn||"?"}`, propose:`propose ${d.actionType||""}`, verdict:`${d.verdict||""}`, result:`${d.ok?"✓":"✗"} ${d.actionType||""} ${d.url||d.error||""}`, report:"report", done:`✔ done ${d.verdict||""}`, criteria:"criteria set", verify:`verify ${d.met}/${d.total}`, remediate:"sending back", blocked:`⛔ blocked ${d.actionType||""}`, planreview:"plan review", planapproved:"plan approved", planrejected:"plan rejected", error:`error ${d.message||""}` }[ev.type];
+  if(m==null) return "";
+  return `<div class="dl">${esc((w?w+" · ":"")+m)}</div>`;
+}
+async function openRunDetail(id, wrap){
+  const list=wrap.querySelector("#hilist"); if(!list) return;
+  list.innerHTML=`<div class="dim">Loading…</div>`;
+  let d; try{ d=await api("GET","/api/runs/"+encodeURIComponent(id)); }catch{ list.innerHTML=`<div class="dim">Couldn't load run.</div>`; return; }
+  const s=d.summary||{}, evs=d.events||[], acts=d.actions||[];
+  const trace = evs.length ? evs.map(histEventLine).filter(Boolean).join("")
+    : acts.length ? acts.map(a=>`<div class="dl">${a.ok?"✓":"✗"} ${esc(a.actionType||"action")} — ${esc(a.url||a.error||"")}</div>`).join("")
+    : `<div class="dim" style="padding:6px">No detailed trace retained for this run (older runs keep only the summary).</div>`;
+  list.innerHTML=`<button id="hiback" class="rvbtn" style="margin-bottom:8px">‹ back to history</button>
+    <div class="ibt" style="margin-bottom:2px">${esc(s.objective||"(run)")}</div>
+    <div class="ibd" style="margin-bottom:8px">${esc(s.agent||"")} · ${(s.tokens||0).toLocaleString()} tok${s.costUsd?` · $${s.costUsd.toFixed(4)}`:""} · ${esc(s.verdict||"")} · ${d.replayable?"live trace":"reconstructed from audit"}</div>
+    <div class="diffbox">${trace}</div>`;
+  list.querySelector("#hiback").onclick=()=>{ wrap.remove(); openHistory(); };
+}
+async function openHistory(){
+  let d; try{ d=await api("GET","/api/runs"); }catch{ d=null; }
+  const t=(d&&d.trends)||{total:0,passed:0,shortfall:0,other:0,tokens:0,costUsd:0};
+  const list=(d&&d.runs)||[];
+  const vbadge=(v)=> v?`<span class="verdictbadge ${/passed/.test(v)?"passed":/shortfall/.test(v)?"shortfall":"unverified"}">${esc(v)}</span>`:"";
+  const listHtml = list.length ? list.map(r=>`<div class="ibrow click" data-run="${esc(r.runId)}"><span>⚙️</span><div class="ibmain"><div class="ibt">${esc(r.objective||"(run)")}</div><div class="ibd">${esc(r.agent||"")} · ${(r.tokens||0).toLocaleString()} tok${r.costUsd?` · $${r.costUsd.toFixed(4)}`:""} · ${r.actions} action${r.actions===1?"":"s"} · ${ago(r.at)}${r.replayable?" · ▶ replay":""}</div></div>${vbadge(r.verdict)}</div>`).join("") : `<div class="ibempty">No runs recorded yet.</div>`;
+  const wrap=el("div","modalwrap");
+  wrap.innerHTML=`<div class="modal" style="max-width:620px">
+    <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:8px"><h1 style="font-size:16px;margin:0;text-transform:none">📜 Run history</h1><button id="hicl">Close</button></div>
+    <div class="dashcards" style="margin-bottom:12px">${[["Runs",t.total],["Passed",t.passed],["Shortfall",t.shortfall],["Tokens",(t.tokens/1000).toFixed(1)+"k"],["Cost",t.costUsd?"$"+t.costUsd.toFixed(3):"$0"]].map(([k,v])=>`<div class="dashcard"><div class="dcv" style="font-size:18px">${v}</div><div class="dck">${esc(k)}</div></div>`).join("")}</div>
+    <div id="hilist" style="max-height:56vh;overflow:auto">${listHtml}</div></div>`;
+  document.body.appendChild(wrap);
+  wrap.onclick=e=>{ if(e.target===wrap) wrap.remove(); };
+  wrap.querySelector("#hicl").onclick=()=>wrap.remove();
+  wrap.querySelectorAll(".ibrow.click[data-run]").forEach(r=>r.onclick=()=>openRunDetail(r.dataset.run, wrap));
 }
 async function openReviews(){
   let d; try{ d=await api("GET","/api/performance"); }catch{ d=null; }
