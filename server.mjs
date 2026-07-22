@@ -62,6 +62,7 @@ function ensureBudget(org) {
     if (a.tokensUsed == null) a.tokensUsed = 0;
     if (a.paidSpentUsd == null) a.paidSpentUsd = 0;
     if (!Array.isArray(a.allow)) a.allow = [];                          // allowed action types ([] = no restriction)
+    if (!Array.isArray(a.lessons)) a.lessons = [];                      // coaching notes from CEO feedback, injected into prompts
     delete a.salary;                                                    // remove the old fake salary
   });
   return org;
@@ -627,6 +628,9 @@ async function retrieveRelevant(query, limit = 3, excludeName = "") {
 async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 0) {
   const who = agent.name;
   const history = [{ role: "system", content: systemPrompt(org, agent) }];
+  if ((agent.lessons || []).length) history.push({ role: "user", content:
+    "Coaching from the CEO's past feedback on your work — APPLY these; do not repeat the mistakes they point at:\n" +
+    agent.lessons.slice(0, 8).map((l) => `- ${l.text}`).join("\n") });
   if ((agent.memory || []).length) history.push({ role: "user", content:
     "Your own recent work — build on it, don't repeat it. To revise a document you wrote before, use read_file with its filename to get the current content, then file_write the SAME title to overwrite it:\n" +
     agent.memory.slice(0, 5).map((m) => `- "${m.objective}" → ${m.summary}${(m.files || []).length ? ` [files: ${m.files.join(", ")}]` : ""}`).join("\n") });
@@ -1571,6 +1575,37 @@ const server = createServer(async (req, res) => {
       });
     }
 
+    // Performance reviews: per-agent scorecards from the data we already collect (audit + memory +
+    // token cost) plus a heuristic HR recommendation. Counts reflect recent activity (audit is capped).
+    if (p === "/api/performance" && req.method === "GET") {
+      const org = await readOrg();
+      const audit = org.audit || [];
+      const cards = org.agents.map((a) => {
+        const name = a.name;
+        const acts = audit.filter((r) => r.kind === "action" && r.agent === name);
+        const actionOk = acts.filter((r) => r.ok).length;
+        const blocked = audit.filter((r) => r.kind === "blocked" && r.agent === name).length;
+        const runs = audit.filter((r) => r.kind === "run" && r.agent === name);
+        const passed = runs.filter((r) => r.verdict === "passed").length;
+        const passRate = runs.length ? Math.round((passed / runs.length) * 100) : null;
+        const files = new Set(); for (const m of (a.memory || [])) for (const f of (m.files || [])) files.add(f);
+        const deliverables = files.size;
+        const lastAt = Math.max(0, ...audit.filter((r) => r.agent === name).map((r) => r.at || 0));
+        const activity = acts.length + runs.length + deliverables;
+        let rec = "Steady";
+        if (activity === 0) rec = "Idle — give work or reassign";
+        else if (blocked >= 3 && blocked > acts.length * 0.4) rec = "Often blocked — review allowlist / coach";
+        else if (runs.length >= 3 && passRate != null && passRate >= 80) rec = "Strong — consider more responsibility";
+        else if (runs.length >= 3 && passRate != null && passRate < 40) rec = "Low pass-rate — coach / reassign";
+        else if (deliverables >= 3 && actionOk === acts.length) rec = "Reliable producer";
+        return { name, seed: a.seed, role: a.role, department: a.department || "", hr: !!a.hr,
+          tokensUsed: a.tokensUsed || 0, paidSpentUsd: a.paidSpentUsd || 0,
+          actions: acts.length, actionOk, blocked, runs: runs.length, passRate, deliverables,
+          lessons: (a.lessons || []).length, lastAt, rec };
+      }).sort((x, y) => (y.actions + y.runs + y.deliverables) - (x.actions + x.runs + x.deliverables));
+      return send(res, 200, { agents: cards, generatedAt: Date.now(), auditWindow: audit.length });
+    }
+
     // Deliverables: the documents agents have actually written to foreman/drafts/ via file_write.
     if (p === "/api/deliverables" && req.method === "GET") {
       let files = [];
@@ -1874,6 +1909,8 @@ const server = createServer(async (req, res) => {
         if (body.department !== undefined) agent.department = String(body.department).slice(0, 60);
         if (body.budgetUsd !== undefined && Number.isFinite(+body.budgetUsd) && +body.budgetUsd >= 0) agent.budgetUsd = +body.budgetUsd;
         if (body.allow !== undefined) agent.allow = Array.isArray(body.allow) ? [...new Set(body.allow.map((x) => String(x).toLowerCase().slice(0, 24)).filter(Boolean))].slice(0, 12) : [];
+        if (body.addLesson) agent.lessons = [{ text: String(body.addLesson).slice(0, 240), at: Date.now() }, ...(agent.lessons || [])].slice(0, 8);   // append CEO coaching from feedback
+        if (Array.isArray(body.lessons)) agent.lessons = body.lessons.map((l) => ({ text: String(typeof l === "string" ? l : l?.text || "").slice(0, 240), at: (l && l.at) || Date.now() })).filter((l) => l.text).slice(0, 8);
         if (body.focus !== undefined) agent.focus = String(body.focus).slice(0, 400);
         if (body.bio !== undefined) agent.bio = String(body.bio).slice(0, 4000);
         if (body.managerId !== undefined) {

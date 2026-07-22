@@ -12,11 +12,11 @@ _Last updated 2026-07-22._
 
 Make the company smarter, connected, and shareable.
 
-1. **Self-optimizing org** ⬜
-   - Per-agent **scorecards** from existing data: DoD pass-rate, throughput, token/$ cost, guardrail-block rate.
-   - **HR recommendations**: promote / reassign / coach / let-go based on the scorecards.
-   - **Learn from your feedback**: rejected plans, revisions, and denied actions are captured (with reason) and folded into that agent's future prompts — quality compounds.
-   - (Stretch) **goal retrospectives** — a "what worked / what to change" note when a goal closes.
+1. **Self-optimizing org** ✅
+   - Per-agent **scorecards** from existing data (audit + memory + cost): runs, DoD pass-rate, deliverables, actions/ok, guardrail blocks, token/$ cost. `GET /api/performance` + a "📈 Reviews" modal.
+   - **HR recommendations** (heuristic): idle / often-blocked / strong / low-pass-rate / reliable-producer.
+   - **Learn from your feedback**: per-agent `lessons` injected into prompts; revision feedback auto-captured as a coaching note; editable in the agent modal.
+   - (Stretch, not done) goal retrospectives.
 2. **Real integrations** ⬜
    - Push work OUT: GitHub (PRs/issues), Slack (updates), Drive/Notion (publish deliverables) — built on `api_call`/webhook + credentials.
    - **Inbound triggers**: an external event (email / GitHub issue / webhook-in) starts a run. Bureau becomes reactive.

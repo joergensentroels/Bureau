@@ -105,6 +105,12 @@
   .grow{display:flex;align-items:center;gap:3px;margin-top:7px}
   .rdotv{width:9px;height:9px;border-radius:2px;display:inline-block;background:var(--idle)}
   .rdotv.passed{background:var(--ok)} .rdotv.shortfall{background:var(--warn)} .rdotv.rejected{background:var(--danger)} .rdotv.unverified{background:var(--ink-3)}
+  .revcard{background:var(--panel-2);border:1px solid var(--line-2);border-radius:10px;padding:10px 12px;margin-bottom:8px}
+  .revstats{display:flex;flex-wrap:wrap;gap:4px 12px;margin-top:7px;font-size:11px;color:var(--ink-2)}
+  .rec{font-size:10px;font-weight:700;padding:2px 8px;border-radius:8px;background:var(--panel-2);border:1px solid var(--line-2);color:var(--ink-2);white-space:nowrap;align-self:flex-start}
+  .rec.good{background:rgba(89,217,179,.14);color:var(--ok);border-color:rgba(89,217,179,.4)}
+  .rec.warn{background:rgba(240,177,90,.16);color:var(--warn);border-color:rgba(240,177,90,.4)}
+  #revlist{max-height:64vh;overflow:auto}
   .inboxbtn .ibell{font-size:13px;line-height:1;filter:grayscale(.2)}
   .inboxbtn.hot{border-color:var(--warn);color:var(--ink)}
   .inboxbtn.hot .ibell{animation:ibell .9s ease 1}
@@ -323,6 +329,7 @@
   <div class="toggle themeswitch"><button data-theme-btn="ops">Ops</button><button data-theme-btn="pixel">Tycoon</button></div>
   <button class="inboxbtn" id="inboxBtn" title="What needs you"><span class="ibell">🔔</span><span>Inbox</span><span class="nbadge" id="inboxBadge">0</span></button>
   <button class="inboxbtn" id="auditBtn" title="Audit log — everything the company has done"><span class="ibell">🧾</span><span>Log</span></button>
+  <button class="inboxbtn" id="reviewsBtn" title="Performance reviews — per-agent scorecards + HR recommendations"><span class="ibell">📈</span><span>Reviews</span></button>
   <a class="stat latchlink" id="latchLink" target="_blank" rel="noopener" title="Open Latch"><span class="k">Latch ↗</span><span class="v"><span class="dot" id="hdot"></span> <span id="hmodel" class="muted">checking…</span><span class="nbadge" id="latchBadge">0</span></span></a>
   <div class="stat" id="fundsStat" style="cursor:pointer" title="Set the company purchasing budget"><span class="k">Company funds</span><span class="v" id="funds">—</span></div>
   <div class="stat"><span class="k" id="balanceK">Paid budget</span><span class="v" id="balance">—</span></div>
@@ -407,6 +414,7 @@ async function boot(){
   catch{ return showReconnect(); }               // server briefly unreachable — show a retry screen, not a blank page
   const ib=$("#inboxBtn"); if(ib) ib.onclick=openInbox;
   const ab=$("#auditBtn"); if(ab) ab.onclick=openAudit;
+  const rvb=$("#reviewsBtn"); if(rvb) rvb.onclick=openReviews;
   refreshHealth();
   refreshInbox();
   render();
@@ -490,6 +498,34 @@ async function openGuardrails(){
     await api("POST","/api/notify",{ webhook: wrap.querySelector("#gWebhook").value.trim() });
     wrap.remove();
   };
+}
+async function openReviews(){
+  let d; try{ d=await api("GET","/api/performance"); }catch{ d=null; }
+  const cards=(d&&d.agents)||[];
+  const recCls=(rec)=> /Strong|Reliable/.test(rec)?"good" : /Idle|Low pass|blocked/.test(rec)?"warn" : "";
+  const body = !d ? `<div class="ibempty">Couldn't load reviews.</div>`
+    : !cards.length ? `<div class="ibempty">No agents yet.</div>`
+    : cards.map(c=>`<div class="revcard">
+        <div class="row" style="justify-content:space-between;align-items:flex-start;gap:8px">
+          <div style="display:flex;align-items:center;gap:6px;min-width:0">${avatar(c.seed,26)}<span style="min-width:0"><b>${esc(c.name)}</b>${c.hr?'<span class="hrtag">HR</span>':''} <span class="dim" style="font-size:11px">${esc(c.role)}</span></span></div>
+          <span class="rec ${recCls(c.rec)}">${esc(c.rec)}</span>
+        </div>
+        <div class="revstats">
+          <span>${c.runs} run${c.runs===1?"":"s"}${c.passRate!=null?` · ${c.passRate}% pass`:""}</span>
+          <span>${c.deliverables} deliverable${c.deliverables===1?"":"s"}</span>
+          <span>${c.actions} action${c.actions===1?"":"s"}${c.actions?` (${c.actionOk} ok)`:""}</span>
+          ${c.blocked?`<span style="color:var(--danger)">${c.blocked} blocked</span>`:""}
+          <span>${(c.tokensUsed/1000).toFixed(1)}k tok${c.paidSpentUsd?` · $${c.paidSpentUsd.toFixed(3)}`:""}</span>
+          ${c.lessons?`<span title="coaching notes">🎓 ${c.lessons}</span>`:""}
+        </div></div>`).join("");
+  const wrap=el("div","modalwrap");
+  wrap.innerHTML=`<div class="modal" style="max-width:600px">
+    <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:6px"><h1 style="font-size:16px;margin:0;text-transform:none">📈 Performance reviews</h1><button id="rvcl">Close</button></div>
+    <div class="dim" style="font-size:11px;margin-bottom:10px">Scorecards from recent activity (audit window: ${d?d.auditWindow:0} events) + HR recommendations. To coach an agent, open its card → Advanced → Coaching notes.</div>
+    <div id="revlist">${body}</div></div>`;
+  document.body.appendChild(wrap);
+  wrap.onclick=e=>{ if(e.target===wrap) wrap.remove(); };
+  wrap.querySelector("#rvcl").onclick=()=>wrap.remove();
 }
 async function openAudit(){
   const wrap=el("div","modalwrap");
@@ -1230,6 +1266,7 @@ function openRevise(name, authorId, authorName){
   wrap.querySelector("#rvc").onclick=()=>wrap.remove();
   wrap.querySelector("#rvg").onclick=()=>{ const fb=wrap.querySelector("#rvfb").value.trim(); if(!fb){wrap.querySelector("#rvfb").focus();return;} wrap.remove();
     const objective=`Revise your document "${name}" using this feedback from the CEO: "${fb}". First use read_file with command "${name}" to get the current content, then apply the feedback and use file_write with title "${base}" to overwrite the same document. Output the COMPLETE revised document, not just the changes.`;
+    if(authorId) api("PATCH","/api/agents/"+authorId,{addLesson:`Revision the CEO asked for on "${name}": ${fb}`}).catch(()=>{});   // capture feedback as a coaching note
     launchRun(authorId ? {agentId:authorId, objective, maxTurns:4, autoApprove:true} : {mode:"company", objective, maxTurns:4, autoApprove:true});
   };
   wrap.querySelector("#rvfb").focus();
@@ -1572,6 +1609,7 @@ function openAgentModal(mode, agent, opts){
       <div><label>Allowed actions <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">— none checked = all allowed</span></label>
         <div class="allowgrid" id="mallow">${[["web_search","🔎 Web search"],["web_research","🌐 Fetch page"],["file_write","📄 Write file"],["read_file","📖 Read file"],["purchase","🛒 Purchase"],["api_call","🔌 API call"],["shell","⌨️ Shell"]].map(([v,lbl])=>`<label class="allowchk"><input type="checkbox" value="${v}" ${isEdit&&(agent.allow||[]).includes(v)?"checked":""}>${lbl}</label>`).join("")}</div>
         <div class="dim" style="font-size:11px;margin-top:4px">Check specific actions to restrict this agent to only those. Blocked attempts are refused and logged.</div></div>
+      ${isEdit?`<div><label>Coaching notes <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">— one per line; injected into ${esc(agent.name)}'s prompts. Auto-added when you revise its work.</span></label><textarea id="mlessons" placeholder="Cite sources for every claim.&#10;Keep emails under 150 words.">${isEdit?esc((agent.lessons||[]).map(l=>l.text).join("\n")):""}</textarea></div>`:""}
       <div><label>Personality — free text, sent to the model</label>
         <textarea id="mpersona" placeholder="You are exacting and never ship sloppy work.">${isEdit?esc(agent.persona||""):""}</textarea></div>
       <div><label>Traits — free text, each one is sent to the model</label>
@@ -1658,6 +1696,7 @@ function openAgentModal(mode, agent, opts){
     const payload={ name:$("#mname",wrap).value.trim()||role, role, persona:$("#mpersona",wrap).value.trim(), traits:[...chosen], managerId:$("#mmgr",wrap).value, hr:$("#mhr",wrap).checked, department:$("#mdept",wrap).value.trim(), bio:$("#mbio",wrap).value.trim() };
     payload.budgetUsd = budVal==="" ? 0 : Number(budVal);
     payload.allow = [...wrap.querySelectorAll("#mallow input:checked")].map(c=>c.value);
+    if(isEdit){ const ml=$("#mlessons",wrap); if(ml) payload.lessons = ml.value.split("\n").map(s=>s.trim()).filter(Boolean); }
     if(isEdit) await api("PATCH","/api/agents/"+agent.id,payload); else await api("POST","/api/agents",payload);
     wrap.remove(); ORG=await api("GET","/api/org"); render();
   };
