@@ -16,7 +16,7 @@ Make the company smarter, connected, and shareable.
    - Per-agent **scorecards** from existing data (audit + memory + cost): runs, DoD pass-rate, deliverables, actions/ok, guardrail blocks, token/$ cost. `GET /api/performance` + a "📈 Reviews" modal.
    - **HR recommendations** (heuristic): idle / often-blocked / strong / low-pass-rate / reliable-producer.
    - **Learn from your feedback**: per-agent `lessons` injected into prompts; revision feedback auto-captured as a coaching note; editable in the agent modal.
-   - (Stretch, not done) goal retrospectives.
+   - ✅ **Goal retrospectives**: closing a goal generates a "what worked / what to change" note (async LLM), shown on the goal card, audited, and injected into future runs' context.
 2. **Real integrations** ◐
    - ⬜ Push work OUT: GitHub (PRs/issues), Slack (updates), Drive/Notion — built on `api_call`/webhook + credentials (needs your tokens; do together).
    - ✅ **Inbound triggers**: a secret webhook URL per trigger; an external POST fires a preset run (autoApprove, but shell/api_call/over-ceiling purchases still gated), payload passed in as context. Managed in a "Triggers" section.

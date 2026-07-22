@@ -644,6 +644,10 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
     if (rel.length) history.push({ role: "user", content:
       `Relevant existing company deliverables — build on or reuse these; do NOT redo work already done:\n\n${rel.map((r) => `### ${r.name}\n${r.excerpt}`).join("\n\n")}` });
   } catch {}
+  // Retrospectives from completed company goals — apply their lessons.
+  const retros = (org.goals || []).filter((g) => g.retro && g.retro.text).sort((a, b) => (b.retro.at || 0) - (a.retro.at || 0)).slice(0, 2);
+  if (retros.length) history.push({ role: "user", content:
+    `Retrospectives from completed company goals — apply these lessons:\n${retros.map((g) => `- (${g.title}) ${g.retro.text}`).join("\n")}` });
   history.push({ role: "user", content: `Your task: ${objective}` });
   let tokens = 0, summary = "", step = 0;
   const gr = org.guardrails || {};   // company guardrails: allowlist (per-agent) + action cap + purchase ceiling
@@ -1394,6 +1398,27 @@ function setGoalCadence(o, g, cad) {
   }
 }
 
+// When a goal is marked done, an agent writes a short retrospective (what worked / what to change).
+// Async + fire-and-forget so it doesn't block the PATCH; stored on the goal and fed into future runs.
+async function generateRetro(goalId) {
+  let goal; try { goal = (await readOrg()).goals.find((g) => g.id === goalId); } catch { return; }
+  if (!goal) return;
+  const krs = goal.keyResults || [], doneK = krs.filter((k) => k.done).length;
+  const runs = (goal.runs || []).slice(0, 10);
+  const msgs = [
+    { role: "system", content: [
+      "You are a pragmatic operator writing a short retrospective on a company goal that just closed.",
+      "In 3-5 sentences: what actually worked, what fell short, and 1-2 concrete changes to try next time.",
+      "Plain text — no headings, no preamble, no bullet points. Be specific and useful, not generic.",
+    ].join("\n") },
+    { role: "user", content: `Goal: "${goal.title}"${goal.detail ? " — " + goal.detail : ""}\nKey results: ${doneK}/${krs.length} done${krs.length ? " — " + krs.map((k) => `${k.done ? "[x]" : "[ ]"} ${k.text}`).join("; ") : ""}\nRuns toward it: ${runs.length ? runs.map((r) => `${r.verdict} (${(r.objective || "").slice(0, 50)})`).join("; ") : "none"}\n\n/no_think` },
+  ];
+  let text = ""; try { text = (await askLlm(msgs, { maxTokens: 600 })).replace(/<think>[\s\S]*?<\/think>/gi, "").trim().slice(0, 800); } catch { return; }
+  if (!text) return;
+  await updateOrg((o) => { const g = (o.goals || []).find((x) => x.id === goalId); if (g) g.retro = { text, at: Date.now() }; }).catch(() => {});
+  logAudit({ kind: "retro", name: goal.title, actionType: "goal_retro", decision: "auto" });
+}
+
 function beginRun(spec) {
   // Prune finished runs so the in-memory map (and its retained event history) can't grow without
   // bound on a long-lived, self-driving server. Keep the 20 most recent finished runs for replay.
@@ -1988,17 +2013,22 @@ const server = createServer(async (req, res) => {
     if (p.startsWith("/api/goals/") && req.method === "PATCH") {
       const id = p.split("/")[3];
       const body = await readBody(req);
+      let becameDone = false;
       const goal = await updateOrg((o) => {
         const g = (o.goals || []).find((x) => x.id === id);
         if (!g) return null;
         if (body.title !== undefined) g.title = String(body.title).trim().slice(0, 160) || g.title;
         if (body.detail !== undefined) g.detail = String(body.detail).slice(0, 600);
-        if (body.status !== undefined && ["active", "done", "paused"].includes(body.status)) g.status = body.status;
+        if (body.status !== undefined && ["active", "done", "paused"].includes(body.status)) {
+          if (body.status === "done" && g.status !== "done" && ((g.runs || []).length || (g.keyResults || []).length)) becameDone = true;
+          g.status = body.status;
+        }
         if (body.keyResults !== undefined) g.keyResults = normKRs(body.keyResults);
         if (body.title !== undefined && g.scheduleId) { const sc = (o.schedules || []).find((s) => s.id === g.scheduleId); if (sc) sc.objective = `Advance goal: ${g.title}`.slice(0, 1000); }
         if (body.cadence !== undefined) setGoalCadence(o, g, body.cadence);
         return g;
       });
+      if (goal && becameDone) generateRetro(goal.id);   // async retrospective when a goal closes
       return goal ? send(res, 200, goal) : send(res, 404, { error: "not_found" });
     }
     if (p.startsWith("/api/goals/") && req.method === "DELETE") {

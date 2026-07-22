@@ -1368,6 +1368,7 @@ async function loadGoals(){
         <div class="dim" style="font-size:10px;margin:3px 0 5px">${done}/${krs.length} key results · ${pct}%</div>
         <div class="krlist">${krs.map(k=>`<label class="krchk"><input type="checkbox" data-kr="${k.id}" ${k.done?"checked":""}><span>${esc(k.text)}</span></label>`).join("")}</div>`:`<div class="dim" style="font-size:10px;margin-top:4px">No key results yet — add some to track progress.</div>`}
       ${runs.length?`<div class="grow">${runs.map(r=>`<span class="rdotv ${esc(r.verdict||"")}" title="${esc(r.objective||"")} — ${esc(r.verdict||"")}"></span>`).join("")}<span class="dim" style="font-size:10px;margin-left:5px">${runs.length} run${runs.length===1?"":"s"} toward this</span></div>`:""}
+      ${g.retro&&g.retro.text?`<div class="dim" style="font-size:11px;margin-top:7px;border-top:1px dashed var(--line-2);padding-top:6px">📓 <b style="font-weight:600">Retrospective</b> — ${esc(g.retro.text)}</div>`:""}
     </div>`;
   }).join("");
   box.querySelectorAll(".goalcard").forEach(card=>{
