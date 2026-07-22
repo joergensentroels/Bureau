@@ -80,6 +80,9 @@
   .decbadge.auto{background:var(--panel-2);color:var(--ink-2);border:1px solid var(--line-2)}
   .decbadge.you{background:rgba(89,217,179,.14);color:var(--accent-2);border:1px solid rgba(89,217,179,.35)}
   .decbadge.denied{background:rgba(224,112,95,.16);color:var(--danger);border:1px solid rgba(224,112,95,.4)}
+  .allowgrid{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:6px}
+  .allowchk{display:inline-flex;align-items:center;gap:5px;font-size:12px;text-transform:none;letter-spacing:0;color:var(--ink-2);cursor:pointer}
+  .allowchk input{width:auto;margin:0}
   .inboxbtn .ibell{font-size:13px;line-height:1;filter:grayscale(.2)}
   .inboxbtn.hot{border-color:var(--warn);color:var(--ink)}
   .inboxbtn.hot .ibell{animation:ibell .9s ease 1}
@@ -433,14 +436,35 @@ function auditLine(r){
   const ic={file_write:"📄",web_search:"🔎",web_research:"🌐",read_file:"📖",purchase:"🛒"}[r.actionType]||"•";
   return `<div class="ibrow"><span>${ic}</span><div class="ibmain"><div class="ibt">${esc(r.agent||"")} · ${esc(r.actionType||"action")}</div><div class="ibd">${r.ok?"✓":"✗"} ${esc(r.url||r.error||"")}${r.bytes?` · ${(r.bytes/1024).toFixed(1)} KB`:""} · ${ago(r.at)}</div></div>${dec}</div>`;
 }
+async function openGuardrails(){
+  let g; try{ g=await api("GET","/api/guardrails"); }catch{ g={}; }
+  const wrap=el("div","modalwrap");
+  wrap.innerHTML=`<div class="modal" style="max-width:440px">
+    <h1 style="font-size:16px;margin:0 0 4px;text-transform:none">🛡️ Guardrails</h1>
+    <div class="dim" style="font-size:12px;margin-bottom:14px">Company-wide limits on what agents can do unattended.</div>
+    <div class="fields">
+      <div><label>Auto-approve purchases under ($ — 0 = off)</label><input id="gAuto" type="number" min="0" step="1" value="${g.autoApproveUnderUsd||0}"></div>
+      <div><label>Max real actions per run (0 = unlimited)</label><input id="gCap" type="number" min="0" max="100" step="1" value="${g.maxActionsPerRun||0}"></div>
+    </div>
+    <div class="dim" style="font-size:11px;margin-top:8px">Purchases over the threshold always require your decision in Latch — even on auto-approve or scheduled runs. Which action types each agent may use is set per-agent (open an agent → Advanced).</div>
+    <div class="row" style="justify-content:flex-end;gap:10px;margin-top:16px"><button id="gc">Cancel</button><button class="primary" id="gs">Save</button></div></div>`;
+  document.body.appendChild(wrap);
+  wrap.onclick=e=>{ if(e.target===wrap) wrap.remove(); };
+  wrap.querySelector("#gc").onclick=()=>wrap.remove();
+  wrap.querySelector("#gs").onclick=async()=>{
+    await api("POST","/api/guardrails",{ autoApproveUnderUsd:parseFloat(wrap.querySelector("#gAuto").value)||0, maxActionsPerRun:parseInt(wrap.querySelector("#gCap").value)||0 });
+    wrap.remove();
+  };
+}
 async function openAudit(){
   const wrap=el("div","modalwrap");
   wrap.innerHTML=`<div class="modal" style="max-width:600px">
-    <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:10px"><h1 style="font-size:16px;margin:0;text-transform:none">🧾 Audit log</h1><button id="aucl">Close</button></div>
+    <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:10px"><h1 style="font-size:16px;margin:0;text-transform:none">🧾 Audit log</h1><div class="row" style="gap:8px"><button id="augr">🛡️ Guardrails</button><button id="aucl">Close</button></div></div>
     <div class="audfilters" id="audf"></div><div id="audlist"><div class="ibempty">Loading…</div></div></div>`;
   document.body.appendChild(wrap);
   wrap.onclick=e=>{ if(e.target===wrap) wrap.remove(); };
   wrap.querySelector("#aucl").onclick=()=>wrap.remove();
+  wrap.querySelector("#augr").onclick=()=>{ wrap.remove(); openGuardrails(); };
   let cur="";
   async function load(f){
     cur=f;
@@ -1223,6 +1247,7 @@ function handleEvent(ev){
   else if(ev.type==="verify"){ const cls=d.unmet?"dodfail":"dodpass";
     addEv(cls,`QA · verification${d.attempt?` · pass ${d.attempt+1}`:""}`,`<div style="font-size:12px;margin-bottom:5px"><b>${d.met}/${d.total}</b> criteria met${d.unmet?` · <span style="color:var(--danger)">${d.unmet} unmet</span>`:` · <span style="color:var(--ok)">all clear</span>`}</div>${critList(d.items,true)}`, dep); }
   else if(ev.type==="remediate") addEv("dod","QA · sending back",`<div class="dim" style="font-size:12px;margin-bottom:3px">${d.unmet.length} item${d.unmet.length===1?"":"s"} kicked back to the team to fix:</div><div class="dodlist">${d.unmet.map(t=>`<div class="dodrow unmet"><span class="dodic">↩</span><span class="dodt">${esc(t)}</span></div>`).join("")}</div>`, dep);
+  else if(ev.type==="blocked") addEv("denied",who("blocked by guardrail"),`<div class="dim">⛔ ${esc(d.actionType||"action")} — ${esc(d.reason||"not permitted")}</div>`, dep);
   else if(ev.type==="error") addEv("error",who("error"),`<div>${esc(d.message)}</div>`, dep);
   else if(ev.type==="budget"){ $("#budget").textContent=(d.totalTokens||0).toLocaleString();
     const paidLine = d.ranPaid
@@ -1367,6 +1392,9 @@ function openAgentModal(mode, agent, opts){
       <div><label>Department</label><input id="mdept" list="mdeptlist" placeholder="Product & Technology" value="${isEdit?esc(agent.department||""):""}">
         <datalist id="mdeptlist">${[...new Set(["Leadership","Product & Technology","Sales & Revenue","Marketing","Customer Success & Support","Security","Operations","People",...ORG.agents.map(a=>a.department).filter(Boolean)])].map(d=>`<option value="${esc(d)}"></option>`).join("")}</datalist></div>
       <div><label>Paid-API budget ($) — 0 = local model only</label><input id="mbudget" type="number" min="0" step="1" placeholder="0 (local model)" value="${isEdit&&agent.budgetUsd?agent.budgetUsd:""}"><div class="dim" style="font-size:11px;margin-top:4px">$0 keeps this agent on the free local model. A budget lets it use the paid API (once a provider is configured) up to that amount.</div></div>
+      <div><label>Allowed actions <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">— none checked = all allowed</span></label>
+        <div class="allowgrid" id="mallow">${[["web_search","🔎 Web search"],["web_research","🌐 Fetch page"],["file_write","📄 Write file"],["read_file","📖 Read file"],["purchase","🛒 Purchase"]].map(([v,lbl])=>`<label class="allowchk"><input type="checkbox" value="${v}" ${isEdit&&(agent.allow||[]).includes(v)?"checked":""}>${lbl}</label>`).join("")}</div>
+        <div class="dim" style="font-size:11px;margin-top:4px">Check specific actions to restrict this agent to only those. Blocked attempts are refused and logged.</div></div>
       <div><label>Personality — free text, sent to the model</label>
         <textarea id="mpersona" placeholder="You are exacting and never ship sloppy work.">${isEdit?esc(agent.persona||""):""}</textarea></div>
       <div><label>Traits — free text, each one is sent to the model</label>
@@ -1452,6 +1480,7 @@ function openAgentModal(mode, agent, opts){
     const budVal=$("#mbudget",wrap).value.trim();
     const payload={ name:$("#mname",wrap).value.trim()||role, role, persona:$("#mpersona",wrap).value.trim(), traits:[...chosen], managerId:$("#mmgr",wrap).value, hr:$("#mhr",wrap).checked, department:$("#mdept",wrap).value.trim(), bio:$("#mbio",wrap).value.trim() };
     payload.budgetUsd = budVal==="" ? 0 : Number(budVal);
+    payload.allow = [...wrap.querySelectorAll("#mallow input:checked")].map(c=>c.value);
     if(isEdit) await api("PATCH","/api/agents/"+agent.id,payload); else await api("POST","/api/agents",payload);
     wrap.remove(); ORG=await api("GET","/api/org"); render();
   };

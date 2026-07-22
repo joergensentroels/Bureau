@@ -526,6 +526,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
     `Work your teammates have already produced toward this goal. USE it directly — do NOT ask anyone to provide it:\n\n${priorWork}` });
   history.push({ role: "user", content: `Your task: ${objective}` });
   let tokens = 0, summary = "", step = 0;
+  const gr = org.guardrails || {};   // company guardrails: allowlist (per-agent) + action cap + purchase ceiling
   const artifacts = [], filesWritten = [];
   // Per-agent PAID-model economy. budgetUsd is the agent's dollar allowance for the paid API;
   // paidSpentUsd is what it has already spent (from prior runs). We only route to the paid provider
@@ -618,15 +619,36 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
     }
 
     artifacts.push({ title: next.title || "action", detail: next.command || next.details || "" });
+    // ---- Guardrails: per-agent action allowlist, per-run action cap, purchase auto-approve ceiling ----
+    const actType = String(next.actionType || "").toLowerCase();
+    if (Array.isArray(agent.allow) && agent.allow.length && !agent.allow.includes(actType)) {
+      emit(run, "blocked", { agent: who, depth, actionType: actType, reason: "not in this agent's allowlist" });
+      logAudit({ kind: "blocked", runId: run.id, agentId: agent.id, agent: who, actionType: actType, error: "not permitted for this agent", decision: "denied" });
+      history.push({ role: "user", content: `BLOCKED: you are not permitted to run "${actType}". Your allowed actions are: ${agent.allow.join(", ")}. Use one of those or finish.` });
+      continue;
+    }
+    const actCap = Number(gr.maxActionsPerRun) || 0;
+    if (actCap > 0 && (run.actionCount || 0) >= actCap) {
+      emit(run, "blocked", { agent: who, depth, actionType: actType, reason: `action limit ${actCap}/run reached` });
+      logAudit({ kind: "blocked", runId: run.id, agentId: agent.id, agent: who, actionType: actType, error: `action limit ${actCap}/run reached`, decision: "denied" });
+      history.push({ role: "user", content: `BLOCKED: this run has hit its action limit (${actCap}). Finish with what you already have.` });
+      continue;
+    }
+    run.actionCount = (run.actionCount || 0) + 1;
+    let effectiveAuto = run.autoApprove;   // purchases over the ceiling always require the CEO, even in auto-approve runs
+    if (actType === "purchase" && Number(gr.autoApproveUnderUsd) > 0) {
+      const pc = Math.max(0, parseFloat(String(next.command || next.details || "").replace(/[^0-9.]/g, "")) || 0);
+      if (pc > Number(gr.autoApproveUnderUsd)) effectiveAuto = false;
+    }
     const approval = await fileApproval(agent, next);
     emit(run, "propose", {
       agent: who, depth, approvalId: approval.id, actionType: next.actionType || "other",
       title: next.title || "", details: next.details || "", command: next.command || "",
-      corrected, autoApprove: run.autoApprove,
+      corrected, autoApprove: effectiveAuto,
     });
 
     let verdict = "pending";
-    if (run.autoApprove) {
+    if (effectiveAuto) {
       await latch("PATCH", `/api/approvals/${approval.id}`, { status: "approved", note: "playtest auto-approve" });
       verdict = "approved";
     } else {
@@ -639,7 +661,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
       }
       setAgentState(agent.id, "working", objective.slice(0, 80));
     }
-    emit(run, "verdict", { agent: who, depth, approvalId: approval.id, verdict, auto: run.autoApprove });
+    emit(run, "verdict", { agent: who, depth, approvalId: approval.id, verdict, auto: effectiveAuto });
 
     if (verdict === "approved") {
       if ((next.actionType || "") === "web_research") {
@@ -1254,6 +1276,19 @@ const server = createServer(async (req, res) => {
       const org = await updateOrg((org) => { org.budget.funds = funds; });
       return send(res, 200, { funds: org.budget.funds, spent: org.budget.spent || 0 });
     }
+    // Company guardrails: purchase auto-approve ceiling + per-run action cap.
+    if (p === "/api/guardrails" && req.method === "GET") {
+      const org = await readOrg();
+      return send(res, 200, org.guardrails || {});
+    }
+    if (p === "/api/guardrails" && req.method === "POST") {
+      const body = await readBody(req);
+      const org = await updateOrg((o) => {
+        if (body.autoApproveUnderUsd !== undefined) o.guardrails.autoApproveUnderUsd = Math.max(0, Math.round((parseFloat(body.autoApproveUnderUsd) || 0) * 100) / 100);
+        if (body.maxActionsPerRun !== undefined) o.guardrails.maxActionsPerRun = Math.max(0, Math.min(100, Math.round(Number(body.maxActionsPerRun) || 0)));
+      });
+      return send(res, 200, org.guardrails);
+    }
     if (p === "/api/purchases" && req.method === "GET") {
       const org = await readOrg();
       return send(res, 200, { purchases: org.purchases || [], funds: org.budget.funds || 0, spent: org.budget.spent || 0 });
@@ -1562,6 +1597,7 @@ const server = createServer(async (req, res) => {
         if (body.hr !== undefined) agent.hr = Boolean(body.hr);
         if (body.department !== undefined) agent.department = String(body.department).slice(0, 60);
         if (body.budgetUsd !== undefined && Number.isFinite(+body.budgetUsd) && +body.budgetUsd >= 0) agent.budgetUsd = +body.budgetUsd;
+        if (body.allow !== undefined) agent.allow = Array.isArray(body.allow) ? [...new Set(body.allow.map((x) => String(x).toLowerCase().slice(0, 24)).filter(Boolean))].slice(0, 12) : [];
         if (body.focus !== undefined) agent.focus = String(body.focus).slice(0, 400);
         if (body.bio !== undefined) agent.bio = String(body.bio).slice(0, 4000);
         if (body.managerId !== undefined) {
