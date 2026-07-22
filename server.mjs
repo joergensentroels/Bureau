@@ -1651,11 +1651,15 @@ function sendRaw(res, status, buf, type) {
   res.writeHead(status, { "content-type": type, "cache-control": "public, max-age=31536000, immutable" });
   res.end(buf);
 }
+const MAX_BODY = 4 * 1024 * 1024;   // 4 MB cap — a run objective/document is KBs; anything larger is abuse
 async function readBody(req) {
-  const chunks = [];
-  for await (const c of req) chunks.push(c);
+  const chunks = []; let size = 0, over = false;
+  // Keep consuming the stream to its end (so we can answer with a clean 413 rather than resetting the
+  // socket mid-upload), but stop RETAINING bytes once over the cap — memory stays bounded to MAX_BODY.
+  for await (const c of req) { size += c.length; if (size > MAX_BODY) over = true; else chunks.push(c); }
+  if (over) throw new Error("request body too large");   // top-level catch turns this into a 413
   const s = Buffer.concat(chunks).toString("utf8");
-  try { return s ? JSON.parse(s) : {}; } catch { return {}; }
+  try { return s ? JSON.parse(s) : {}; } catch { return {}; }   // malformed JSON → {} so endpoints hit their own field validation
 }
 // A monotonic counter guarantees uniqueness even when several ids are minted in one synchronous
 // loop (e.g. bulk-hiring a plan), where performance.now() can return the same value twice.
@@ -2461,6 +2465,7 @@ const server = createServer(async (req, res) => {
 
     send(res, 404, { error: "not found" });
   } catch (e) {
+    if (e && e.message === "request body too large") return send(res, 413, { error: "request body too large" });
     send(res, 500, { error: e.message });
   }
 });

@@ -13,7 +13,7 @@ node test/run-all.mjs --e2e    # also the live autonomy e2e
 
 The runner runs the pure suites always, the server suites only if a server is
 reachable on `BUREAU_PORT` (else it skips them with a note), and the live e2e only
-with `--e2e`. Current totals: **157 pure assertions + 57 server assertions** (plus
+with `--e2e`. Current totals: **157 pure assertions + 69 server assertions** (plus
 the 10-assertion live e2e).
 
 ## `decision.test.mjs` — pure unit tests (fast, no server)
@@ -69,6 +69,20 @@ creates and deletes, so your real company is never touched.
 ```
 BUREAU_PORT=4174 node server.mjs
 BUREAU_PORT=4174 node test/api.test.mjs
+```
+
+## `robustness.test.mjs` — hardening / edge cases (needs a running server)
+
+12 assertions: unknown route / wrong method → 404, malformed JSON body handled
+gracefully (not a 500), oversized **fields** truncated, an oversized **request body**
+(>4 MB) → 413, unicode / control chars in names accepted and length-capped, a
+non-ASCII workspace name still producing a filename-safe id, and the
+**concurrent-write guarantee** — 15 simultaneous writes to one workspace all land
+(the per-workspace mutex loses none). Also in a throwaway workspace.
+
+```
+BUREAU_PORT=4174 node server.mjs
+BUREAU_PORT=4174 node test/robustness.test.mjs
 ```
 
 ## `e2e-autonomy.mjs` — live end-to-end (needs a running server + Latch + model)
