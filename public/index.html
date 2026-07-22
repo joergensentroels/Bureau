@@ -72,6 +72,14 @@
   .nbadge.show{display:inline-block}
   .inboxbtn{display:inline-flex;align-items:center;gap:6px;background:var(--panel-2);border:1px solid var(--line-2);color:var(--ink-2);font-size:12px;font-weight:600;padding:6px 11px;border-radius:9px;cursor:pointer;position:relative}
   .inboxbtn:hover{border-color:var(--accent);color:var(--accent)}
+  .audfilters{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap}
+  .audfilters button{font-size:11px;padding:3px 10px;border-radius:7px;background:var(--panel-2);border:1px solid var(--line-2);color:var(--ink-2);cursor:pointer}
+  .audfilters button.on{border-color:var(--accent);color:var(--accent)}
+  #audlist{max-height:62vh;overflow:auto;display:flex;flex-direction:column;gap:6px}
+  .decbadge{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;padding:1px 7px;border-radius:8px;white-space:nowrap;align-self:center}
+  .decbadge.auto{background:var(--panel-2);color:var(--ink-2);border:1px solid var(--line-2)}
+  .decbadge.you{background:rgba(89,217,179,.14);color:var(--accent-2);border:1px solid rgba(89,217,179,.35)}
+  .decbadge.denied{background:rgba(224,112,95,.16);color:var(--danger);border:1px solid rgba(224,112,95,.4)}
   .inboxbtn .ibell{font-size:13px;line-height:1;filter:grayscale(.2)}
   .inboxbtn.hot{border-color:var(--warn);color:var(--ink)}
   .inboxbtn.hot .ibell{animation:ibell .9s ease 1}
@@ -289,6 +297,7 @@
   <div class="spacer"></div>
   <div class="toggle themeswitch"><button data-theme-btn="ops">Ops</button><button data-theme-btn="pixel">Tycoon</button></div>
   <button class="inboxbtn" id="inboxBtn" title="What needs you"><span class="ibell">🔔</span><span>Inbox</span><span class="nbadge" id="inboxBadge">0</span></button>
+  <button class="inboxbtn" id="auditBtn" title="Audit log — everything the company has done"><span class="ibell">🧾</span><span>Log</span></button>
   <a class="stat latchlink" id="latchLink" target="_blank" rel="noopener" title="Open Latch"><span class="k">Latch ↗</span><span class="v"><span class="dot" id="hdot"></span> <span id="hmodel" class="muted">checking…</span><span class="nbadge" id="latchBadge">0</span></span></a>
   <div class="stat" id="fundsStat" style="cursor:pointer" title="Set the company purchasing budget"><span class="k">Company funds</span><span class="v" id="funds">—</span></div>
   <div class="stat"><span class="k" id="balanceK">Paid budget</span><span class="v" id="balance">—</span></div>
@@ -372,6 +381,7 @@ async function boot(){
   try{ ORG = await api("GET","/api/org"); }
   catch{ return showReconnect(); }               // server briefly unreachable — show a retry screen, not a blank page
   const ib=$("#inboxBtn"); if(ib) ib.onclick=openInbox;
+  const ab=$("#auditBtn"); if(ab) ab.onclick=openAudit;
   refreshHealth();
   refreshInbox();
   render();
@@ -416,6 +426,34 @@ async function refreshInbox(){
   btn.title = n>0 ? `${data.counts.approvals} to decide · ${data.counts.deliverables} new doc${data.counts.deliverables===1?"":"s"} · ${data.counts.runs} run${data.counts.runs===1?"":"s"}` : "You're all caught up";
 }
 function ago(ts){ if(!ts) return ""; const t=typeof ts==="number"?ts:new Date(ts).getTime(); if(!t||isNaN(t)) return ""; const s=Math.max(0,(Date.now()-t)/1000); if(s<60)return"just now"; if(s<3600)return Math.floor(s/60)+"m ago"; if(s<86400)return Math.floor(s/3600)+"h ago"; return Math.floor(s/86400)+"d ago"; }
+function auditLine(r){
+  const dec=`<span class="decbadge ${esc(r.decision||"auto")}">${esc(r.decision||"auto")}</span>`;
+  if(r.kind==="run") return `<div class="ibrow"><span>⚙️</span><div class="ibmain"><div class="ibt">${esc(r.objective||"(run)")}</div><div class="ibd">${esc(r.agent||"")} · ${esc(r.verdict||"")}${r.total?` ${r.met}/${r.total}`:""} · ${(r.tokens||0).toLocaleString()} tok${r.costUsd?` · $${r.costUsd.toFixed(4)}`:""} · ${ago(r.at)}</div></div>${dec}</div>`;
+  if(r.kind==="blocked") return `<div class="ibrow"><span>⛔</span><div class="ibmain"><div class="ibt">Blocked: ${esc(r.actionType||"action")} — ${esc(r.agent||"")}</div><div class="ibd">${esc(r.error||r.reason||"not permitted")} · ${ago(r.at)}</div></div><span class="decbadge denied">denied</span></div>`;
+  const ic={file_write:"📄",web_search:"🔎",web_research:"🌐",read_file:"📖",purchase:"🛒"}[r.actionType]||"•";
+  return `<div class="ibrow"><span>${ic}</span><div class="ibmain"><div class="ibt">${esc(r.agent||"")} · ${esc(r.actionType||"action")}</div><div class="ibd">${r.ok?"✓":"✗"} ${esc(r.url||r.error||"")}${r.bytes?` · ${(r.bytes/1024).toFixed(1)} KB`:""} · ${ago(r.at)}</div></div>${dec}</div>`;
+}
+async function openAudit(){
+  const wrap=el("div","modalwrap");
+  wrap.innerHTML=`<div class="modal" style="max-width:600px">
+    <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:10px"><h1 style="font-size:16px;margin:0;text-transform:none">🧾 Audit log</h1><button id="aucl">Close</button></div>
+    <div class="audfilters" id="audf"></div><div id="audlist"><div class="ibempty">Loading…</div></div></div>`;
+  document.body.appendChild(wrap);
+  wrap.onclick=e=>{ if(e.target===wrap) wrap.remove(); };
+  wrap.querySelector("#aucl").onclick=()=>wrap.remove();
+  let cur="";
+  async function load(f){
+    cur=f;
+    let d; try{ d=await api("GET","/api/audit?limit=200"+(f?`&kind=${f}`:"")); }catch{ d=null; }
+    const t=(d&&d.totals)||{total:0,actions:0,runs:0,blocked:0};
+    wrap.querySelector("#audf").innerHTML=[["","All",t.total],["action","Actions",t.actions],["run","Runs",t.runs],["blocked","Blocked",t.blocked]]
+      .map(([k,lbl,n])=>`<button data-f="${k}" class="${k===cur?"on":""}">${lbl} ${n}</button>`).join("");
+    wrap.querySelectorAll("#audf button").forEach(b=>b.onclick=()=>load(b.dataset.f));
+    const rows=(d&&d.audit)||[];
+    wrap.querySelector("#audlist").innerHTML=rows.length?rows.map(auditLine).join(""):`<div class="ibempty">Nothing logged here yet.</div>`;
+  }
+  load("");
+}
 async function openInbox(){
   let d=INBOX; try{ d=await api("GET","/api/inbox"); INBOX=d; }catch{}
   const wrap=el("div","modalwrap");
