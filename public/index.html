@@ -1366,7 +1366,7 @@ function handleEvent(ev){
   }
   else if(ev.type==="verdict") addEv(d.verdict==="approved"?"approved":"denied", who(d.verdict==="approved"?"approved":"denied"),`<div class="dim">${d.auto?"auto-approved (playtest)":"decided in Latch"}</div>`, dep);
   else if(ev.type==="result"){ const at=d.actionType;
-    const meta={ file_write:{icon:"📄",ok:"saved file",fail:"save failed"}, web_search:{icon:"🔎",ok:"web search (worker VM)",fail:"search failed"}, read_file:{icon:"📖",ok:"read past document",fail:"read failed"}, purchase:{icon:"🛒",ok:"purchase authorized",fail:"purchase failed"} }[at]||{icon:"🌐",ok:"fetched web page",fail:"fetch failed"};
+    const meta={ file_write:{icon:"📄",ok:"saved file",fail:"save failed"}, web_search:{icon:"🔎",ok:"web search (worker VM)",fail:"search failed"}, read_file:{icon:"📖",ok:"read past document",fail:"read failed"}, purchase:{icon:"🛒",ok:"purchase authorized",fail:"purchase failed"}, shell:{icon:"⌨️",ok:"ran command (worker VM)",fail:"command failed"}, api_call:{icon:"🔌",ok:"API call",fail:"API call failed"} }[at]||{icon:"🌐",ok:"fetched web page",fail:"fetch failed"};
     const okDetail = at==="file_write"?`${d.bytes.toLocaleString()} bytes written to ${esc(d.url)}`
       : at==="read_file"?`read ${esc(d.url)} back to the agent to revise`
       : at==="purchase"?`${esc(d.url)} deducted from the company budget`
@@ -1543,7 +1543,7 @@ function openAgentModal(mode, agent, opts){
         <datalist id="mdeptlist">${[...new Set(["Leadership","Product & Technology","Sales & Revenue","Marketing","Customer Success & Support","Security","Operations","People",...ORG.agents.map(a=>a.department).filter(Boolean)])].map(d=>`<option value="${esc(d)}"></option>`).join("")}</datalist></div>
       <div><label>Paid-API budget ($) — 0 = local model only</label><input id="mbudget" type="number" min="0" step="1" placeholder="0 (local model)" value="${isEdit&&agent.budgetUsd?agent.budgetUsd:""}"><div class="dim" style="font-size:11px;margin-top:4px">$0 keeps this agent on the free local model. A budget lets it use the paid API (once a provider is configured) up to that amount.</div></div>
       <div><label>Allowed actions <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">— none checked = all allowed</span></label>
-        <div class="allowgrid" id="mallow">${[["web_search","🔎 Web search"],["web_research","🌐 Fetch page"],["file_write","📄 Write file"],["read_file","📖 Read file"],["purchase","🛒 Purchase"]].map(([v,lbl])=>`<label class="allowchk"><input type="checkbox" value="${v}" ${isEdit&&(agent.allow||[]).includes(v)?"checked":""}>${lbl}</label>`).join("")}</div>
+        <div class="allowgrid" id="mallow">${[["web_search","🔎 Web search"],["web_research","🌐 Fetch page"],["file_write","📄 Write file"],["read_file","📖 Read file"],["purchase","🛒 Purchase"],["api_call","🔌 API call"],["shell","⌨️ Shell"]].map(([v,lbl])=>`<label class="allowchk"><input type="checkbox" value="${v}" ${isEdit&&(agent.allow||[]).includes(v)?"checked":""}>${lbl}</label>`).join("")}</div>
         <div class="dim" style="font-size:11px;margin-top:4px">Check specific actions to restrict this agent to only those. Blocked attempts are refused and logged.</div></div>
       <div><label>Personality — free text, sent to the model</label>
         <textarea id="mpersona" placeholder="You are exacting and never ship sloppy work.">${isEdit?esc(agent.persona||""):""}</textarea></div>
