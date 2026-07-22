@@ -15,7 +15,7 @@ import { createServer } from "node:http";
 import dns from "node:dns/promises";
 import path from "node:path";
 import os from "node:os";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -2349,10 +2349,16 @@ const server = createServer(async (req, res) => {
   }
 });
 
-loadToken()
-  .then((t) => {
-    TOKEN = t;
-    server.listen(PORT, "127.0.0.1", () => console.log(`Bureau on http://127.0.0.1:${PORT}`));
-    setInterval(() => { tickSchedules().catch((e) => console.error("scheduler tick:", e.message)); }, 60000); // check due schedules every minute
-  })
-  .catch((e) => { console.error("Could not load Latch operator token:", e.message); process.exit(1); });
+// Only boot the HTTP server + scheduler when run directly (node server.mjs). When imported — e.g. by
+// the tests, which exercise the exported pure functions (decideApproval/evaluatePolicy/…) — skip
+// startup so importing doesn't bind a port or tick schedules.
+const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isMain) {
+  loadToken()
+    .then((t) => {
+      TOKEN = t;
+      server.listen(PORT, "127.0.0.1", () => console.log(`Bureau on http://127.0.0.1:${PORT}`));
+      setInterval(() => { tickSchedules().catch((e) => console.error("scheduler tick:", e.message)); }, 60000); // check due schedules every minute
+    })
+    .catch((e) => { console.error("Could not load Latch operator token:", e.message); process.exit(1); });
+}
