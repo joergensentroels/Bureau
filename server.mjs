@@ -158,7 +158,8 @@ export function ensureBudget(org) {
   // Guardrails: autoApproveUnderUsd = purchases/spend below this may auto-approve; maxActionsPerRun =
   // hard cap on real actions per run (0 = unlimited). Per-agent action allowlists live on the agent.
   org.guardrails = { autoApproveUnderUsd: 0, maxActionsPerRun: 0, ...(org.guardrails || {}) };
-  (org.agents || []).forEach((a) => {
+  if (!Array.isArray(org.agents)) org.agents = [];                      // self-sufficient even on a bare {}
+  org.agents.forEach((a) => {
     if (!a) return;
     if (a.budgetUsd == null) a.budgetUsd = 0;                           // default: local model only
     if (a.tokensUsed == null) a.tokensUsed = 0;
@@ -1059,7 +1060,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
 }
 
 // Compress an agent's turn into a reusable work product to hand to downstream teammates.
-function workProduct(summary, artifacts) {
+export function workProduct(summary, artifacts) {
   const parts = (artifacts || []).filter((a) => a.detail).map((a) => `• ${a.title}: ${a.detail}`);
   const body = parts.join("\n");
   const tail = summary && !summary.startsWith("(stopped") ? `${body ? "\n" : ""}Outcome: ${summary}` : "";

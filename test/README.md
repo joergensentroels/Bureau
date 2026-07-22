@@ -13,8 +13,23 @@ node test/run-all.mjs --e2e    # also the live autonomy e2e
 
 The runner runs the pure suites always, the server suites only if a server is
 reachable on `BUREAU_PORT` (else it skips them with a note), and the live e2e only
-with `--e2e`. Current totals: **157 pure assertions + 69 server assertions** (plus
-the 10-assertion live e2e).
+with `--e2e`. Current totals: **175 pure assertions + 87 server assertions** (plus
+the 10-assertion live e2e) — 262 in all.
+
+### What's covered vs. not
+
+Covered (deterministic, headless): the safe-autonomy decision core, the SSRF guard
+(pure IPs + the `apiCall`/`fetchUrl` entry points), action normalization, the
+delegation matcher, org normalization, RAG ranking, filename safety, the full
+management API (agents / goals / policies / triggers / schedules / guardrails /
+deliverable lifecycle / reporting), workspace isolation, static-file traversal, and
+input/concurrency hardening (malformed bodies, oversized fields, a 4 MB body cap,
+unicode, the per-workspace write mutex).
+
+Not covered here (LLM- or Latch-bound — exercised by the `--e2e` suite instead): the
+deep delegation/decompose recursion, agent bio generation, HR suggestions, a live
+trigger firing a run, and deliverable revision/versioning. These need the model and a
+real Latch, so they can't be asserted deterministically.
 
 ## `decision.test.mjs` — pure unit tests (fast, no server)
 
@@ -73,12 +88,16 @@ BUREAU_PORT=4174 node test/api.test.mjs
 
 ## `robustness.test.mjs` — hardening / edge cases (needs a running server)
 
-12 assertions: unknown route / wrong method → 404, malformed JSON body handled
+30 assertions: unknown route / wrong method → 404, malformed JSON body handled
 gracefully (not a 500), oversized **fields** truncated, an oversized **request body**
 (>4 MB) → 413, unicode / control chars in names accepted and length-capped, a
-non-ASCII workspace name still producing a filename-safe id, and the
-**concurrent-write guarantee** — 15 simultaneous writes to one workspace all land
-(the per-workspace mutex loses none). Also in a throwaway workspace.
+non-ASCII workspace name still producing a filename-safe id, **static-file traversal
+blocked** (can't read the org file or source via `/..%2f..%2f…`), run-lifecycle
+endpoints on unknown ids (stop is idempotent; plan/stream → 404), a not-found sweep
+(PATCH/DELETE unknown agent/goal/policy/trigger/schedule/workspace → 404), numeric
+clamping (negative/NaN → 0), agent-field round-trips (allow de-duped/lowercased,
+lessons cleaned), and the **concurrent-write guarantee** — 15 simultaneous writes to
+one workspace all land (the per-workspace mutex loses none). Also in a throwaway workspace.
 
 ```
 BUREAU_PORT=4174 node server.mjs

@@ -15,6 +15,9 @@ for (const u of ["http://127.0.0.1/", "http://169.254.169.254/latest/meta-data",
   chk(`  SSRF-refuses ${u}`, r.ok === false && /refused|private|internal/i.test(r.error || ""));
 }
 
+console.log("# fetchUrl — DNS failure on an unresolvable host (RFC-2606 .invalid)");
+{ const r = await fetchUrl("http://nonexistent-host-zzz.invalid/x"); chk("  unresolvable host → DNS error, not a crash", r.ok === false && /DNS|resolution|records/i.test(r.error || "")); }
+
 console.log("# apiCall — input parsing + SSRF guard");
 chk("  empty → guidance error", /provide a JSON/.test((await apiCall("")).error));
 chk("  prose without URL → guidance error", /provide a JSON/.test((await apiCall("please call the weather service")).error));

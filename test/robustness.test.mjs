@@ -56,6 +56,39 @@ const ok = (c, m) => (c ? pass : fail).push(m);
     ok((await api("POST", "/api/schedules", {})).status === 400, "schedule without objective → 400");
     ok((await api("POST", "/api/triggers", {})).status === 400, "trigger without objective → 400");
 
+    // ---- static-file serving refuses path traversal (would otherwise leak files outside public/) ----
+    { const r = await fetch(B + "/..%2f..%2fdata-foreman.json"); ok(r.status === 403 || r.status === 404, `static traversal to data file blocked (got ${r.status})`); }
+    { const r = await fetch(B + "/..%2f..%2fserver.mjs"); ok(r.status === 403 || r.status === 404, "static traversal to server.mjs blocked"); }
+
+    // ---- run lifecycle endpoints on unknown ids ----
+    ok((await api("POST", "/api/run/nope_run/stop")).j.ok === true, "stop on unknown run is a no-op ok (idempotent)");
+    ok((await api("POST", "/api/run/nope_run/plan", { decision: "approve" })).status === 404, "plan on unknown run → 404");
+    { const r = await fetch(B + "/api/run/nope_run/stream", { headers: { "x-workspace": WS } }); ok(r.status === 404, "stream of unknown run → 404"); }
+    { const r = (await api("GET", "/api/runs/nope_run")).j; ok(r.summary === null && Array.isArray(r.actions) && r.replayable === false, "runs/:id reconstructs empty for unknown id (200, null summary)"); }
+
+    // ---- not-found sweep: PATCH/DELETE on unknown ids → 404 ----
+    ok((await api("PATCH", "/api/agents/nope", { name: "x" })).status === 404, "PATCH unknown agent → 404");
+    ok((await api("PATCH", "/api/goals/nope", { status: "done" })).status === 404, "PATCH unknown goal → 404");
+    ok((await api("PATCH", "/api/policies/nope", { enabled: false })).status === 404, "PATCH unknown policy → 404");
+    ok((await api("PATCH", "/api/triggers/nope", { enabled: false })).status === 404, "PATCH unknown trigger → 404");
+    ok((await api("PATCH", "/api/schedules/nope", { enabled: false })).status === 404, "PATCH unknown schedule → 404");
+    ok((await api("DELETE", "/api/workspaces/nope")).status === 404, "DELETE unknown workspace → 404");
+
+    // ---- numeric inputs clamp to sane ranges ----
+    { const g = await api("POST", "/api/guardrails", { autoApproveUnderUsd: -5, maxActionsPerRun: -3 });
+      ok(g.j.autoApproveUnderUsd === 0 && g.j.maxActionsPerRun === 0, "negative guardrail values clamp to 0"); }
+    ok((await api("POST", "/api/company/budget", { funds: -10 })).j.funds === 0, "negative company budget clamps to 0");
+    { const g = await api("POST", "/api/guardrails", { autoApproveUnderUsd: "not a number" });
+      ok(g.j.autoApproveUnderUsd === 0, "non-numeric guardrail value → 0, not NaN"); }
+
+    // ---- agent PATCH round-trips across fields ----
+    { const a = (await api("POST", "/api/agents", { name: "Pat", role: "Eng" })).j;
+      const u = (await api("PATCH", "/api/agents/" + a.id, { name: "Patricia", role: "Lead", persona: "calm", department: "Eng", allow: ["web_search", "FILE_WRITE", "web_search"], lessons: ["cite sources", ""] })).j;
+      ok(u.name === "Patricia" && u.role === "Lead" && u.persona === "calm" && u.department === "Eng", "agent text fields updated");
+      ok(JSON.stringify(u.allow) === JSON.stringify(["web_search", "file_write"]), "allow normalized (lowercased + de-duped)");
+      ok(u.lessons.length === 1 && u.lessons[0].text === "cite sources", "lessons cleaned (empty dropped, wrapped as objects)");
+      await api("DELETE", "/api/agents/" + a.id); }
+
     // ---- concurrent same-workspace writes must not clobber (per-workspace mutex) ----
     { const cws = (await api("POST", "/api/workspaces", { name: "Concurrency" })).j.id;
       const save = WS; WS = cws;

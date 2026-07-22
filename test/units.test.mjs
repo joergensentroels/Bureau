@@ -3,7 +3,7 @@
 import {
   ipv4Blocked, ipBlocked, normalizeAction, safeParse, ragTerms, expectsDeliverable,
   resolveReport, goalObjective, normKRs, cadenceMs, cleanPolicyWhen, htmlToText,
-  ensureBudget, renderChecklist, validDeliverableName, rankDeliverables,
+  ensureBudget, renderChecklist, validDeliverableName, rankDeliverables, workProduct,
 } from "../server.mjs";
 
 let pass = 0, fail = 0;
@@ -117,6 +117,32 @@ console.log("# renderChecklist — DoD checklist markdown");
 console.log("# validDeliverableName — API filename gate (requires a real dotted extension)");
 for (const n of ["report.md", "a_b-c.csv", "data.json", "x.y", "Notes.TXT"]) chk(`  accepts ${n}`, validDeliverableName(n) === true);
 for (const n of ["noextension", "bad name.md", "-leading.md", "a.", ".hidden", "", "a/b.md"]) chk(`  rejects ${JSON.stringify(n)}`, validDeliverableName(n) === false);
+
+console.log("# normalizeAction — passthroughs (already-correct actions untouched)");
+for (const at of ["read_file", "purchase", "email_draft", "shell", "api_call"])
+  eq(`  ${at} passthrough`, normalizeAction({ type: "propose_action", actionType: at, command: "x" }, "").actionType, at);
+eq("  escalate passes through", normalizeAction({ type: "escalate" }, "write a doc").type, "escalate");
+eq("  web_search w/o command falls back to details", normalizeAction({ type: "propose_action", actionType: "web_search", details: "find rivals" }, "").command, "find rivals");
+
+console.log("# ensureBudget — legacy migration");
+{ const o = ensureBudget({ budget: { money: 999, currency: "gold", tokens: 5 } });
+  chk("  drops fake tycoon money/currency, keeps real tokens", o.budget.money === undefined && o.budget.currency === undefined && o.budget.tokens === 5 && o.budget.funds === 0); }
+{ const o = ensureBudget({ agents: [{ name: "Keep", tier: "trusted" }] });
+  chk("  preserves an agent's existing tier", o.agents[0].tier === "trusted"); }
+{ const o = ensureBudget({});
+  chk("  builds all collections from nothing", Array.isArray(o.agents) && Array.isArray(o.policies) && Array.isArray(o.goals) && Array.isArray(o.triggers) && typeof o.deliverables === "object" && typeof o.notify === "object"); }
+
+console.log("# workProduct — assembles a run's output");
+eq("  bullets + outcome; blank-detail artifact dropped",
+  workProduct("shipped", [{ title: "A", detail: "did a" }, { title: "B", detail: "" }]), "• A: did a\nOutcome: shipped");
+chk("  a stopped run omits the Outcome tail", !workProduct("(stopped by CEO)", [{ title: "A", detail: "x" }]).includes("Outcome"));
+eq("  no artifacts, live summary → Outcome line", workProduct("just the summary", []), "Outcome: just the summary");
+eq("  no artifacts + stopped → bare summary (the || fallback)", workProduct("(stopped by CEO)", []), "(stopped by CEO)");
+
+console.log("# safeParse — structural edge cases");
+eq("  nested objects", safeParse('{"a":{"b":2}}'), { a: { b: 2 } });
+eq("  brace inside a string doesn't end the object", safeParse('{"a":"has } and { braces"}'), { a: "has } and { braces" });
+eq("  a top-level array is not an object → null", safeParse("[1,2,3]"), null);
 
 console.log("# rankDeliverables — pure RAG keyword ranker (score >= 2, best first)");
 { const docs = [
