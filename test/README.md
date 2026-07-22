@@ -13,8 +13,8 @@ node test/run-all.mjs --e2e    # also the live autonomy e2e
 
 The runner runs the pure suites always, the server suites only if a server is
 reachable on `BUREAU_PORT` (else it skips them with a note), and the live e2e only
-with `--e2e`. Current totals: **175 pure assertions + 87 server assertions** (plus
-the 10-assertion live e2e) — 262 in all.
+with `--e2e`. Current totals: **187 pure assertions + 87 server assertions** (plus
+the 10-assertion live e2e) — 274 in all.
 
 ### What's covered vs. not
 

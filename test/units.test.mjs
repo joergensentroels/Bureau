@@ -88,6 +88,12 @@ console.log("# htmlToText");
 { const t = htmlToText("<p>Hi <b>there</b></p><script>alert(1)</script>");
   chk("  strips tags + script, keeps text", /Hi\s+there/.test(t) && !t.includes("alert") && !t.includes("<")); }
 
+console.log("# normalizeAction — GitHub publish mapping");
+for (const at of ["github", "git", "commit", "publish", "push", "gh"])
+  eq(`  ${at} → github_file`, normalizeAction({ type: "propose_action", actionType: at, title: "x.md", command: "hi" }, "").actionType, "github_file");
+for (const at of ["create_repo", "new_repo", "github_new_repo"])
+  eq(`  ${at} → github_repo`, normalizeAction({ type: "propose_action", actionType: at }, "").actionType, "github_repo");
+
 console.log("# normalizeAction — more edge cases");
 eq("  exec → shell", normalizeAction({ type: "propose_action", actionType: "terminal", command: "ls" }, "").actionType, "shell");
 eq("  http_request → api_call", normalizeAction({ type: "propose_action", actionType: "http_request" }, "").actionType, "api_call");

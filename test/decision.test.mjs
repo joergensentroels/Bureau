@@ -31,6 +31,9 @@ chk("autonomous purchase-under auto", decideApproval("autonomous", "purchase", c
 chk("autonomous purchase-over floored", decideApproval("autonomous", "purchase", pricey, gr, false), { auto: false, approver: "" });
 chk("autonomous shell floored", decideApproval("autonomous", "shell", {}, gr, false), { auto: false, approver: "" });
 chk("autonomous email floored", decideApproval("autonomous", "email_draft", {}, gr, false), { auto: false, approver: "" });
+chk("autonomous github_file floored (outbound write)", decideApproval("autonomous", "github_file", {}, gr, false), { auto: false, approver: "" });
+chk("autonomous github_repo floored", decideApproval("autonomous", "github_repo", {}, gr, false), { auto: false, approver: "" });
+chk("policy allow CANNOT auto github_file (floor wins)", decideApproval("autonomous", "github_file", {}, gr, false, "allow"), { auto: false, approver: "" });
 // run-level auto-approve (the checkbox / scheduled): floor still holds
 chk("run file_write auto", decideApproval("supervised", "file_write", {}, gr, true), { auto: true, approver: "run" });
 chk("run purchase-over floored", decideApproval("supervised", "purchase", pricey, gr, true), { auto: false, approver: "" });

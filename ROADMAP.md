@@ -15,8 +15,12 @@ Nothing is in active development. The remaining backlog, roughly by value:
 - **Paid-model activation / smart routing** — the biggest lever on output quality (the local
   qwen3:8b model is the ceiling). Per-task routing so funded agents use a paid provider; track
   `paidSpentUsd`. _Blocked on: a paid provider / API key configured in Latch._
-- **Outbound integrations** — push work OUT to GitHub (PRs/issues), Slack, Drive/Notion, built on
-  the existing `api_call` / webhook plumbing. _Blocked on: your credentials / tokens._
+- **Outbound integrations** — ◐ partial. **GitHub file publish is done** (`github_file` / `github_repo`
+  actions → Latch's native GitHub connector; Latch holds the token and commits on approval, Bureau
+  stores nothing; always CEO-gated). Still open: GitHub **issues/PRs** and any **authenticated Slack/
+  Notion/webhook** connector — these have no Latch-side connector yet, so "defer to Latch" doesn't cover
+  them; they'd need either Latch connector work or a Bureau secret store (a storage decision we routed
+  to Latch). Unauthenticated public webhooks already work via `api_call`.
 - **Persistence beyond JSON** — move off the single JSON-file-per-workspace + mutex to a real
   datastore. The most structural change; do it carefully. More relevant now that multi-workspace exists.
 - **Office-view revamp** — the isometric office is functional (renders from `public/assets/iso/`),
@@ -35,7 +39,7 @@ assertions + a live `--e2e`; see `test/README.md`).
   Plan-approval gate, Definition-of-Done gate, audit trail, spend caps, rate limits.
 - **In-app approval seam** — decide pending actions inside Bureau (same Latch PATCH, deliberate confirm).
 - **Getting work done** — hierarchical delegation; real actions (web fetch/search, file write,
-  guarded `api_call`, `shell` on the VM); richer file types + export; keyword RAG memory.
+  guarded `api_call`, `shell` on the VM, **GitHub file publish** via Latch); richer file types + export; keyword RAG memory.
 - **Runs itself** — goals/OKRs with scheduled auto-advance, inbound triggers, notifications, and a
   self-optimizing loop (scorecards → HR recommendations → coaching lessons → goal retrospectives).
 - **Deliverable lifecycle** — draft → QA'd → your sign-off → delivered, with versioning.
