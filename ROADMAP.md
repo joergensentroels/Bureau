@@ -27,8 +27,9 @@ Make the company smarter, connected, and shareable.
 **Extra (delivered):**
 - ✅ **Run history & replay UI** — `GET /api/runs` (+ `/:id`) rebuilds past runs from the audit log with trends (runs/passed/shortfall/tokens/cost); a "📜 History" modal lists them and drills into each run's trace (live events if still in memory, else reconstructed from audit actions).
 - ✅ **Dry-run / simulation mode** — a "dry run" toggle on the work panel previews a full run (plan, DoD criteria, and each intended action rendered as "would …") while executing **nothing**: no real actions, no disk writes (drafts/checklists skipped), no webhooks. Verified: 0 real results, draft count unchanged. Lets you inspect what a company *would* do before letting it loose.
+- ✅ **Autonomy tiers** — per-agent trust levels governing what runs **without** your approval: **Supervised** (default — everything waits for you), **Trusted** (auto-approves safe reads & sandboxed drafts under the $ ceiling), **Autonomous** (auto-approves anything in the agent's allowlist under the ceiling). A **hard floor** no tier can cross: `shell`, `api_call`, sending email, and spend over the ceiling ALWAYS require you. Decision centralized in `decideApproval()`, unit-tested (30/30 truth-table cases). All existing agents default to Supervised — no behavior change until you promote someone. Tier shown as a card badge + editable in the agent modal; tier auto-approvals recorded in the audit with the tier as approver.
 
-_Parked but available:_ **paid-model activation / smart routing** — the biggest lever on output quality (local qwen3:8b is the ceiling); starts whenever a paid provider/API key is configured in Latch. Also still in the backlog: in-app approval seam, declarative policy rules, autonomy tiers, multi-workspace, office-view revamp.
+_Parked but available:_ **paid-model activation / smart routing** — the biggest lever on output quality (local qwen3:8b is the ceiling); starts whenever a paid provider/API key is configured in Latch. Also still in the backlog: in-app approval seam, declarative policy rules, multi-workspace, office-view revamp.
 
 ---
 

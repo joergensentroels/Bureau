@@ -46,6 +46,44 @@ const EMPTY_ORG = { ceo: null, vision: "", companyName: "", agents: [], budget: 
 // If you configure a different fallback model, update this: Haiku 4.5 ≈ 0.002, Opus 4.8 ≈ 0.010.
 // (Sonnet 5 has intro pricing of $2/$10 per 1M through 2026-08-31 → ~0.004/1K if you prefer that.)
 const PAID_PRICE_PER_1K = 0.006;
+
+// ---- Autonomy tiers (per-agent) ----
+// How much an agent may do WITHOUT the CEO approving each action. Everything is clamped by the
+// HARD FLOOR below, which no tier can cross.
+//   supervised (default) — nothing auto-approves; every action waits for you.
+//   trusted              — auto-approves only SAFE_TIER_ACTIONS (read-only + sandboxed writes).
+//   autonomous           — auto-approves anything within the agent's allowlist (allowlist enforced
+//                          separately) — still clamped by the hard floor.
+const TIERS = ["supervised", "trusted", "autonomous"];
+// Safe, reversible, in-sandbox actions a "trusted" agent may take unattended: read-only lookups,
+// versioned drafts (revertible), and internal notes. Deliberately excludes purchase/email/shell/api.
+const SAFE_TIER_ACTIONS = new Set(["web_search", "web_research", "read_file", "file_write", "note"]);
+// The hard floor: actions that ALWAYS require the CEO, regardless of tier or run.autoApprove.
+// shell + api_call (real-world reach), spend over the guardrail ceiling, and sending email.
+function requiresCeoAlways(actType, next, gr) {
+  if (actType === "shell" || actType === "api_call" || actType === "email_draft") return true;
+  if (actType === "purchase" && Number(gr.autoApproveUnderUsd) > 0) {
+    const pc = Math.max(0, parseFloat(String(next.command || next.details || "").replace(/[^0-9.]/g, "")) || 0);
+    if (pc > Number(gr.autoApproveUnderUsd)) return true;   // over ceiling → you
+  } else if (actType === "purchase" && !(Number(gr.autoApproveUnderUsd) > 0)) {
+    return true;   // no ceiling configured → every purchase is yours
+  }
+  return false;
+}
+// The single source of truth for "may this action run without the CEO?". Returns { auto, approver }.
+// approver: "run" (run-level auto), "tier:trusted"/"tier:autonomous", or "" (needs you).
+// Order matters: tier can GRANT auto in an attended run, then the hard floor CLAMPS it back.
+export function decideApproval(tier, actType, next, gr, runAutoApprove) {
+  let auto = !!runAutoApprove;
+  let approver = auto ? "run" : "";
+  if (!auto) {
+    if (tier === "autonomous") { auto = true; approver = "tier:autonomous"; }
+    else if (tier === "trusted" && SAFE_TIER_ACTIONS.has(actType)) { auto = true; approver = "tier:trusted"; }
+  }
+  if (requiresCeoAlways(actType, next, gr)) { auto = false; approver = ""; }   // hard floor — nothing crosses it
+  return { auto, approver };
+}
+
 function ensureBudget(org) {
   org.budget = { tokens: 0, funds: 0, spent: 0, runs: 0, ...(org.budget || {}) }; // funds = real purchasing money the CEO allocates
   delete org.budget.money; delete org.budget.currency;                 // drop the old fake tycoon money
@@ -65,6 +103,7 @@ function ensureBudget(org) {
     if (a.paidSpentUsd == null) a.paidSpentUsd = 0;
     if (!Array.isArray(a.allow)) a.allow = [];                          // allowed action types ([] = no restriction)
     if (!Array.isArray(a.lessons)) a.lessons = [];                      // coaching notes from CEO feedback, injected into prompts
+    if (!TIERS.includes(a.tier)) a.tier = "supervised";                 // autonomy tier: supervised (default) | trusted | autonomous
     delete a.salary;                                                    // remove the old fake salary
   });
   return org;
@@ -118,7 +157,7 @@ function emitResult(run, data) {
   emit(run, "result", data);
   logAudit({ kind: "action", runId: run.id, agentId: run.agentId || "", agent: data.agent || "",
     actionType: data.actionType || "", url: data.url || "", ok: !!data.ok, bytes: data.bytes || 0,
-    error: data.error || "", decision: run.autoApprove ? "auto" : "you" });
+    error: data.error || "", decision: run._decidedBy || (run.autoApprove ? "auto" : "you") });
 }
 
 // ---------- Latch client (server-side only) ---------------------------------
@@ -766,23 +805,21 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
       continue;
     }
     run.actionCount = (run.actionCount || 0) + 1;
-    let effectiveAuto = run.autoApprove;   // some actions always require the CEO, even in auto-approve/scheduled runs
-    if (actType === "shell" || actType === "api_call") effectiveAuto = false;   // powerful/irreversible → never auto
-    if (actType === "purchase" && Number(gr.autoApproveUnderUsd) > 0) {
-      const pc = Math.max(0, parseFloat(String(next.command || next.details || "").replace(/[^0-9.]/g, "")) || 0);
-      if (pc > Number(gr.autoApproveUnderUsd)) effectiveAuto = false;
-    }
+    const tier = String(agent.tier || "supervised").toLowerCase();
+    // The autonomy tier + hard-floor decision lives in one place (decideApproval) so it's auditable
+    // and unit-tested. Tier can grant auto in an attended run; the floor (shell/api/email/over-ceiling) clamps it back.
+    const { auto: effectiveAuto, approver } = decideApproval(tier, actType, next, gr, run.autoApprove);
     const approval = await fileApproval(agent, next);
     emit(run, "propose", {
       agent: who, depth, approvalId: approval.id, actionType: next.actionType || "other",
       title: next.title || "", details: next.details || "", command: next.command || "",
-      corrected, autoApprove: effectiveAuto,
+      corrected, autoApprove: effectiveAuto, tier, approver,
     });
     if (!effectiveAuto) fireWebhook("needs_approval", { actionType: next.actionType || "other", title: next.title || "", agent: who });
 
     let verdict = "pending";
     if (effectiveAuto) {
-      await latch("PATCH", `/api/approvals/${approval.id}`, { status: "approved", note: "playtest auto-approve" });
+      await latch("PATCH", `/api/approvals/${approval.id}`, { status: "approved", note: approver.startsWith("tier:") ? `auto-approved by autonomy ${approver}` : "playtest auto-approve" });
       verdict = "approved";
     } else {
       setAgentState(agent.id, "waiting", "waiting for your approval in Latch");
@@ -794,7 +831,8 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
       }
       setAgentState(agent.id, "working", objective.slice(0, 80));
     }
-    emit(run, "verdict", { agent: who, depth, approvalId: approval.id, verdict, auto: effectiveAuto });
+    emit(run, "verdict", { agent: who, depth, approvalId: approval.id, verdict, auto: effectiveAuto, approver: verdict === "approved" ? (approver || "you") : "" });
+    run._decidedBy = verdict === "approved" ? (approver === "run" ? "auto" : (approver || "you")) : "";
 
     if (verdict === "approved") {
       if ((next.actionType || "") === "web_research") {
@@ -1922,6 +1960,7 @@ const server = createServer(async (req, res) => {
           bio: String(body.bio || "").slice(0, 4000),
           budgetUsd: Number.isFinite(+body.budgetUsd) && +body.budgetUsd >= 0 ? +body.budgetUsd : 0, // $0 = local only
           tokensUsed: 0, paidSpentUsd: 0,
+          tier: "supervised",                                          // autonomy: new hires start fully gated
           createdAt: Date.now(),
         };
         org.agents.push(a);
@@ -1944,6 +1983,7 @@ const server = createServer(async (req, res) => {
         if (body.department !== undefined) agent.department = String(body.department).slice(0, 60);
         if (body.budgetUsd !== undefined && Number.isFinite(+body.budgetUsd) && +body.budgetUsd >= 0) agent.budgetUsd = +body.budgetUsd;
         if (body.allow !== undefined) agent.allow = Array.isArray(body.allow) ? [...new Set(body.allow.map((x) => String(x).toLowerCase().slice(0, 24)).filter(Boolean))].slice(0, 12) : [];
+        if (body.tier !== undefined) agent.tier = TIERS.includes(String(body.tier)) ? String(body.tier) : agent.tier;   // autonomy tier
         if (body.addLesson) agent.lessons = [{ text: String(body.addLesson).slice(0, 240), at: Date.now() }, ...(agent.lessons || [])].slice(0, 8);   // append CEO coaching from feedback
         if (Array.isArray(body.lessons)) agent.lessons = body.lessons.map((l) => ({ text: String(typeof l === "string" ? l : l?.text || "").slice(0, 240), at: (l && l.at) || Date.now() })).filter((l) => l.text).slice(0, 8);
         if (body.focus !== undefined) agent.focus = String(body.focus).slice(0, 400);

@@ -825,11 +825,16 @@ function ceoCard(){
     <div class="muted" style="font-size:12px;margin-top:8px">${esc((ORG.ceo.role||"").slice(0,110))}${(ORG.ceo.role||"").length>110?"…":""}</div>`;
   return c;
 }
+function tierBadge(t){
+  if(t==="trusted") return '<span class="hrtag" title="Autonomy: Trusted — auto-approves safe reads & drafts under the $ ceiling" style="background:#2b6cb0">TRUSTED</span>';
+  if(t==="autonomous") return '<span class="hrtag" title="Autonomy: Autonomous — auto-approves allowlisted actions under the ceiling (shell/api/email/over-ceiling still ask you)" style="background:#b7791f">AUTO</span>';
+  return "";   // supervised = default, no badge
+}
 function agentCard(a){
   const c=el("div","agent");
   c.style.cursor="pointer";
   c.innerHTML=`<div class="statusline" data-agent="${a.id}"></div>`
-    +avatar(a.seed,56)+`<div class="nm">${esc(a.name)}${a.hr?'<span class="hrtag">HR</span>':''}</div><div class="rl">${esc(a.role)}</div>
+    +avatar(a.seed,56)+`<div class="nm">${esc(a.name)}${a.hr?'<span class="hrtag">HR</span>':''}${tierBadge(a.tier)}</div><div class="rl">${esc(a.role)}</div>
     <div class="traits">${(a.traits||[]).map(t=>`<span>${esc(t)}</span>`).join("")}</div>
     <div class="muted" style="font-size:11px;margin-top:6px">${a.budgetUsd>0?`💳 ${fmtUsdFine(a.paidSpentUsd||0)} / ${fmtUsd(a.budgetUsd)} paid${(a.paidSpentUsd||0)>=a.budgetUsd?` <span style="color:var(--danger)">· exhausted</span>`:""}`:`🖥️ local model`} · ${(((a.tokensUsed||0))/1000).toFixed(1)}k tok</div>
     <div class="edithint">details ›</div>`;
@@ -1556,7 +1561,7 @@ function handleEvent(ev){
        ${d.autoApprove?`<div class="waiting">auto-approving (playtest)…</div>`
                       :`<div class="waiting">⏳ waiting on you — decide it in <a href="${latch}" target="_blank">Latch ↗</a></div>`}`, dep);
   }
-  else if(ev.type==="verdict") addEv(d.verdict==="approved"?"approved":"denied", who(d.verdict==="approved"?"approved":"denied"),`<div class="dim">${d.auto?"auto-approved (playtest)":"decided in Latch"}</div>`, dep);
+  else if(ev.type==="verdict"){ const how = d.approver&&d.approver.indexOf("tier:")===0 ? `auto-approved by autonomy tier (${esc(d.approver.split(":")[1])})` : d.auto?"auto-approved (playtest)":"decided in Latch"; addEv(d.verdict==="approved"?"approved":"denied", who(d.verdict==="approved"?"approved":"denied"),`<div class="dim">${how}</div>`, dep); }
   else if(ev.type==="result"){ const at=d.actionType;
     const meta={ file_write:{icon:"📄",ok:"saved file",fail:"save failed"}, web_search:{icon:"🔎",ok:"web search (worker VM)",fail:"search failed"}, read_file:{icon:"📖",ok:"read past document",fail:"read failed"}, purchase:{icon:"🛒",ok:"purchase authorized",fail:"purchase failed"}, shell:{icon:"⌨️",ok:"ran command (worker VM)",fail:"command failed"}, api_call:{icon:"🔌",ok:"API call",fail:"API call failed"} }[at]||{icon:"🌐",ok:"fetched web page",fail:"fetch failed"};
     const okDetail = at==="file_write"?`${d.bytes.toLocaleString()} bytes written to ${esc(d.url)}`
@@ -1739,6 +1744,10 @@ function openAgentModal(mode, agent, opts){
       <div><label>Allowed actions <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">— none checked = all allowed</span></label>
         <div class="allowgrid" id="mallow">${[["web_search","🔎 Web search"],["web_research","🌐 Fetch page"],["file_write","📄 Write file"],["read_file","📖 Read file"],["purchase","🛒 Purchase"],["api_call","🔌 API call"],["shell","⌨️ Shell"]].map(([v,lbl])=>`<label class="allowchk"><input type="checkbox" value="${v}" ${isEdit&&(agent.allow||[]).includes(v)?"checked":""}>${lbl}</label>`).join("")}</div>
         <div class="dim" style="font-size:11px;margin-top:4px">Check specific actions to restrict this agent to only those. Blocked attempts are refused and logged.</div></div>
+      <div><label>Autonomy tier <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">— how much this agent may do without asking you</span></label>
+        <select id="mtier">
+          ${[["supervised","Supervised — everything waits for you (default)"],["trusted","Trusted — auto-approves safe reads & drafts under the $ ceiling"],["autonomous","Autonomous — auto-approves anything in its allowlist under the ceiling"]].map(([v,lbl])=>`<option value="${v}" ${((isEdit&&agent.tier)||"supervised")===v?"selected":""}>${lbl}</option>`).join("")}</select>
+        <div class="dim" style="font-size:11px;margin-top:4px">🔒 Regardless of tier, <b>shell</b>, <b>API calls</b>, <b>sending email</b>, and spend <b>over your ceiling</b> ALWAYS require your approval.</div></div>
       ${isEdit?`<div><label>Coaching notes <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">— one per line; injected into ${esc(agent.name)}'s prompts. Auto-added when you revise its work.</span></label><textarea id="mlessons" placeholder="Cite sources for every claim.&#10;Keep emails under 150 words.">${isEdit?esc((agent.lessons||[]).map(l=>l.text).join("\n")):""}</textarea></div>`:""}
       <div><label>Personality — free text, sent to the model</label>
         <textarea id="mpersona" placeholder="You are exacting and never ship sloppy work.">${isEdit?esc(agent.persona||""):""}</textarea></div>
@@ -1826,6 +1835,7 @@ function openAgentModal(mode, agent, opts){
     const payload={ name:$("#mname",wrap).value.trim()||role, role, persona:$("#mpersona",wrap).value.trim(), traits:[...chosen], managerId:$("#mmgr",wrap).value, hr:$("#mhr",wrap).checked, department:$("#mdept",wrap).value.trim(), bio:$("#mbio",wrap).value.trim() };
     payload.budgetUsd = budVal==="" ? 0 : Number(budVal);
     payload.allow = [...wrap.querySelectorAll("#mallow input:checked")].map(c=>c.value);
+    { const mt=$("#mtier",wrap); if(mt) payload.tier = mt.value; }
     if(isEdit){ const ml=$("#mlessons",wrap); if(ml) payload.lessons = ml.value.split("\n").map(s=>s.trim()).filter(Boolean); }
     if(isEdit) await api("PATCH","/api/agents/"+agent.id,payload); else await api("POST","/api/agents",payload);
     wrap.remove(); ORG=await api("GET","/api/org"); render();
