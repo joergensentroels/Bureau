@@ -1,0 +1,81 @@
+# Bureau — Roadmap
+
+Bureau is a management-sim orchestrator: you hire a company of AI agents into an org, point
+them at work, and they take **real, approval-gated actions** through the Latch backend. This is
+the working roadmap — Phase 1 is committed; everything below it is the backlog, in rough priority.
+
+_Last updated 2026-07-22._
+
+---
+
+## Phase 1 — Now
+
+Picked together. Theme: **point Bureau at a goal and safely let it run.** Suggested build order
+below (foundations first).
+
+### 1. Guardrails + audit trail  _(foundational)_
+Make autonomy safe, so we can let agents do more without babysitting.
+- Per-agent **action allowlist** (which action types an agent may even propose).
+- **Spend caps** (per-agent paid budget hard stop; company-funds cap) and an **approval threshold**
+  ("auto-approve under $X / require me above it").
+- Basic **rate limits** (max runs/actions per window) as a runaway backstop.
+- **Audit trail**: an append-only provenance log — every action, its source/result, token & $ cost,
+  and who approved it (you / auto / Latch). Surfaced as a filterable history view + run replay.
+
+### 2. Plan-approval gate  _(control before work)_
+The upfront cousin of the Definition-of-Done gate.
+- Before a company run fans out, the manager's **plan is shown to you** (tasks + assignees + the
+  derived acceptance criteria).
+- You can **approve, edit, or reject** it; work only starts on approval (auto-approve remains an
+  option for unattended/scheduled runs).
+- Rejected/edited plans feed back into the decomposition. Kills wasted and off-track runs.
+
+### 3. Deliverable lifecycle  _(outputs become tracked work products)_
+- Explicit states: **draft → QA'd (DoD passed) → your sign-off → delivered**.
+- **Versioning + diffs** on revisions (the revise loop already exists; keep history).
+- A clear "awaiting your sign-off" queue in the Inbox.
+
+### 4. Company goals / OKRs  _(the strategy layer — largest)_
+- Persistent **goals/objectives** that live above individual runs.
+- Goals **cascade into scheduled work** (the scheduler already exists) and into what the manager
+  chooses to do — turning Bureau into a self-driving company.
+- Progress rolls up: which goals are on track, from which deliverables/runs.
+
+---
+
+## In flight (paused background sessions)
+
+- **Delegation breadth** — real parallel fan-out + dependency ordering (currently collapses to a
+  single task on the local model). _[background task]_
+- **Activate paid per-agent models** — per-task model routing so funded agents use a paid provider;
+  track `paidSpentUsd`. _[background task]_
+
+---
+
+## Backlog (later phases)
+
+### Make the work real & good
+- Broaden **real actions**: shell/code execution on the VM, send-email-via-approval, structured API calls.
+
+### Oversight & trust
+- **Real notifications** — the Inbox pushes to you (desktop/email) instead of you polling.
+
+### The company that runs itself
+- **Performance reviews** — per-agent throughput, DoD pass-rate, cost → HR suggests promote / reassign / let-go.
+- **Autonomy tiers** — traits set how much an agent can do without asking; daily standup/digest.
+
+### Deliverables
+- **Richer types & export** — code files, spreadsheets, PDF / shareable links.
+- **Knowledge base (RAG)** — agents read past deliverables so work compounds.
+
+### Platform & polish
+- **Company templates** — spin up a preset org ("SaaS startup", "content studio") in one click.
+- **Persistence & history** — move past the single JSON file as it grows; cost/output trends over time.
+- **Office view revamp** — top-down/pixel redesign (parked).
+
+---
+
+## Parked (deferred, not dropped)
+
+- **Folder + internal data-file rename** (`…/foreman` → `…/bureau`, `data-foreman.json`) — waiting
+  until the paused background sessions are fully done, so their resume isn't broken.
