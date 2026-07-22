@@ -7,9 +7,9 @@ desktop.ini
 # Runtime state & generated output — kept out of the repo so your company's
 # data (org config, deliverables, generated agent bios) isn't published.
 # A fresh clone boots with an empty org from the app's built-in defaults.
-data-foreman.json
-data-foreman.backup-*.json
 data-bureau.json
+data-foreman.json
+data-*.backup-*.json
 data-bureau-ws-*.json
 data-bureau-workspaces.json
 drafts/

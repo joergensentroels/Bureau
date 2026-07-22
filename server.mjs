@@ -10,7 +10,7 @@
 // Run:  node server.mjs        then open http://127.0.0.1:4173
 // No dependencies. Node built-ins only.
 
-import { readFile, writeFile, mkdir, readdir, stat, rm } from "node:fs/promises";
+import { readFile, writeFile, mkdir, readdir, stat, rm, rename } from "node:fs/promises";
 import { createServer } from "node:http";
 import dns from "node:dns/promises";
 import path from "node:path";
@@ -27,9 +27,10 @@ const DATA_DIR = process.env.LATCH_DATA
 // ---- Multi-workspace: each workspace is a fully separate company (own org file, drafts, profiles).
 // The current workspace is carried per-request via AsyncLocalStorage, so the persistence helpers
 // below resolve the right paths automatically without threading a workspace arg through every call.
-// The "default" workspace keeps the original paths (data-foreman.json / drafts / agent-profiles), so
-// existing data needs no migration; other workspaces get suffixed paths.
-const _ORGFILE_DEFAULT = path.join(HERE, "data-foreman.json");
+// The "default" workspace uses the base paths (data-bureau.json / drafts / agent-profiles); other
+// workspaces get suffixed paths. (A one-time boot migration adopts a legacy data-foreman.json.)
+const _ORGFILE_DEFAULT = path.join(HERE, "data-bureau.json");
+const _ORGFILE_LEGACY = path.join(HERE, "data-foreman.json");   // pre-rename name; migrated on boot
 const _PROFILES_DEFAULT = path.join(HERE, "agent-profiles");
 const _DRAFTS_DEFAULT = path.join(HERE, "drafts");
 const WS_REGISTRY = path.join(HERE, "data-bureau-workspaces.json");
@@ -685,7 +686,7 @@ export async function apiCall(raw) {
 }
 
 // ---------- real capability: approved file/draft write ----------
-// After you approve a file_write card, the server really saves the agent's document to foreman/drafts/.
+// After you approve a file_write card, the server really saves the agent's document to drafts/.
 // Confined to that folder: the name is slugified (no path separators, no traversal, forced .md).
 async function writeDraft(title, content) {
   const body = String(content || "");
@@ -723,7 +724,7 @@ async function writeDraft(title, content) {
     return { ok: true, name, path: full, bytes: Buffer.byteLength(newBody), versioned: !!ver };
   } catch (e) { return { ok: false, error: e.message }; }
 }
-// Read back a document from foreman/drafts/ (so an agent can revise its own past deliverable).
+// Read back a document from drafts/ (so an agent can revise its own past deliverable).
 async function readDraftFile(nameOrTitle) {
   let name = path.basename(String(nameOrTitle || "").trim());
   if (!/\.[a-z0-9]{1,6}$/i.test(name)) name = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) + ".md";
@@ -978,7 +979,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
           history.push({ role: "user", content: `APPROVED, but no usable search result came back${ex ? ` (exit ${ex.exitCode})` : " — the worker executor may be offline"}. Do NOT invent results. Try web_research with a concrete URL, or finish.` });
         }
       } else if ((next.actionType || "") === "file_write") {
-        // REAL action: save the agent's document to foreman/drafts/.
+        // REAL action: save the agent's document to drafts/.
         setAgentState(agent.id, "working", `saving ${String(next.title || "draft").slice(0, 50)}`);
         const r = await writeDraft(next.title, next.command || next.details);
         emitResult(run, { agent: who, depth, actionType: "file_write", url: r.ok ? `drafts/${r.name}` : "", ok: r.ok, bytes: r.ok ? r.bytes : 0, error: r.ok ? "" : r.error });
@@ -1846,7 +1847,7 @@ const server = createServer(async (req, res) => {
       return send(res, 200, { agents: cards, generatedAt: Date.now(), auditWindow: audit.length });
     }
 
-    // Deliverables: the documents agents have actually written to foreman/drafts/ via file_write.
+    // Deliverables: the documents agents have actually written to drafts/ via file_write.
     if (p === "/api/deliverables" && req.method === "GET") {
       let files = [];
       try {
@@ -2475,8 +2476,15 @@ const server = createServer(async (req, res) => {
 // the tests, which exercise the exported pure functions (decideApproval/evaluatePolicy/…) — skip
 // startup so importing doesn't bind a port or tick schedules.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+// One-time migration for the foreman -> bureau rename: if the default org file doesn't exist yet but
+// a legacy data-foreman.json does, adopt it. Keeps an existing install's company intact after upgrade.
+async function migrateLegacyOrgFile() {
+  try { await stat(_ORGFILE_DEFAULT); return; } catch {}          // new file already present → nothing to do
+  try { await stat(_ORGFILE_LEGACY); } catch { return; }          // no legacy file either → fresh install
+  try { await rename(_ORGFILE_LEGACY, _ORGFILE_DEFAULT); console.log("migrated data-foreman.json -> data-bureau.json"); } catch (e) { console.error("legacy org migration failed:", e.message); }
+}
 if (isMain) {
-  Promise.all([loadToken(), loadWorkspaces()])
+  Promise.all([loadToken(), loadWorkspaces(), migrateLegacyOrgFile()])
     .then(([t]) => {
       TOKEN = t;
       server.listen(PORT, "127.0.0.1", () => console.log(`Bureau on http://127.0.0.1:${PORT} (${WORKSPACES.length} workspace${WORKSPACES.length === 1 ? "" : "s"})`));

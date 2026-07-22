@@ -57,7 +57,7 @@ const ok = (c, m) => (c ? pass : fail).push(m);
     ok((await api("POST", "/api/triggers", {})).status === 400, "trigger without objective → 400");
 
     // ---- static-file serving refuses path traversal (would otherwise leak files outside public/) ----
-    { const r = await fetch(B + "/..%2f..%2fdata-foreman.json"); ok(r.status === 403 || r.status === 404, `static traversal to data file blocked (got ${r.status})`); }
+    { const r = await fetch(B + "/..%2f..%2fdata-bureau.json"); ok(r.status === 403 || r.status === 404, `static traversal to data file blocked (got ${r.status})`); }
     { const r = await fetch(B + "/..%2f..%2fserver.mjs"); ok(r.status === 403 || r.status === 404, "static traversal to server.mjs blocked"); }
 
     // ---- run lifecycle endpoints on unknown ids ----
