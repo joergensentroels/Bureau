@@ -20,9 +20,9 @@ Make the company smarter, connected, and shareable.
 2. **Real integrations** ⬜
    - Push work OUT: GitHub (PRs/issues), Slack (updates), Drive/Notion (publish deliverables) — built on `api_call`/webhook + credentials.
    - **Inbound triggers**: an external event (email / GitHub issue / webhook-in) starts a run. Bureau becomes reactive.
-3. **Product-ization** ⬜
-   - **Company templates**: one-click preset orgs ("SaaS startup", "content studio", "research lab") with roles/goals/schedules pre-wired.
-   - **Persistence beyond JSON**: a real datastore (the single JSON + mutex is already straining under multi-process use).
+3. **Product-ization** ◐
+   - ✅ **Company templates**: one-click preset teams ("SaaS startup", "content studio", "research lab") with roles + a starter goal, added non-destructively (reuses hire-plan + goals).
+   - ⬜ **Persistence beyond JSON**: a real datastore (the single JSON + mutex is already straining under multi-process use). Deferred — most structural change; do carefully when the paused sessions are done.
 
 _Parked but available:_ **paid-model activation / smart routing** — the biggest lever on output quality (local qwen3:8b is the ceiling); starts whenever a paid provider/API key is configured in Latch. Also still in the backlog: dry-run mode, in-app approval seam, declarative policy rules, run-history/replay UI, multi-workspace, office-view revamp.
 

@@ -499,6 +499,49 @@ async function openGuardrails(){
     wrap.remove();
   };
 }
+const ORG_TEMPLATES={
+  saas:{ name:"SaaS startup", desc:"Product, engineering, go-to-market, and support for a software company.",
+    roles:[
+      {name:"Dana",title:"CTO",department:"Product & Technology",reportsTo:"CEO",traits:["strategic","pragmatic"]},
+      {name:"Sam",title:"Full-Stack Engineer",department:"Product & Technology",reportsTo:"CTO",traits:["fast","thorough"]},
+      {name:"Riley",title:"Product Manager",department:"Product & Technology",reportsTo:"CTO",traits:["organized","user-focused"]},
+      {name:"Max",title:"Growth Marketer",department:"Marketing",reportsTo:"CEO",traits:["creative","data-driven"]},
+      {name:"Jo",title:"Customer Support Lead",department:"Customer Success & Support",reportsTo:"CEO",traits:["warm","patient"]}],
+    goals:[{title:"Ship the MVP",detail:"Get a working first version in front of users.",keyResults:["Define the core feature set","Build and deploy v1","Onboard 10 beta users"]}] },
+  content:{ name:"Content studio", desc:"Researches, writes, edits, and distributes content.",
+    roles:[
+      {name:"Elena",title:"Editor-in-Chief",department:"Editorial",reportsTo:"CEO",traits:["exacting","clear"]},
+      {name:"Theo",title:"Staff Writer",department:"Editorial",reportsTo:"Editor-in-Chief",traits:["prolific","warm"]},
+      {name:"Priya",title:"Research Analyst",department:"Editorial",reportsTo:"Editor-in-Chief",traits:["meticulous","skeptical"]},
+      {name:"Kai",title:"Social & Distribution",department:"Marketing",reportsTo:"CEO",traits:["punchy","persistent"]}],
+    goals:[{title:"Publish weekly",detail:"Ship one high-quality piece every week.",keyResults:["Build a content calendar","Draft the first 4 pieces","Set up a distribution checklist"]}] },
+  research:{ name:"Research lab", desc:"Investigates questions, vets sources, and writes up findings.",
+    roles:[
+      {name:"Dr. Chen",title:"Principal Investigator",department:"Research",reportsTo:"CEO",traits:["rigorous","curious"]},
+      {name:"Amara",title:"Research Associate",department:"Research",reportsTo:"Principal Investigator",traits:["thorough","methodical"]},
+      {name:"Ben",title:"Data Analyst",department:"Research",reportsTo:"Principal Investigator",traits:["analytical","precise"]},
+      {name:"Lena",title:"Science Writer",department:"Research",reportsTo:"Principal Investigator",traits:["clear","careful"]}],
+    goals:[{title:"First research brief",detail:"Pick a question and produce a rigorous write-up.",keyResults:["Frame the research question","Gather and vet sources","Write and review the brief"]}] },
+};
+async function openTemplates(){
+  const wrap=el("div","modalwrap");
+  const cards=Object.entries(ORG_TEMPLATES).map(([k,t])=>`<div class="revcard"><div class="row" style="justify-content:space-between;align-items:flex-start;gap:8px"><div style="min-width:0"><b>${esc(t.name)}</b><div class="dim" style="font-size:11px;margin-top:2px">${esc(t.desc)}</div><div class="dim" style="font-size:11px;margin-top:4px">${t.roles.length} roles${t.goals&&t.goals.length?` · ${t.goals.length} goal`:""} — ${esc(t.roles.map(r=>r.title).slice(0,4).join(", "))}${t.roles.length>4?"…":""}</div></div><button class="miniadd tmpl-add" data-k="${k}">Add to company</button></div></div>`).join("");
+  wrap.innerHTML=`<div class="modal" style="max-width:560px"><div class="row" style="justify-content:space-between;align-items:center;margin-bottom:6px"><h1 style="font-size:16px;margin:0;text-transform:none">🧩 Company templates</h1><button id="tmplcl">Close</button></div><div class="dim" style="font-size:11px;margin-bottom:10px">Adds a preset team (and a starter goal) to your existing company — non-destructive.</div><div id="tmpllist">${cards}</div></div>`;
+  document.body.appendChild(wrap);
+  wrap.onclick=e=>{ if(e.target===wrap) wrap.remove(); };
+  wrap.querySelector("#tmplcl").onclick=()=>wrap.remove();
+  wrap.querySelectorAll(".tmpl-add").forEach(b=>b.onclick=async()=>{
+    const t=ORG_TEMPLATES[b.dataset.k]; if(!t) return;
+    b.disabled=true; b.textContent="Adding…";
+    try{
+      await api("POST","/api/hr/hire-plan",{roles:t.roles});
+      for(const g of (t.goals||[])) await api("POST","/api/goals",g);
+      b.textContent="Added ✓";
+      ORG=await api("GET","/api/org");
+      setTimeout(()=>{ wrap.remove(); render(); loadGoals(); }, 700);
+    }catch{ b.disabled=false; b.textContent="Add to company"; }
+  });
+}
 async function openReviews(){
   let d; try{ d=await api("GET","/api/performance"); }catch{ d=null; }
   const cards=(d&&d.agents)||[];
@@ -659,7 +702,7 @@ function renderMain(app){
   const org=el("section");
   org.innerHTML=`<div class="orghead"><h2 style="margin:0">Your organization</h2>
     <div class="toggle"><button data-v="flat" class="${view==='flat'?'on':''}">Flat</button><button data-v="tree" class="${view==='tree'?'on':''}">Hierarchy</button>${officeAllowed?`<button data-v="office" class="${view==='office'?'on':''}">Office</button>`:""}</div>
-    ${view==="office"?`<button class="miniadd" id="hrPlanBtn">Talk to HR</button>`:""}<button class="miniadd" id="hireBtn">+ hire</button></div>`;
+    ${view==="office"?`<button class="miniadd" id="hrPlanBtn">Talk to HR</button>`:""}<button class="miniadd" id="tmplBtn">Templates</button><button class="miniadd" id="hireBtn">+ hire</button></div>`;
   const body=el("div");
   if(view==="tree"){ body.innerHTML=orgTreeHTML(); }
   else if(view==="office"){ body.id="orgbody"; LAST_MEETING_SIG=((STATUS&&STATUS.meeting)||[]).slice().sort().join(","); body.innerHTML=officeHTML(); }
@@ -674,6 +717,7 @@ function renderMain(app){
   org.appendChild(body);
   org.querySelectorAll(".toggle button").forEach(b=>b.onclick=()=>{ setOrgView(b.dataset.v); render(); });
   org.querySelector("#hireBtn").onclick=openHireFlow;
+  org.querySelector("#tmplBtn").onclick=openTemplates;
   const hp=org.querySelector("#hrPlanBtn"); if(hp) hp.onclick=openTalkToHR;
   const openFromNode=(n)=>{ const a=ORG.agents.find(x=>x.id===n.dataset.node); if(a) openAgentModal("edit",a); };
   if(view==="tree") body.querySelectorAll(".treenode[data-node]").forEach(n=>n.onclick=()=>openFromNode(n));
