@@ -15,12 +15,14 @@ Nothing is in active development. The remaining backlog, roughly by value:
 - **Paid-model activation / smart routing** — the biggest lever on output quality (the local
   qwen3:8b model is the ceiling). Per-task routing so funded agents use a paid provider; track
   `paidSpentUsd`. _Blocked on: a paid provider / API key configured in Latch._
-- **Outbound integrations** — ◐ partial. **GitHub file publish is done** (`github_file` / `github_repo`
+- **Outbound integrations** — ◐ partial. **GitHub publish is done** (`github_file` / `github_repo`
   actions → Latch's native GitHub connector; Latch holds the token and commits on approval, Bureau
-  stores nothing; always CEO-gated). Still open: GitHub **issues/PRs** and any **authenticated Slack/
-  Notion/webhook** connector — these have no Latch-side connector yet, so "defer to Latch" doesn't cover
-  them; they'd need either Latch connector work or a Bureau secret store (a storage decision we routed
-  to Latch). Unauthenticated public webhooks already work via `api_call`.
+  stores nothing; always CEO-gated) with a **per-workspace target repo/owner** (Guardrails → GitHub
+  target) so each company can publish to its own org/repo. Setup: `GITHUB.md`. Still open: GitHub
+  **issues/PRs** and any **authenticated Slack/Notion/webhook** connector — no Latch-side connector yet,
+  so "defer to Latch" doesn't cover them (would need Latch connector work or a Bureau secret store).
+  Unauthenticated public webhooks already work via `api_call`. _Your side: create the org + token
+  (see GITHUB.md); Bureau follows it._
 - **Persistence beyond JSON** — move off the single JSON-file-per-workspace + mutex to a real
   datastore. The most structural change; do it carefully. More relevant now that multi-workspace exists.
 - **Office-view revamp** — the isometric office is functional (renders from `public/assets/iso/`),

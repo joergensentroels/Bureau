@@ -555,6 +555,11 @@ async function renderPolicies(box){
 async function openGuardrails(){
   let g; try{ g=await api("GET","/api/guardrails"); }catch{ g={}; }
   let nt; try{ nt=await api("GET","/api/notify"); }catch{ nt={}; }
+  let intg; try{ intg=await api("GET","/api/integrations"); }catch{ intg={github:{}}; }
+  const gh=(intg&&intg.github)||{}; const ghT=gh.target||{};
+  const ghStatus = gh.configured
+    ? `<span style="color:var(--ok)">● connected</span> — Latch default: ${esc(gh.owner||"(your account)")}${gh.defaultRepo?" / "+esc(gh.defaultRepo):""}`
+    : `<span style="color:var(--warn)">● not connected</span> — run <code>Configure-GitHub.ps1</code> in Latch to add a token`;
   const agentOpts=`<option value="">(any agent)</option>`+ORG.agents.map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join("");
   const wrap=el("div","modalwrap");
   wrap.innerHTML=`<div class="modal" style="max-width:560px">
@@ -567,6 +572,14 @@ async function openGuardrails(){
     </div>
     <div class="dim" style="font-size:11px;margin-top:8px">Purchases over the threshold always require your decision in Latch — even on auto-approve or scheduled runs. Which action types each agent may use is set per-agent (open an agent → Advanced).</div>
     <div class="row" style="justify-content:flex-end;gap:10px;margin-top:12px"><button class="primary" id="gs">Save limits</button></div>
+    <hr style="border:none;border-top:1px solid var(--line-2);margin:14px 0">
+    <h2 style="font-size:14px;margin:0 0 4px;text-transform:none">🐙 GitHub target <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">— where THIS workspace publishes</span></h2>
+    <div class="dim" style="font-size:11px;margin-bottom:8px">${ghStatus}. The token stays in Latch — Bureau only stores which repo/owner to target. Leave blank to use Latch's default. Every commit is still approval-gated.</div>
+    <div class="row" style="gap:6px;flex-wrap:wrap;align-items:center;font-size:12px;margin-bottom:6px">
+      <input id="ghOwner" type="text" placeholder="owner / org (e.g. my-agent-org)" style="flex:1" value="${esc(ghT.owner||"")}">
+      <input id="ghRepo" type="text" placeholder="repo (e.g. BureauProjects)" style="flex:1" value="${esc(ghT.repo||"")}">
+      <button class="primary" id="ghSave">Save target</button>
+    </div>
     <hr style="border:none;border-top:1px solid var(--line-2);margin:14px 0">
     <h2 style="font-size:14px;margin:0 0 4px;text-transform:none">📜 Policy rules</h2>
     <div class="dim" style="font-size:11px;margin-bottom:8px">Checked top-to-bottom; first match wins. Layered on top of the guardrails above and each agent's autonomy tier.</div>
@@ -600,6 +613,10 @@ async function openGuardrails(){
     await api("POST","/api/guardrails",{ autoApproveUnderUsd:parseFloat(wrap.querySelector("#gAuto").value)||0, maxActionsPerRun:parseInt(wrap.querySelector("#gCap").value)||0 });
     await api("POST","/api/notify",{ webhook: wrap.querySelector("#gWebhook").value.trim() });
     const b=wrap.querySelector("#gs"); const t=b.textContent; b.textContent="Saved ✓"; setTimeout(()=>{ b.textContent=t; },1200);
+  };
+  wrap.querySelector("#ghSave").onclick=async()=>{
+    await api("POST","/api/integrations",{ github:{ owner: wrap.querySelector("#ghOwner").value.trim(), repo: wrap.querySelector("#ghRepo").value.trim() } });
+    const b=wrap.querySelector("#ghSave"); const t=b.textContent; b.textContent="Saved ✓"; setTimeout(()=>{ b.textContent=t; },1200);
   };
   wrap.querySelector("#pAdd").onclick=async()=>{
     const when={}; const v=id=>wrap.querySelector(id).value.trim();
@@ -1374,6 +1391,8 @@ function workPanel(){
           <input id="auto" type="checkbox" style="width:auto"> auto-approve (playtest)</label>
         <label class="row" style="text-transform:none;letter-spacing:0;color:var(--ink-2);gap:8px;margin:18px 0 0;cursor:pointer" title="Preview the plan + intended actions without doing anything real">
           <input id="dryrun" type="checkbox" style="width:auto"> dry run</label>
+        <label class="row" style="text-transform:none;letter-spacing:0;color:var(--ink-2);gap:8px;margin:18px 0 0;cursor:pointer" title="Hush: keep this task entirely on the local model — no agent may use the paid/external LLM, whatever its budget. For sensitive work.">
+          <input id="hush" type="checkbox" style="width:auto"> 🤫 hush (local only)</label>
       </div>
       <div class="row" style="justify-content:space-between">
         <span class="dim" id="runhint">Actions you don't auto-approve appear in Latch for you to decide.</span>
@@ -1410,8 +1429,8 @@ async function launchRun(body){
 async function startRun(){
   const agentId=$("#who").value, objective=$("#obj").value.trim();
   if(!objective){$("#obj").focus();return;}
-  const maxTurns=Number($("#turns").value)||6, autoApprove=$("#auto").checked, dryRun=$("#dryrun").checked;
-  launchRun(agentId==="__company__" ? {mode:"company",objective,maxTurns,autoApprove,dryRun} : {agentId,objective,maxTurns,autoApprove,dryRun});
+  const maxTurns=Number($("#turns").value)||6, autoApprove=$("#auto").checked, dryRun=$("#dryrun").checked, hush=$("#hush").checked;
+  launchRun(agentId==="__company__" ? {mode:"company",objective,maxTurns,autoApprove,dryRun,hush} : {agentId,objective,maxTurns,autoApprove,dryRun,hush});
 }
 function resetRun(){ const b=$("#runBtn"); if(b){b.disabled=false;b.textContent="Run";} }
 
@@ -1696,6 +1715,7 @@ function handleEvent(ev){
   if(ev.type==="start"){
     if(d.company) addEv("","company objective",`<div>${esc(d.objective)} <span class="dim">→ Manager</span></div>`);
     else addEv("","objective set",`<div>${esc(d.objective)} <span class="dim">→ ${esc(d.agent)} (${esc(d.role)})</span></div>`);
+    if(d.hush) addEv("","🤫 hush task",`<div class="dim">Local model only — no agent may use the paid/external LLM for this task, whatever its budget.</div>`);
   }
   else if(ev.type==="plan"){
     addEv("plan",`${esc(d.manager||"manager")} · delegates`,

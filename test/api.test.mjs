@@ -46,6 +46,12 @@ const ok = (c, m) => (c ? pass : fail).push(m);
     ok((await api("DELETE", "/api/goals/" + g.j.id)).status === 200, "goal deleted");
     ok((await api("GET", "/api/goals")).j.goals.length === 0, "goal list empty after delete");
 
+    // ---- integrations: per-workspace GitHub target (repo/owner names — never a token) ----
+    { const r = await api("GET", "/api/integrations"); ok(r.j.github && typeof r.j.github.configured === "boolean" && r.j.github.target, "integrations GET reports github status + workspace target"); }
+    { const r = await api("POST", "/api/integrations", { github: { owner: "my-agent-org", repo: "BureauProjects" } });
+      ok(r.j.github.owner === "my-agent-org" && r.j.github.repo === "BureauProjects", "per-workspace github target set");
+      ok((await api("GET", "/api/integrations")).j.github.target.repo === "BureauProjects", "target persisted for this workspace"); }
+
     // ---- policies validation + CRUD ----
     ok((await api("POST", "/api/policies", { then: "nope", when: { actionType: "shell" } })).status === 400, "policy rejects bad effect (400)");
     ok((await api("POST", "/api/policies", { then: "block", when: {} })).status === 400, "policy requires >=1 condition (400)");

@@ -58,7 +58,7 @@ let TOKEN = "";
 // A FRESH empty org each call — never a shared template. Returning a module-level constant here and
 // spreading it would share the nested arrays/objects across every empty workspace, so pushing into
 // one company's agents would leak into all the others. Build new containers every time.
-const emptyOrg = () => ({ ceo: null, vision: "", companyName: "", agents: [], budget: { tokens: 0 }, activity: [], schedules: [], purchases: [], audit: [], guardrails: {}, deliverables: {}, goals: [], notify: {}, triggers: [], policies: [] });
+const emptyOrg = () => ({ ceo: null, vision: "", companyName: "", agents: [], budget: { tokens: 0 }, activity: [], schedules: [], purchases: [], audit: [], guardrails: {}, deliverables: {}, goals: [], notify: {}, triggers: [], policies: [], github: { repo: "", owner: "" } });
 // The real "economy": an agent's budget is a DOLLAR allowance for the PAID API model. $0 (default)
 // means the agent may only use the free local model. Token usage is the actual cost, tracked per agent.
 // $ per 1K tokens on the paid model — converts tokens used on paid runs into dollars against an
@@ -157,6 +157,7 @@ export function ensureBudget(org) {
   org.notify = { webhook: "", ...(org.notify || {}) };                  // optional outgoing webhook for external push (Slack/email/etc.)
   if (!Array.isArray(org.triggers)) org.triggers = [];                  // inbound webhooks: {id,name,objective,mode,agentId,token,enabled,lastFiredAt}
   if (!Array.isArray(org.policies)) org.policies = [];                  // declarative rules: {id,enabled,when{...},then:block|require|allow,note}
+  org.github = { repo: "", owner: "", ...(org.github || {}) };          // per-workspace GitHub target (repo/owner names, NOT the token — token stays in Latch)
   // Guardrails: autoApproveUnderUsd = purchases/spend below this may auto-approve; maxActionsPerRun =
   // hard cap on real actions per run (0 = unlimited). Per-agent action allowlists live on the agent.
   org.guardrails = { autoApproveUnderUsd: 0, maxActionsPerRun: 0, ...(org.guardrails || {}) };
@@ -368,6 +369,8 @@ async function fileApproval(agent, action) {
     // Publish work OUT to GitHub. Filed as Latch's native github_file approval — Latch holds the
     // token (data/github.json) and commits the file itself on approval. Bureau stores no credential.
     // Always CEO-gated (never auto — it writes to a real repo). title = file path; command = content.
+    // Target repo/owner: this action's explicit value → this workspace's configured target → Latch default.
+    const tgt = (await readOrg()).github || {};
     const filePath = String(action.title || "README.md").trim().replace(/^\/+/, "").slice(0, 200) || "README.md";
     const content = String(action.command || action.details || "").slice(0, 12000);
     const { json } = await latch("POST", "/api/approvals", {
@@ -377,17 +380,21 @@ async function fileApproval(agent, action) {
       githubFilePath: filePath,
       githubFileContent: content,
       githubCommitMessage: (String(action.details || "").slice(0, 200) || `Add ${filePath} (via Bureau)`),
-      githubRepoName: String(action.repo || "").slice(0, 120),   // blank → Latch uses its configured default repo
+      githubRepoName: String(action.repo || tgt.repo || "").slice(0, 120),   // blank → Latch uses its configured default repo
+      githubOwner: String(action.owner || tgt.owner || "").slice(0, 120),    // blank → Latch's default owner (org or authed user)
       riskLevel: "high", sensitive: true,
       contextTags: ["bureau", "github", `agent:${agent.seed}`],
     });
     return json;
   }
   if ((action.actionType || "") === "github_repo") {
+    const tgt = (await readOrg()).github || {};
     const { json } = await latch("POST", "/api/approvals", {
       type: "github_repo",
       title: action.title || "Create a GitHub repository",
       details: action.details || "",
+      githubRepoName: String(action.repo || action.title || "").slice(0, 120),
+      githubOwner: String(action.owner || tgt.owner || "").slice(0, 120),    // create under this workspace's org/owner
       githubDescription: String(action.details || "").slice(0, 500),
       githubVisibility: "private",
       contextTags: ["bureau", "github", `agent:${agent.seed}`],
@@ -827,13 +834,14 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
   const artifacts = [], filesWritten = [];
   // Per-agent PAID-model economy. budgetUsd is the agent's dollar allowance for the paid API;
   // paidSpentUsd is what it has already spent (from prior runs). We only route to the paid provider
-  // when (a) Latch actually has one available (run.paidAvailable) AND (b) this agent still has budget
-  // left. We track spend within this run locally so we stop the moment the budget is exhausted and
-  // fall back to local for the rest of the task. Real dollars are attributed on the run for persist.
+  // when (a) Latch actually has one available (run.paidAvailable), (b) this task is NOT "hush"
+  // (hush forbids any external LLM for sensitive work), AND (c) this agent still has budget left. We
+  // track spend within this run locally so we stop the moment the budget is exhausted and fall back
+  // to local for the rest of the task. Real dollars are attributed on the run for persist.
   const budgetUsd = Number(agent.budgetUsd) || 0;
   const startPaidSpent = Number(agent.paidSpentUsd) || 0;
   let paidThisRun = 0, paidTokensThisRun = 0;
-  const canUsePaid = () => run.paidAvailable && budgetUsd > 0 && (startPaidSpent + paidThisRun) < budgetUsd;
+  const canUsePaid = () => run.paidAvailable && !run.hush && budgetUsd > 0 && (startPaidSpent + paidThisRun) < budgetUsd;
   // reliability guards: the weak local model tends to "finish" claiming it did work it never did.
   let didExecute = false, finishRejections = 0;
   const actionExpected = /\b(write|draft|compose|save|create|make|search|find|look ?up|research|fetch|read|send|email|publish|build|document|report|note|guide|memo|summary|list|announcement|letter|plan)\b/i.test(String(objective));
@@ -1158,7 +1166,7 @@ async function runSingle(run) {
   const org = await readOrg();
   const agent = org.agents.find((a) => a.id === run.agentId);
   if (!agent) { emit(run, "error", { message: "agent not found" }); return finishRun(run); }
-  emit(run, "start", { agent: agent.name, role: agent.role, objective: run.objective });
+  emit(run, "start", { agent: agent.name, role: agent.role, objective: run.objective, hush: run.hush });
   run.memoryEntries = []; run.producedFiles = []; run.paidAvailable = await paidProviderAvailable();
   const tally = {};
   const worker = async (objective) => {
@@ -1166,7 +1174,7 @@ async function runSingle(run) {
     addTally(tally, agent.id, tokens);
     return { product: summary, body: summary, tokens };
   };
-  await runGated(run, worker, { agent: agent.name }, tally);
+  await runGated(run, worker, { agent: agent.name, hush: run.hush }, tally);
 }
 
 const reportsOf = (org, id) => org.agents.filter((a) => (a.managerId || "") === id);
@@ -1556,7 +1564,7 @@ async function runGated(run, worker, persistExtra, perAgentTally) {
 async function runDelegation(run) {
   const org = await readOrg();
   if (!org.agents.length) { emit(run, "error", { message: "no agents to delegate to" }); return finishRun(run); }
-  emit(run, "start", { agent: "Manager", role: "Manager", objective: run.objective, company: true });
+  emit(run, "start", { agent: "Manager", role: "Manager", objective: run.objective, company: true, hush: run.hush });
   const roots = org.agents.filter((a) => !(a.managerId || ""));
   const topReports = roots.length ? roots : org.agents;
   const tally = {};
@@ -1573,7 +1581,7 @@ async function runDelegation(run) {
     }
     return { product: result.product, body: result.body, tokens: result.tokens };
   };
-  await runGated(run, worker, { agent: "Manager", delegated: topReports.length }, tally);
+  await runGated(run, worker, { agent: "Manager", delegated: topReports.length, hush: run.hush }, tally);
 }
 
 function finishRun(run, done = {}) {
@@ -1644,6 +1652,7 @@ function beginRun(spec) {
     objective: String(spec.objective || "").slice(0, 1000),
     maxTurns: Math.max(1, Math.min(20, Number(spec.maxTurns) || 6)),
     autoApprove: Boolean(spec.autoApprove), scheduleId: spec.scheduleId || "", goalId: spec.goalId || "", dryRun: Boolean(spec.dryRun),
+    hush: Boolean(spec.hush),     // "hush" task: NO agent may use the paid/external LLM — everyone stays on the local model regardless of budget (for sensitive work)
     ws: spec.ws || currentWs(),   // pin the workspace so the whole run reads/writes the right company
     events: [], listeners: new Set(), done: false, stopped: false,
   };
@@ -1761,7 +1770,17 @@ const server = createServer(async (req, res) => {
         const { json } = await latch("GET", "/api/github/config");
         github = { configured: !!(json && (json.ready || json.tokenConfigured)), owner: json?.owner || "", defaultRepo: json?.defaultRepo || "", visibility: json?.defaultVisibility || "" };
       } catch { /* latch unreachable */ }
+      github.target = (await readOrg()).github || { repo: "", owner: "" };   // this workspace's override (repo/owner names only)
       return send(res, 200, { github });
+    }
+    // Set THIS workspace's GitHub target (repo + owner names — never a token; the token lives in Latch).
+    if (p === "/api/integrations" && req.method === "POST") {
+      const body = await readBody(req);
+      const g = body.github || body;
+      const org = await updateOrg((o) => {
+        o.github = { repo: String(g.repo || "").trim().slice(0, 120), owner: String(g.owner || "").trim().slice(0, 120) };
+      });
+      return send(res, 200, { github: org.github });
     }
 
     // ----- workspaces: each is a fully separate company (org, drafts, profiles, approvals) -----
