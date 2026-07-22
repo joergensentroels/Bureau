@@ -60,6 +60,8 @@
   .brand{font-weight:700;letter-spacing:.18em;text-transform:uppercase;font-size:15px}
   .brand b{color:var(--accent)}
   header .spacer{flex:1}
+  .wsswitch{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:8px;border:1px solid var(--line-2);background:var(--panel);color:var(--ink);font-size:13px;cursor:pointer}
+  .wsswitch:hover{border-color:var(--accent-2)}
   .stat{display:flex;flex-direction:column;align-items:flex-end;line-height:1.2}
   .stat .k{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3)}
   .stat .v{font-size:14px}
@@ -327,6 +329,7 @@
 <header>
   <div class="brand">BU<b>REAU</b></div>
   <span class="tag" id="tagline">agent orchestrator</span>
+  <button class="wsswitch" id="wsBtn" title="Switch workspace / company"><span id="wsName">Default</span> <span style="opacity:.6">▾</span></button>
   <div class="spacer"></div>
   <div class="toggle themeswitch"><button data-theme-btn="ops">Ops</button><button data-theme-btn="pixel">Tycoon</button></div>
   <button class="inboxbtn" id="inboxBtn" title="What needs you"><span class="ibell">🔔</span><span>Inbox</span><span class="nbadge" id="inboxBadge">0</span></button>
@@ -400,8 +403,49 @@ const TEMPLATES = {
 };
 const TRAIT_POOL = ["meticulous","blunt","creative","cautious","fast","thorough","skeptical","warm","persistent","analytical","personable","pragmatic"];
 
+const curWs = () => localStorage.getItem("bureau_ws") || "default";
+let WORKSPACES=[{id:"default",name:"Default"}];
+function paintWsLabel(){ const w=WORKSPACES.find(x=>x.id===curWs()); const el=$("#wsName"); if(el) el.textContent=(w&&w.name)||"Default"; }
+async function switchWs(id){
+  if(id===curWs()) return;
+  localStorage.setItem("bureau_ws", id);
+  paintWsLabel();
+  document.querySelector(".modalwrap")?.remove();
+  await boot();                 // reload the whole org view for the new workspace
+}
+async function openWorkspaces(){
+  let data; try{ data=await api("GET","/api/workspaces"); WORKSPACES=data.workspaces||WORKSPACES; }catch{}
+  paintWsLabel();
+  const wrap=el("div","modalwrap");
+  const rows=()=>WORKSPACES.map(w=>`<div class="ibrow" style="align-items:center" data-wsid="${esc(w.id)}">
+      <div class="ibmain" style="cursor:pointer" data-go="${esc(w.id)}"><div class="ibt">${esc(w.name)}${w.id===curWs()?' <span class="hrtag" style="background:var(--ok)">current</span>':''}</div><div class="ibd">${esc(w.id)}</div></div>
+      <button data-rename="${esc(w.id)}" title="Rename" style="padding:2px 8px">✎</button>
+      ${w.id==="default"?"":`<button data-del="${esc(w.id)}" title="Delete workspace + its data" style="padding:2px 8px">🗑</button>`}
+    </div>`).join("");
+  wrap.innerHTML=`<div class="modal" style="max-width:480px">
+    <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:6px"><h1 style="font-size:16px;margin:0;text-transform:none">🏢 Workspaces</h1><button id="wscl">Close</button></div>
+    <div class="dim" style="font-size:12px;margin-bottom:10px">Each workspace is a separate company — its own agents, goals, policies, deliverables, and approvals. Switching reloads the view.</div>
+    <div id="wslist">${rows()}</div>
+    <div class="row" style="gap:7px;margin-top:12px"><input id="wsNew" type="text" placeholder="New workspace name…" style="flex:1"><button class="primary" id="wsAdd">Create</button></div></div>`;
+  document.body.appendChild(wrap);
+  wrap.onclick=e=>{ if(e.target===wrap) wrap.remove(); };
+  wrap.querySelector("#wscl").onclick=()=>wrap.remove();
+  const relist=()=>{ wrap.querySelector("#wslist").innerHTML=rows(); wire(); };
+  function wire(){
+    wrap.querySelectorAll("[data-go]").forEach(n=>n.onclick=()=>switchWs(n.dataset.go));
+    wrap.querySelectorAll("[data-rename]").forEach(b=>b.onclick=async()=>{ const w=WORKSPACES.find(x=>x.id===b.dataset.rename); const name=prompt("Rename workspace:",w?.name||""); if(name&&name.trim()){ await api("PATCH","/api/workspaces/"+b.dataset.rename,{name:name.trim()}); WORKSPACES=(await api("GET","/api/workspaces")).workspaces; paintWsLabel(); relist(); } });
+    wrap.querySelectorAll("[data-del]").forEach(b=>b.onclick=async()=>{ const w=WORKSPACES.find(x=>x.id===b.dataset.del); if(!confirm(`Delete workspace "${w?.name}" and all its data (agents, deliverables, history)? This cannot be undone.`)) return; await api("DELETE","/api/workspaces/"+b.dataset.del); if(curWs()===b.dataset.del){ localStorage.setItem("bureau_ws","default"); } WORKSPACES=(await api("GET","/api/workspaces")).workspaces; if(curWs()===b.dataset.del){ return switchWs("default"); } paintWsLabel(); relist(); });
+  }
+  wire();
+  wrap.querySelector("#wsAdd").onclick=async()=>{
+    const name=wrap.querySelector("#wsNew").value.trim(); if(!name) return;
+    const r=await api("POST","/api/workspaces",{name});
+    if(r&&r.id){ WORKSPACES=(await api("GET","/api/workspaces")).workspaces; wrap.querySelector("#wsNew").value=""; relist(); }
+    else alert("Could not create workspace: "+((r&&r.error)||"unknown"));
+  };
+}
 async function api(method, route, body){
-  const res = await fetch(route,{method,cache:"no-store",headers:{"content-type":"application/json"},body:body?JSON.stringify(body):undefined});
+  const res = await fetch(route,{method,cache:"no-store",headers:{"content-type":"application/json","x-workspace":curWs()},body:body?JSON.stringify(body):undefined});
   const t = await res.text();                       // tolerate empty / non-JSON bodies instead of throwing
   try{ return t?JSON.parse(t):{}; }catch{ return {raw:t}; }
 }
@@ -419,6 +463,9 @@ async function boot(){
   const ab=$("#auditBtn"); if(ab) ab.onclick=openAudit;
   const rvb=$("#reviewsBtn"); if(rvb) rvb.onclick=openReviews;
   const hib=$("#historyBtn"); if(hib) hib.onclick=openHistory;
+  const wb=$("#wsBtn"); if(wb) wb.onclick=openWorkspaces;
+  try{ WORKSPACES=(await api("GET","/api/workspaces")).workspaces||WORKSPACES; }catch{}
+  paintWsLabel();
   refreshHealth();
   refreshInbox();
   render();

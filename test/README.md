@@ -34,3 +34,15 @@ The runs are real: they create deliverables in `drafts/` and file/resolve Latch
 approvals. The test discovers an agent from the org, restores its tier, and clears
 the policies it adds — but it does **not** delete the `welcome-*` / `thank-you-*`
 drafts it produces, so remove those by hand if you don't want the sample output.
+
+## `workspaces.test.mjs` — workspace isolation (needs a running server)
+
+Proves each workspace is a fully separate company: new workspaces start empty,
+writes to one never touch another (or the default), an unknown workspace id falls
+back to default, and delete removes a workspace's data while leaving default intact.
+Uses only throwaway workspaces it creates and deletes — it never mutates default.
+
+```
+BUREAU_PORT=4174 node server.mjs
+BUREAU_PORT=4174 node test/workspaces.test.mjs
+```

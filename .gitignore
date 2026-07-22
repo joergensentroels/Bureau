@@ -8,9 +8,14 @@ desktop.ini
 # data (org config, deliverables, generated agent bios) isn't published.
 # A fresh clone boots with an empty org from the app's built-in defaults.
 data-foreman.json
+data-foreman.backup-*.json
 data-bureau.json
+data-bureau-ws-*.json
+data-bureau-workspaces.json
 drafts/
+drafts-*/
 agent-profiles/
+agent-profiles-*/
 
 # Prototype / scratch pages
 public/_*.html

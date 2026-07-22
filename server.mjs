@@ -10,23 +10,36 @@
 // Run:  node server.mjs        then open http://127.0.0.1:4173
 // No dependencies. Node built-ins only.
 
-import { readFile, writeFile, mkdir, readdir, stat } from "node:fs/promises";
+import { readFile, writeFile, mkdir, readdir, stat, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import dns from "node:dns/promises";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.BUREAU_PORT || process.env.FOREMAN_PORT || 4173);
 const LATCH_URL = (process.env.LATCH_URL || "http://127.0.0.1:8787").replace(/\/$/, "");
 const DATA_DIR = process.env.LATCH_DATA
   || path.join(os.homedir(), "Documents", "LLM server", "openclaw-command-center", "data");
-const ORG_FILE = path.join(HERE, "data-foreman.json");
-const PROFILES_DIR = path.join(HERE, "agent-profiles");
-const DRAFTS_DIR = path.join(HERE, "drafts");
-const VERSIONS_DIR = path.join(DRAFTS_DIR, ".versions");   // prior versions of each deliverable (name.<ts>)
+// ---- Multi-workspace: each workspace is a fully separate company (own org file, drafts, profiles).
+// The current workspace is carried per-request via AsyncLocalStorage, so the persistence helpers
+// below resolve the right paths automatically without threading a workspace arg through every call.
+// The "default" workspace keeps the original paths (data-foreman.json / drafts / agent-profiles), so
+// existing data needs no migration; other workspaces get suffixed paths.
+const _ORGFILE_DEFAULT = path.join(HERE, "data-foreman.json");
+const _PROFILES_DEFAULT = path.join(HERE, "agent-profiles");
+const _DRAFTS_DEFAULT = path.join(HERE, "drafts");
+const WS_REGISTRY = path.join(HERE, "data-bureau-workspaces.json");
+const WS_RE = /^[a-z0-9][a-z0-9-]{0,30}$/;                  // safe workspace ids (also used as filename parts)
+const wsStore = new AsyncLocalStorage();
+const currentWs = () => wsStore.getStore()?.ws || "default";
+const orgFile = (ws = currentWs()) => ws === "default" ? _ORGFILE_DEFAULT : path.join(HERE, `data-bureau-ws-${ws}.json`);
+const profilesDir = (ws = currentWs()) => ws === "default" ? _PROFILES_DEFAULT : path.join(HERE, `agent-profiles-${ws}`);
+const draftsDir = (ws = currentWs()) => ws === "default" ? _DRAFTS_DEFAULT : path.join(HERE, `drafts-${ws}`);
+const versionsDir = (ws = currentWs()) => path.join(draftsDir(ws), ".versions");   // prior versions of each deliverable (name.<ts>)
 // Definition-of-Done checklists ("checklist-*.md") live in drafts/ but are QA internals, not
 // deliverables — keep them out of the deliverables listings (still openable directly by filename).
 const DELIV_EXT = new Set(["md", "txt", "csv", "json", "js", "mjs", "ts", "py", "html", "sql", "yaml", "yml", "xml", "sh"]);
@@ -36,7 +49,10 @@ let TOKEN = "";
 
 // ---------- org store --------------------------------------------------------
 
-const EMPTY_ORG = { ceo: null, vision: "", companyName: "", agents: [], budget: { tokens: 0 }, activity: [], schedules: [], purchases: [], audit: [], guardrails: {}, deliverables: {}, goals: [], notify: {}, triggers: [] };
+// A FRESH empty org each call — never a shared template. Returning a module-level constant here and
+// spreading it would share the nested arrays/objects across every empty workspace, so pushing into
+// one company's agents would leak into all the others. Build new containers every time.
+const emptyOrg = () => ({ ceo: null, vision: "", companyName: "", agents: [], budget: { tokens: 0 }, activity: [], schedules: [], purchases: [], audit: [], guardrails: {}, deliverables: {}, goals: [], notify: {}, triggers: [], policies: [] });
 // The real "economy": an agent's budget is a DOLLAR allowance for the PAID API model. $0 (default)
 // means the agent may only use the free local model. Token usage is the actual cost, tracked per agent.
 // $ per 1K tokens on the paid model — converts tokens used on paid runs into dollars against an
@@ -151,10 +167,10 @@ function ensureBudget(org) {
 }
 
 async function readOrg() {
-  try { return ensureBudget({ ...EMPTY_ORG, ...JSON.parse(await readFile(ORG_FILE, "utf8")) }); }
-  catch { return ensureBudget({ ...EMPTY_ORG }); }
+  try { return ensureBudget({ ...emptyOrg(), ...JSON.parse(await readFile(orgFile(), "utf8")) }); }
+  catch { return ensureBudget({ ...emptyOrg() }); }
 }
-async function writeOrg(org) { await writeFile(ORG_FILE, JSON.stringify(org, null, 2)); }
+async function writeOrg(org) { await writeFile(orgFile(), JSON.stringify(org, null, 2)); }
 
 // Serialize every read-modify-write on the org file. Without this, two concurrent writers — a
 // finishing run, a scheduled run, a purchase deduction, a UI edit — each read the file, mutate
@@ -162,17 +178,38 @@ async function writeOrg(org) { await writeFile(ORG_FILE, JSON.stringify(org, nul
 // purchases, a schedule that never advances). updateOrg holds a mutex across read -> mutate ->
 // write so every change lands on the latest state. Keep the mutator fast/synchronous: the lock is
 // held for its whole duration. It returns the mutator's value, or the mutated org if it returns nothing.
-let orgLock = Promise.resolve();
+// One lock PER workspace: writes to different workspaces run concurrently, writes to the same one
+// serialize. (A single global lock would needlessly serialize unrelated companies.)
+const orgLocks = new Map();
 function updateOrg(mutator) {
-  const next = orgLock.then(async () => {
+  const ws = currentWs();
+  const prev = orgLocks.get(ws) || Promise.resolve();
+  const next = prev.then(async () => {
     const org = await readOrg();
     const r = await mutator(org);
     await writeOrg(org);
     return r === undefined ? org : r;
   });
-  orgLock = next.then(() => {}, () => {}); // the chain must keep flowing even if one mutation throws
+  orgLocks.set(ws, next.then(() => {}, () => {})); // the chain must keep flowing even if one mutation throws
   return next;
 }
+
+// ---- Workspace registry (which companies exist) -------------------------------------------------
+// A tiny separate file listing workspaces {id,name,createdAt}. "default" always exists (it's the
+// original single company). WORKSPACES is an in-memory cache of the ids for fast per-request validation.
+let WORKSPACES = [{ id: "default", name: "Default", createdAt: 0 }];
+async function loadWorkspaces() {
+  try {
+    const j = JSON.parse(await readFile(WS_REGISTRY, "utf8"));
+    if (Array.isArray(j.workspaces) && j.workspaces.length) {
+      if (!j.workspaces.some((w) => w.id === "default")) j.workspaces.unshift({ id: "default", name: "Default", createdAt: 0 });
+      WORKSPACES = j.workspaces;
+    }
+  } catch { /* no registry yet → just the default */ }
+  return WORKSPACES;
+}
+async function saveWorkspaces() { await writeFile(WS_REGISTRY, JSON.stringify({ workspaces: WORKSPACES }, null, 2)); }
+const wsExists = (id) => WORKSPACES.some((w) => w.id === id);
 
 // Append an entry to the provenance / audit log (newest first, capped). Safe to fire-and-forget.
 function logAudit(entry) {
@@ -212,6 +249,11 @@ async function loadToken() {
 }
 
 async function latch(method, route, body) {
+  // Tag every approval this Bureau files with its workspace, so each company's Inbox only sees its own.
+  if (method === "POST" && route === "/api/approvals" && body) {
+    const tags = Array.isArray(body.contextTags) ? body.contextTags.filter((t) => !String(t).startsWith("ws:")) : [];
+    body = { ...body, contextTags: [...tags, `ws:${currentWs()}`] };
+  }
   const res = await fetch(`${LATCH_URL}${route}`, {
     method,
     headers: { "content-type": "application/json", "authorization": `Bearer ${TOKEN}` },
@@ -466,14 +508,14 @@ async function generateBioText({ name, role, persona, traits, department, focus 
 
 async function writeBioFile(agent) {
   try {
-    await mkdir(PROFILES_DIR, { recursive: true });
+    await mkdir(profilesDir(), { recursive: true });
     const safe = String(agent.seed || agent.id || "agent").replace(/[^a-z0-9-]/gi, "_");
     const header = [
       `# ${agent.name}`, "", `**Role:** ${agent.role}`, `**Department:** ${agent.department || "General"}`,
       `**Traits:** ${(agent.traits || []).join(", ") || "(none)"}`,
       agent.focus ? `**Current focus:** ${agent.focus}` : "", "", "---", "",
     ].filter((l) => l !== "").join("\n");
-    await writeFile(path.join(PROFILES_DIR, `${safe}.md`), `${header}\n${agent.bio || ""}\n`);
+    await writeFile(path.join(profilesDir(), `${safe}.md`), `${header}\n${agent.bio || ""}\n`);
   } catch { /* the org record stays authoritative; the file is a convenience mirror */ }
 }
 
@@ -652,16 +694,16 @@ async function writeDraft(title, content) {
   if (!base) base = "draft";
   const name = `${base}.${ext}`;
   try {
-    await mkdir(DRAFTS_DIR, { recursive: true });
-    const full = path.join(DRAFTS_DIR, name);
-    if (full !== path.join(DRAFTS_DIR, path.basename(full))) return { ok: false, error: "invalid filename" };
+    await mkdir(draftsDir(), { recursive: true });
+    const full = path.join(draftsDir(), name);
+    if (full !== path.join(draftsDir(), path.basename(full))) return { ok: false, error: "invalid filename" };
     const newBody = body.slice(0, 100 * 1024);
     // Versioning: snapshot the prior content before overwriting, so revisions keep a history.
     const prev = await readFile(full, "utf8").catch(() => null);
     let ver = null;
     if (prev != null && prev !== newBody) {
       const ts = Date.now();
-      try { await mkdir(VERSIONS_DIR, { recursive: true }); await writeFile(path.join(VERSIONS_DIR, `${name}.${ts}`), prev); ver = { at: ts, bytes: Buffer.byteLength(prev) }; } catch {}
+      try { await mkdir(versionsDir(), { recursive: true }); await writeFile(path.join(versionsDir(), `${name}.${ts}`), prev); ver = { at: ts, bytes: Buffer.byteLength(prev) }; } catch {}
     }
     await writeFile(full, newBody);
     // Lifecycle: any write returns the doc to 'draft' (its content changed and needs re-review).
@@ -679,8 +721,8 @@ async function writeDraft(title, content) {
 async function readDraftFile(nameOrTitle) {
   let name = path.basename(String(nameOrTitle || "").trim());
   if (!/\.[a-z0-9]{1,6}$/i.test(name)) name = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) + ".md";
-  const full = path.join(DRAFTS_DIR, name);
-  if (path.dirname(full) !== DRAFTS_DIR) return { ok: false, error: "invalid filename" };
+  const full = path.join(draftsDir(), name);
+  if (path.dirname(full) !== draftsDir()) return { ok: false, error: "invalid filename" };
   try { return { ok: true, name, content: await readFile(full, "utf8") }; }
   catch { return { ok: false, error: "no such document: " + name }; }
 }
@@ -692,11 +734,11 @@ const RAG_STOP = new Set("the a an and or of to in for on with is are be this th
 function ragTerms(s) { return [...new Set(String(s).toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w.length > 3 && !RAG_STOP.has(w)))]; }
 async function retrieveRelevant(query, limit = 3, excludeName = "") {
   const q = ragTerms(query); if (!q.length) return [];
-  let names = []; try { names = (await readdir(DRAFTS_DIR)).filter(isDeliverableFile); } catch { return []; }
+  let names = []; try { names = (await readdir(draftsDir())).filter(isDeliverableFile); } catch { return []; }
   const scored = [];
   for (const name of names) {
     if (name === excludeName) continue;
-    let content = ""; try { content = await readFile(path.join(DRAFTS_DIR, name), "utf8"); } catch { continue; }
+    let content = ""; try { content = await readFile(path.join(draftsDir(), name), "utf8"); } catch { continue; }
     const hay = (name + " " + content.slice(0, 3000)).toLowerCase();
     let score = 0; for (const w of q) if (hay.includes(w)) score++;
     if (score >= 2) scored.push({ name, score, excerpt: content.slice(0, 600) });
@@ -1229,7 +1271,7 @@ async function deriveCriteria(objective) {
 async function readProducedFiles(files) {
   const out = [];
   for (const name of [...new Set(files || [])].slice(0, 6)) {
-    try { const c = await readFile(path.join(DRAFTS_DIR, name), "utf8"); out.push(`### FILE: ${name}\n${c.slice(0, 6000)}`); } catch {}
+    try { const c = await readFile(path.join(draftsDir(), name), "utf8"); out.push(`### FILE: ${name}\n${c.slice(0, 6000)}`); } catch {}
   }
   return out.join("\n\n");
 }
@@ -1531,11 +1573,14 @@ function beginRun(spec) {
     objective: String(spec.objective || "").slice(0, 1000),
     maxTurns: Math.max(1, Math.min(20, Number(spec.maxTurns) || 6)),
     autoApprove: Boolean(spec.autoApprove), scheduleId: spec.scheduleId || "", goalId: spec.goalId || "", dryRun: Boolean(spec.dryRun),
+    ws: spec.ws || currentWs(),   // pin the workspace so the whole run reads/writes the right company
     events: [], listeners: new Set(), done: false, stopped: false,
   };
   runs.set(run.id, run);
   const go = mode === "company" ? runDelegation : runSingle;
-  const done = go(run).catch((e) => { console.error("run failed:", e); emit(run, "error", { message: e.message }); finishRun(run); });
+  // Run the entire (async, timer-driven) execution inside the run's workspace context, so every
+  // readOrg/updateOrg/draft it touches — even after the originating request returns — hits the right company.
+  const done = wsStore.run({ ws: run.ws }, () => go(run)).catch((e) => { console.error("run failed:", e); emit(run, "error", { message: e.message }); finishRun(run); });
   return { run, done };
 }
 
@@ -1544,6 +1589,13 @@ const SCHED_CADENCES = ["hourly", "daily", "weekly"];
 function cadenceMs(c) { return c === "hourly" ? 3600e3 : c === "weekly" ? 7 * 864e5 : 864e5; }
 const runningSchedules = new Set();
 async function tickSchedules() {
+  // Every workspace has its own schedules — tick each inside its own context.
+  for (const w of WORKSPACES) {
+    try { await wsStore.run({ ws: w.id }, () => tickSchedulesForCurrentWs()); }
+    catch (e) { console.error(`scheduler tick (${w.id}):`, e.message); }
+  }
+}
+async function tickSchedulesForCurrentWs() {
   let org; try { org = await readOrg(); } catch { return; }
   const now = Date.now();
   const due = (org.schedules || []).filter((s) => s.enabled && s.nextRunAt && s.nextRunAt <= now && !runningSchedules.has(s.id));
@@ -1604,6 +1656,11 @@ function cleanTraits(v) {
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const p = url.pathname;
+  // Establish the workspace for this request (and its async continuation) from the X-Workspace
+  // header, falling back to ?ws= then "default". Unknown ids fall back to default rather than error,
+  // so a stale client can never read/write a phantom file. readOrg/updateOrg/drafts resolve off this.
+  const reqWs = String(req.headers["x-workspace"] || url.searchParams.get("ws") || "default");
+  wsStore.enterWith({ ws: wsExists(reqWs) ? reqWs : "default" });
   try {
     if (p === "/" || p === "/index.html") {
       const html = await readFile(path.join(HERE, "public", "index.html"), "utf8");
@@ -1621,6 +1678,43 @@ const server = createServer(async (req, res) => {
     }
     if (p === "/api/org" && req.method === "GET") return send(res, 200, await readOrg());
     if (p === "/api/health" && req.method === "GET") return send(res, 200, await latchHealth());
+
+    // ----- workspaces: each is a fully separate company (org, drafts, profiles, approvals) -----
+    if (p === "/api/workspaces" && req.method === "GET") {
+      return send(res, 200, { workspaces: WORKSPACES, current: currentWs() });
+    }
+    if (p === "/api/workspaces" && req.method === "POST") {
+      const body = await readBody(req);
+      const name = String(body.name || "").trim().slice(0, 60);
+      if (!name) return send(res, 400, { error: "name required" });
+      const slug = (name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 20)) || "ws";
+      let id = `${slug}-${randomUUID().slice(0, 4)}`;
+      if (!WS_RE.test(id)) id = `ws-${randomUUID().slice(0, 8)}`;
+      WORKSPACES.push({ id, name, createdAt: Date.now() });
+      await saveWorkspaces();
+      return send(res, 201, { id, name });
+    }
+    if (p.startsWith("/api/workspaces/") && req.method === "PATCH") {
+      const id = p.split("/")[3];
+      const body = await readBody(req);
+      const w = WORKSPACES.find((x) => x.id === id);
+      if (!w) return send(res, 404, { error: "not_found" });
+      if (body.name !== undefined) w.name = String(body.name).trim().slice(0, 60) || w.name;
+      await saveWorkspaces();
+      return send(res, 200, w);
+    }
+    if (p.startsWith("/api/workspaces/") && req.method === "DELETE") {
+      const id = p.split("/")[3];
+      if (id === "default") return send(res, 400, { error: "cannot delete the default workspace" });
+      if (!wsExists(id)) return send(res, 404, { error: "not_found" });
+      WORKSPACES = WORKSPACES.filter((x) => x.id !== id);
+      await saveWorkspaces();
+      // Remove its data (org file + drafts + profiles). Best-effort; the registry is the source of truth.
+      await rm(orgFile(id), { force: true }).catch(() => {});
+      await rm(draftsDir(id), { recursive: true, force: true }).catch(() => {});
+      await rm(profilesDir(id), { recursive: true, force: true }).catch(() => {});
+      return send(res, 200, { ok: true, id });
+    }
 
     if (p === "/api/company" && req.method === "POST") {
       const body = await readBody(req);
@@ -1686,7 +1780,7 @@ const server = createServer(async (req, res) => {
     if (p === "/api/dashboard" && req.method === "GET") {
       const org = await readOrg();
       let deliverables = 0;
-      try { deliverables = (await readdir(DRAFTS_DIR)).filter(isDeliverableFile).length; } catch {}
+      try { deliverables = (await readdir(draftsDir())).filter(isDeliverableFile).length; } catch {}
       const agents = org.agents || [], schedules = org.schedules || [];
       const topAgents = [...agents].sort((a, b) => (b.tokensUsed || 0) - (a.tokensUsed || 0)).slice(0, 4)
         .map((a) => ({ name: a.name, role: a.role, seed: a.seed, tokensUsed: a.tokensUsed || 0, budgetUsd: a.budgetUsd || 0 }));
@@ -1739,10 +1833,10 @@ const server = createServer(async (req, res) => {
         const org = await readOrg();
         const authorOf = {};                                            // filename -> the agent who wrote it (from memory)
         for (const a of org.agents) for (const m of (a.memory || [])) for (const f of (m.files || [])) if (!authorOf[f]) authorOf[f] = { id: a.id, name: a.name };
-        const names = await readdir(DRAFTS_DIR);
+        const names = await readdir(draftsDir());
         for (const name of names) {
           if (!isDeliverableFile(name)) continue;
-          try { const s = await stat(path.join(DRAFTS_DIR, name)); const dm = org.deliverables[name] || {}; files.push({ name, bytes: s.size, modified: s.mtimeMs, authorId: authorOf[name]?.id || "", authorName: authorOf[name]?.name || "", status: dm.status || "draft", versions: (dm.versions || []).length }); } catch {}
+          try { const s = await stat(path.join(draftsDir(), name)); const dm = org.deliverables[name] || {}; files.push({ name, bytes: s.size, modified: s.mtimeMs, authorId: authorOf[name]?.id || "", authorName: authorOf[name]?.name || "", status: dm.status || "draft", versions: (dm.versions || []).length }); } catch {}
         }
         files.sort((a, b) => b.modified - a.modified);
       } catch { /* no drafts dir yet */ }
@@ -1776,16 +1870,16 @@ const server = createServer(async (req, res) => {
       const [nm, , ts] = decodeURIComponent(p.slice("/api/deliverables/".length)).split("/");
       const name = path.basename(nm || "");
       if (!/^[a-z0-9][a-z0-9._-]*.[a-z0-9]{1,6}$/i.test(name) || !/^\d+$/.test(ts || "")) return send(res, 400, { error: "bad request" });
-      const full = path.join(VERSIONS_DIR, `${name}.${ts}`);
-      if (path.dirname(full) !== VERSIONS_DIR) return send(res, 403, { error: "forbidden" });
+      const full = path.join(versionsDir(), `${name}.${ts}`);
+      if (path.dirname(full) !== versionsDir()) return send(res, 403, { error: "forbidden" });
       try { return send(res, 200, { name, at: Number(ts), content: await readFile(full, "utf8") }); }
       catch { return send(res, 404, { error: "not found" }); }
     }
     if (p.startsWith("/api/deliverables/") && req.method === "GET") {
       const name = path.basename(decodeURIComponent(p.slice("/api/deliverables/".length)));
       if (!/^[a-z0-9][a-z0-9._-]*.[a-z0-9]{1,6}$/i.test(name)) return send(res, 400, { error: "bad name" });
-      const full = path.join(DRAFTS_DIR, name);
-      if (path.dirname(full) !== DRAFTS_DIR) return send(res, 403, { error: "forbidden" });
+      const full = path.join(draftsDir(), name);
+      if (path.dirname(full) !== draftsDir()) return send(res, 403, { error: "forbidden" });
       try {
         const content = await readFile(full, "utf8");
         const dm = (await readOrg()).deliverables[name] || {};
@@ -1807,7 +1901,14 @@ const server = createServer(async (req, res) => {
       try {
         const st = await latch("GET", "/api/state");
         const list = st.json.approvals || st.json.visibleState?.approvals || [];
-        approvals = list.filter((a) => a.status === "pending").map((a) => {
+        const thisWs = currentWs();
+        approvals = list.filter((a) => a.status === "pending").filter((a) => {
+          // Show only this workspace's approvals. The default workspace also adopts legacy approvals
+          // that predate workspace tagging (no ws: tag at all), so nothing is orphaned by the upgrade.
+          const wsTag = (a.contextTags || []).find((t) => String(t).startsWith("ws:"));
+          const owner = wsTag ? wsTag.slice(3) : "";
+          return owner ? owner === thisWs : thisWs === "default";
+        }).map((a) => {
           const tag = (a.contextTags || []).find((t) => String(t).startsWith("agent:"));
           const seed = tag ? tag.slice(6) : "";
           return {
@@ -1826,9 +1927,9 @@ const server = createServer(async (req, res) => {
       try {
         const authorOf = {};
         for (const a of org.agents) for (const m of (a.memory || [])) for (const f of (m.files || [])) if (!authorOf[f]) authorOf[f] = a.name;
-        for (const name of await readdir(DRAFTS_DIR)) {
+        for (const name of await readdir(draftsDir())) {
           if (!isDeliverableFile(name)) continue;
-          try { const s = await stat(path.join(DRAFTS_DIR, name)); if (s.mtimeMs > seenAt) deliverables.push({ name, bytes: s.size, modified: s.mtimeMs, authorName: authorOf[name] || "", status: (org.deliverables[name]?.status) || "draft" }); } catch {}
+          try { const s = await stat(path.join(draftsDir(), name)); if (s.mtimeMs > seenAt) deliverables.push({ name, bytes: s.size, modified: s.mtimeMs, authorName: authorOf[name] || "", status: (org.deliverables[name]?.status) || "draft" }); } catch {}
         }
         deliverables.sort((a, b) => b.modified - a.modified);
       } catch { /* no drafts dir yet */ }
@@ -2354,10 +2455,10 @@ const server = createServer(async (req, res) => {
 // startup so importing doesn't bind a port or tick schedules.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
-  loadToken()
-    .then((t) => {
+  Promise.all([loadToken(), loadWorkspaces()])
+    .then(([t]) => {
       TOKEN = t;
-      server.listen(PORT, "127.0.0.1", () => console.log(`Bureau on http://127.0.0.1:${PORT}`));
+      server.listen(PORT, "127.0.0.1", () => console.log(`Bureau on http://127.0.0.1:${PORT} (${WORKSPACES.length} workspace${WORKSPACES.length === 1 ? "" : "s"})`));
       setInterval(() => { tickSchedules().catch((e) => console.error("scheduler tick:", e.message)); }, 60000); // check due schedules every minute
     })
     .catch((e) => { console.error("Could not load Latch operator token:", e.message); process.exit(1); });
