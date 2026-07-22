@@ -46,7 +46,5 @@ assertions + a live `--e2e`; see `test/README.md`).
 
 ## Parked / in flight
 
-- **Internal rename** `data-foreman.json` and the `foreman/` folder → `bureau`. A data migration,
-  not cleanup — deferred so the paused background sessions' resume isn't broken.
 - **Paused background sessions** (delegation-breadth fan-out; paid per-agent model routing) — their
   partial work is already merged; the sessions themselves should not be resumed.
