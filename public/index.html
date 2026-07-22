@@ -750,6 +750,12 @@ function renderMain(app){
   const sched=el("div"); sched.id="schedules"; sched.className="delivlist";
   work.appendChild(sched);
 
+  const trigH=el("div"); trigH.style.cssText="display:flex;align-items:center;justify-content:space-between;margin-top:22px";
+  trigH.innerHTML=`<h2 style="margin:0">Triggers</h2><button class="miniadd" id="trigAdd">+ Trigger</button>`;
+  work.appendChild(trigH);
+  const trig=el("div"); trig.id="triggers"; trig.className="delivlist";
+  work.appendChild(trig);
+
   const buyH=el("div"); buyH.style.cssText="display:flex;align-items:center;justify-content:space-between;margin-top:22px";
   buyH.innerHTML=`<h2 style="margin:0">Purchases</h2><button class="miniadd" id="buyBudget">Set budget</button>`;
   work.appendChild(buyH);
@@ -765,9 +771,11 @@ function renderMain(app){
   schedH.querySelector("#schedAdd").onclick=openScheduleDialog;
   buyH.querySelector("#buyBudget").onclick=setCompanyBudget;
   goalH.querySelector("#goalAdd").onclick=()=>openGoalDialog();
+  trigH.querySelector("#trigAdd").onclick=openTriggerDialog;
   loadGoals();
   loadDeliverables();
   loadSchedules();
+  loadTriggers();
   loadPurchases();
   paintStatus();
 }
@@ -1400,6 +1408,41 @@ function openGoalDialog(g){
     wrap.remove(); loadGoals(); loadDashboard();
   };
   wrap.querySelector("#gtitle").focus();
+}
+async function loadTriggers(){
+  const box=document.getElementById("triggers"); if(!box) return;
+  let data; try{ data=await api("GET","/api/triggers"); }catch{ box.innerHTML=`<div class="dim">Couldn't load triggers.</div>`; return; }
+  const list=(data&&data.triggers)||[];
+  if(!list.length){ box.innerHTML=`<div class="dim">No triggers. Create one to let an external event (a webhook POST) start a run.</div>`; return; }
+  box.innerHTML=list.map(t=>{
+    const url=location.origin+"/api/trigger/"+t.token;
+    return `<div class="delivrow" style="cursor:default;align-items:flex-start"><span>${t.enabled?"⚡":"⏸️"}</span><span style="flex:1;min-width:0"><span class="dn" style="display:block">${esc(t.name)}${t.fires?` <span class="dim" style="font-weight:400">· fired ${t.fires}×</span>`:""}</span><span class="dim" style="font-size:11px;display:block;white-space:normal">${esc(t.objective.slice(0,80))}${t.objective.length>80?"…":""}</span><span style="font-size:10px;display:flex;gap:6px;align-items:center;margin-top:4px"><code style="font-size:10px;overflow:hidden;text-overflow:ellipsis;max-width:210px;white-space:nowrap;color:var(--ink-3)">${esc(url)}</code><button class="rvbtn tcopy" data-u="${esc(url)}">copy URL</button></span></span><span class="row" style="gap:6px;flex:none"><button class="rvbtn ttoggle" data-id="${t.id}" data-en="${t.enabled?1:0}">${t.enabled?"Pause":"Enable"}</button><button class="rvbtn tdel" data-id="${t.id}">Delete</button></span></div>`;
+  }).join("");
+  box.querySelectorAll(".tcopy").forEach(b=>b.onclick=()=>{ try{ navigator.clipboard.writeText(b.dataset.u); }catch{} b.textContent="copied ✓"; setTimeout(()=>b.textContent="copy URL",1200); });
+  box.querySelectorAll(".ttoggle").forEach(b=>b.onclick=async()=>{ await api("PATCH","/api/triggers/"+b.dataset.id,{enabled:b.dataset.en!=="1"}); loadTriggers(); });
+  box.querySelectorAll(".tdel").forEach(b=>b.onclick=async()=>{ if(confirm("Delete this trigger?")){ await api("DELETE","/api/triggers/"+b.dataset.id); loadTriggers(); } });
+}
+function openTriggerDialog(){
+  const wrap=el("div","modalwrap");
+  const agentOpts=`<option value="__company__">The whole company — Manager delegates</option>`+ORG.agents.map(a=>`<option value="${a.id}">${esc(a.name)} — ${esc(a.role)}</option>`).join("");
+  wrap.innerHTML=`<div class="modal" style="max-width:520px"><h1 style="font-size:16px;margin:0 0 4px;text-transform:none">⚡ New trigger</h1>
+    <div class="dim" style="font-size:12px;margin-bottom:12px">You get a secret webhook URL. When an external service POSTs to it, this run fires automatically (autoApprove — but shell / api_call / big purchases still need your approval, and all guardrails apply). The POST body is passed into the run as context.</div>
+    <div class="fields">
+      <div><label>Name</label><input id="tname" placeholder="New GitHub issue"></div>
+      <div><label>Run this objective</label><textarea id="tobj" placeholder="Triage the incoming issue and draft a first response."></textarea></div>
+      <div><label>Run as</label><select id="twho">${agentOpts}</select></div>
+    </div>
+    <div class="row" style="justify-content:flex-end;gap:10px;margin-top:16px"><button id="tc">Cancel</button><button class="primary" id="ts">Create</button></div></div>`;
+  document.body.appendChild(wrap);
+  wrap.onclick=e=>{ if(e.target===wrap) wrap.remove(); };
+  wrap.querySelector("#tc").onclick=()=>wrap.remove();
+  wrap.querySelector("#ts").onclick=async()=>{
+    const objective=wrap.querySelector("#tobj").value.trim(); if(!objective){ wrap.querySelector("#tobj").focus(); return; }
+    const who=wrap.querySelector("#twho").value, name=wrap.querySelector("#tname").value.trim()||"Trigger";
+    const body=who==="__company__"?{name,objective,mode:"company"}:{name,objective,mode:"single",agentId:who};
+    await api("POST","/api/triggers",body); wrap.remove(); loadTriggers();
+  };
+  wrap.querySelector("#tname").focus();
 }
 async function loadSchedules(){
   const box=document.getElementById("schedules"); if(!box) return;

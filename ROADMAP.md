@@ -17,9 +17,9 @@ Make the company smarter, connected, and shareable.
    - **HR recommendations** (heuristic): idle / often-blocked / strong / low-pass-rate / reliable-producer.
    - **Learn from your feedback**: per-agent `lessons` injected into prompts; revision feedback auto-captured as a coaching note; editable in the agent modal.
    - (Stretch, not done) goal retrospectives.
-2. **Real integrations** ⬜
-   - Push work OUT: GitHub (PRs/issues), Slack (updates), Drive/Notion (publish deliverables) — built on `api_call`/webhook + credentials.
-   - **Inbound triggers**: an external event (email / GitHub issue / webhook-in) starts a run. Bureau becomes reactive.
+2. **Real integrations** ◐
+   - ⬜ Push work OUT: GitHub (PRs/issues), Slack (updates), Drive/Notion — built on `api_call`/webhook + credentials (needs your tokens; do together).
+   - ✅ **Inbound triggers**: a secret webhook URL per trigger; an external POST fires a preset run (autoApprove, but shell/api_call/over-ceiling purchases still gated), payload passed in as context. Managed in a "Triggers" section.
 3. **Product-ization** ◐
    - ✅ **Company templates**: one-click preset teams ("SaaS startup", "content studio", "research lab") with roles + a starter goal, added non-destructively (reuses hire-plan + goals).
    - ⬜ **Persistence beyond JSON**: a real datastore (the single JSON + mutex is already straining under multi-process use). Deferred — most structural change; do carefully when the paused sessions are done.
