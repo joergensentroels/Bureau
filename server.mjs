@@ -88,7 +88,7 @@ function requiresCeoAlways(actType, next, gr) {
 }
 const POLICY_ACTIONS = ["web_search", "web_research", "read_file", "file_write", "note", "purchase", "api_call", "shell", "email_draft"];
 // Sanitize a rule's condition clause: keep only recognized, well-typed conditions.
-function cleanPolicyWhen(w) {
+export function cleanPolicyWhen(w) {
   const out = {};
   if (w && typeof w === "object") {
     if (w.actionType && POLICY_ACTIONS.includes(String(w.actionType).toLowerCase())) out.actionType = String(w.actionType).toLowerCase();
@@ -519,7 +519,7 @@ async function writeBioFile(agent) {
   } catch { /* the org record stays authoritative; the file is a convenience mirror */ }
 }
 
-function safeParse(text) {
+export function safeParse(text) {
   if (!text) return null;
   let s = text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
   const start = s.indexOf("{");
@@ -545,7 +545,7 @@ const estTokens = (msgs) => Math.ceil(msgs.reduce((n, m) => n + String(m.content
 // over-uses "other"/"note", and puts the document/URL/query in the wrong place. This heuristic
 // "do what they meant" layer corrects the common mistakes before dispatch — no extra model call.
 const URL_RE = /https?:\/\/[^\s"'<>)\]]+/i;
-function normalizeAction(next, objective) {
+export function normalizeAction(next, objective) {
   const n = { ...next };
   const type = String(n.type || "").toLowerCase();
   if (type !== "finish" && type !== "escalate" && type !== "propose_action" && (n.actionType || n.command || n.details)) n.type = "propose_action";
@@ -583,7 +583,7 @@ function normalizeAction(next, objective) {
 // Latch, the server really fetches the URL and feeds the real page text back into the agent.
 // SSRF guard: only public http(s) hosts — never localhost, private ranges, link-local, cloud
 // metadata, or the Tailscale/CGNAT range (which would expose Latch itself or the LAN).
-function ipv4Blocked(ip) {
+export function ipv4Blocked(ip) {
   const p = ip.split(".").map(Number);
   if (p.length !== 4 || p.some((x) => Number.isNaN(x) || x < 0 || x > 255)) return true;
   const [a, b] = p;
@@ -596,7 +596,7 @@ function ipv4Blocked(ip) {
   if (a >= 224) return true;                                     // multicast / reserved
   return false;
 }
-function ipBlocked(ip) {
+export function ipBlocked(ip) {
   if (ip.includes(":")) {
     const low = ip.toLowerCase();
     if (low === "::1" || low === "::") return true;
@@ -613,7 +613,7 @@ async function assertPublicHost(hostname) {
   if (!addrs.length) throw new Error("no DNS records");
   for (const a of addrs) if (ipBlocked(a.address)) throw new Error("refused: resolves to a private/internal address");
 }
-function htmlToText(html) {
+export function htmlToText(html) {
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ")
     .replace(/<!--[\s\S]*?-->/g, " ").replace(/<\/(p|div|h[1-6]|li|tr|br|section|article)>/gi, "\n")
@@ -731,7 +731,7 @@ async function readDraftFile(nameOrTitle) {
 // prior company work and builds on it instead of starting cold. No embeddings/deps: score by how
 // many significant query terms appear in each deliverable (filename + head).
 const RAG_STOP = new Set("the a an and or of to in for on with is are be this that it as by from at into you your our we they will can should draft document report note guide plan".split(" "));
-function ragTerms(s) { return [...new Set(String(s).toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w.length > 3 && !RAG_STOP.has(w)))]; }
+export function ragTerms(s) { return [...new Set(String(s).toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w.length > 3 && !RAG_STOP.has(w)))]; }
 async function retrieveRelevant(query, limit = 3, excludeName = "") {
   const q = ragTerms(query); if (!q.length) return [];
   let names = []; try { names = (await readdir(draftsDir())).filter(isDeliverableFile); } catch { return []; }
@@ -1073,7 +1073,7 @@ async function persistRun(objective, tokens, extra, perAgent, memoryEntries, pai
   return { tokens: org.budget.tokens };
 }
 function addTally(tally, id, n) { if (tally && id && n) tally[id] = (tally[id] || 0) + n; }
-function expectsDeliverable(objective) {
+export function expectsDeliverable(objective) {
   return /\b(write|draft|compose|create|make|produce|document|report|note|guide|memo|summary|summari[sz]e|plan|outline|article|letter|announcement|list|proposal|brief|checklist|policy)\b/i.test(String(objective));
 }
 
@@ -1105,7 +1105,7 @@ const reportsOf = (org, id) => org.agents.filter((a) => (a.managerId || "") === 
 // which is the main reason decompose collapses to the single-task fallback. Match tolerantly:
 // exact name → unique first-name → substring either direction → role, and never return the same
 // report twice for one plan (so two loose matches can't both land on the same person).
-function resolveReport(reports, assignee, used) {
+export function resolveReport(reports, assignee, used) {
   const a = String(assignee || "").toLowerCase().trim();
   if (!a) return null;
   const free = reports.filter((r) => !used.has(r.id));
@@ -1515,12 +1515,12 @@ function finishRun(run, done = {}) {
 // Create a run object and kick it off. Returns { run, done } where done resolves when it finishes.
 // Reused by POST /api/run and the scheduler.
 // Turn a goal into a concrete run objective (used by "Work on it" and goal schedules).
-function goalObjective(g) {
+export function goalObjective(g) {
   const open = (g.keyResults || []).filter((k) => !k.done).map((k) => `- ${k.text}`).join("\n");
   return `Advance the company goal: "${g.title}".${g.detail ? " " + g.detail : ""}${open ? `\n\nKey results still open:\n${open}` : ""}\n\nMake concrete progress toward it and produce a deliverable capturing the work.`.slice(0, 1000);
 }
 // Normalize a key-results payload (array of strings or {text,done}) into stored {id,text,done}.
-function normKRs(v) {
+export function normKRs(v) {
   return (Array.isArray(v) ? v : []).map((k, i) => {
     const text = String((typeof k === "string" ? k : k?.text) || "").trim().slice(0, 160);
     return text ? { id: i, text, done: !!(k && k.done) } : null;
@@ -1586,7 +1586,7 @@ function beginRun(spec) {
 
 // ---------- scheduler: recurring objectives run without pressing Run --------
 const SCHED_CADENCES = ["hourly", "daily", "weekly"];
-function cadenceMs(c) { return c === "hourly" ? 3600e3 : c === "weekly" ? 7 * 864e5 : 864e5; }
+export function cadenceMs(c) { return c === "hourly" ? 3600e3 : c === "weekly" ? 7 * 864e5 : 864e5; }
 const runningSchedules = new Set();
 async function tickSchedules() {
   // Every workspace has its own schedules — tick each inside its own context.
