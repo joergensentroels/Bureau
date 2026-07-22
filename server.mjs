@@ -1813,6 +1813,9 @@ const server = createServer(async (req, res) => {
           return {
             id: a.id, type: a.type || "", title: a.title || "(untitled request)",
             details: String(a.details || "").slice(0, 240), riskLevel: a.riskLevel || "",
+            command: (typeof a.command === "string" ? a.command : a.command ? JSON.stringify(a.command) : "").slice(0, 400),
+            executionMode: a.executionMode && a.executionMode !== "none" ? a.executionMode : "",
+            sensitive: !!a.sensitive,
             createdAt: a.createdAt || a.at || a.createdTime || 0, agent: seedName[seed] || "",
           };
         }).sort((x, y) => (y.createdAt || 0) - (x.createdAt || 0));
@@ -1845,6 +1848,26 @@ const server = createServer(async (req, res) => {
     if (p === "/api/inbox/seen" && req.method === "POST") {
       const org = await updateOrg((o) => { o.inbox = { seenAt: Date.now() }; });
       return send(res, 200, { seenAt: org.inbox.seenAt });
+    }
+    // In-app approval seam: decide a still-pending Latch approval from inside Bureau. This performs
+    // the SAME Latch PATCH that Bureau already does for auto-approvals — the human is the one clicking
+    // (the UI requires a deliberate second confirm). The waiting run loop polls Latch and picks it up.
+    if (p.startsWith("/api/approvals/") && p.endsWith("/decide") && req.method === "POST") {
+      const id = p.split("/")[3];
+      const body = await readBody(req);
+      const decision = body.decision === "approved" ? "approved" : body.decision === "denied" ? "denied" : "";
+      if (!decision) return send(res, 400, { error: "decision must be approved or denied" });
+      // Only act on an approval that is actually still pending, so a stale UI click can't flip a
+      // decision that was already made (in Latch or by a tier/policy).
+      let cur; try { cur = await latchApproval(id); } catch { cur = null; }
+      if (!cur) return send(res, 404, { error: "approval not found" });
+      if (cur.status !== "pending") return send(res, 409, { error: `already ${cur.status}`, status: cur.status });
+      const note = `${decision === "approved" ? "Approved" : "Rejected"} in Bureau by the CEO${body.note ? `: ${String(body.note).slice(0, 200)}` : ""}`;
+      try {
+        await latch("PATCH", `/api/approvals/${id}`, { status: decision, note, responseNote: body.note ? String(body.note).slice(0, 200) : undefined });
+      } catch (e) { return send(res, 502, { error: "latch patch failed: " + e.message }); }
+      logAudit({ kind: "approval", actionType: cur.type || "", name: cur.title || "", decision: decision === "approved" ? "you" : "denied", error: decision === "denied" ? (body.note || "rejected in Bureau") : "" });
+      return send(res, 200, { ok: true, id, decision });
     }
 
     if (p === "/api/ceo" && req.method === "POST") {
