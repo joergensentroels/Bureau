@@ -1288,6 +1288,8 @@ async function runSingle(run) {
   if (!agent) { emit(run, "error", { message: "agent not found" }); return finishRun(run); }
   emit(run, "start", { agent: agent.name, role: agent.role, objective: run.objective, hush: run.hush });
   run.memoryEntries = []; run.producedFiles = []; run.paidAvailable = await paidProviderAvailable();
+  // The single agent funds the JSON-critical orchestration calls (deriveCriteria/verifyRun) for its run.
+  run.orch = { payerId: agent.id, budgetUsd: Number(agent.budgetUsd) || 0, startPaidSpent: Number(agent.paidSpentUsd) || 0 };
   const tally = {};
   const worker = async (objective) => {
     const { summary, tokens } = await runAgentTask(run, agent, org, objective);
@@ -1353,7 +1355,7 @@ async function delegate(run, org, managerName, managerId, reports, objective, pr
     { role: "user", content: `Objective: ${objective}\n\nYour direct reports:\n${roster}\n\n/no_think` },
   ];
   let plan = null;
-  try { const j = await askJsonReliable(decomposeMsgs, [900, 3200]); tokens += j.tokens; addTally(tally, managerId, j.tokens); plan = j.obj; }
+  try { const j = await askJsonReliable(decomposeMsgs, [900, 3200], { run }); tokens += j.tokens; addTally(tally, managerId, j.tokens); plan = j.obj; }
   catch (e) { emit(run, "report", { manager: managerName, depth, text: "Planning failed: " + e.message }); return { product: "planning failed", tokens, body: "" }; }
 
   const used = new Set();
@@ -1434,12 +1436,46 @@ const GATE_TEMPERATURE = 0;
 // qwen3's "/no_think" soft-switch is only sometimes honored; when it isn't, the model spends the
 // whole token budget thinking and returns empty text. Retry at a larger budget so the thinking can
 // complete and the JSON still arrives (safeParse strips the <think> block). Returns { obj, raw, tokens }.
+// ---- Paid reliability for the JSON-critical orchestration calls ------------
+// decompose / deriveCriteria / verifyRun MUST emit strict JSON, and the weak local model is worst
+// exactly here — one broken object collapses an entire delegation into the single-task fallback.
+// When a paid provider is available and the run isn't hush, run THESE calls on the CHEAPEST paid
+// tier (kimi-k2.6 — reliability, not seniority): a few hundred dependable tokens for a fraction of a
+// cent. Funded by the run's PRINCIPAL agent (the single agent, or the CEO for a company delegation);
+// the agents' actual WORK still follows their own per-agent paid/local routing (this only hardens the
+// scaffolding around it). Spend is booked to the principal's run tally, so it rolls into paidSpentUsd
+// and shows up in the run's existing paid totals. `run.orch` is set once at run start (runSingle /
+// runDelegation); when it's absent, not funded, or the provider is unavailable, calls stay local.
+const ORCH_TIER = PAID_TIERS.standard;
+function orchestrationRouting(run) {
+  const off = { paid: false, model: "", book() {} };
+  const o = run && run.orch;
+  if (!run || !run.paidAvailable || run.hush || !o || !o.payerId || !(o.budgetUsd > 0)) return off;
+  const spent = (o.startPaidSpent || 0) + ((run.paidTally && run.paidTally[o.payerId]) || 0);
+  if (spent >= o.budgetUsd) return off;   // principal's paid budget exhausted — the JSON calls stay local
+  return {
+    paid: true,
+    model: ORCH_TIER.model,
+    book(tokens, servedModel) {
+      const n = Number(tokens) || 0;
+      const usd = (n / 1000) * priceForModel(servedModel, ORCH_TIER);
+      run.paidTally = run.paidTally || {};
+      run.paidTally[o.payerId] = Math.round(((run.paidTally[o.payerId] || 0) + usd) * 1e6) / 1e6;
+      run.paidTokens = (run.paidTokens || 0) + n;
+      run.orchPaidTokens = (run.orchPaidTokens || 0) + n;   // paid tokens spent specifically on orchestration
+      run.ranPaid = true;
+    },
+  };
+}
 async function askJsonReliable(msgs, budgets = [1200, 3200], opts = {}) {
   const temperature = opts.temperature ?? GATE_TEMPERATURE;
+  const route = orchestrationRouting(opts.run);   // JSON-critical: use the cheap paid tier when the run's principal is funded
   let tokens = 0, lastRaw = "";
   for (const maxTokens of budgets) {
     let raw = "";
-    try { raw = await askLlm(msgs, { maxTokens, temperature }); } catch { break; }
+    const meta = {};
+    try { raw = await askLlm(msgs, { maxTokens, temperature, ...(route.paid ? { routingPreference: "external", model: route.model } : {}), meta }); } catch { break; }
+    if (meta.paid) route.book(meta.usage?.total_tokens || (estTokens(msgs) + Math.ceil(raw.length / 4)), meta.model);
     tokens += estTokens(msgs) + Math.ceil(raw.length / 4);
     if (raw) lastRaw = raw;
     const obj = safeParse(raw);
@@ -1448,7 +1484,7 @@ async function askJsonReliable(msgs, budgets = [1200, 3200], opts = {}) {
   return { obj: null, raw: lastRaw, tokens };
 }
 
-async function deriveCriteria(objective) {
+async function deriveCriteria(objective, run) {
   const msgs = [
     { role: "system", content: [
       "You are a meticulous QA lead. Turn the objective into a checklist of concrete, TESTABLE acceptance criteria that define 'done'.",
@@ -1458,7 +1494,7 @@ async function deriveCriteria(objective) {
     ].join("\n") },
     { role: "user", content: `Objective: ${objective}\n\n/no_think` },
   ];
-  const { obj, raw, tokens } = await askJsonReliable(msgs, [1200, 3200]);
+  const { obj, raw, tokens } = await askJsonReliable(msgs, [1200, 3200], { run });
   let list = (Array.isArray(obj?.criteria) ? obj.criteria : []).map((s) => String(s || "").slice(0, 240)).filter(Boolean).slice(0, 6);
   if (!list.length) {   // salvage: pull complete quoted strings even from a truncated array
     const m = String(raw).match(/"criteria"\s*:\s*\[([\s\S]*)/);
@@ -1476,7 +1512,7 @@ async function readProducedFiles(files) {
 }
 
 // Independent QA: the verifier did NOT do the work; it checks the real artifacts against each criterion.
-async function verifyRun(objective, product, files, criteria) {
+async function verifyRun(objective, product, files, criteria, run) {
   if (!criteria.length) return { items: criteria, tokens: 0 };
   const fileText = await readProducedFiles(files);
   const evidence = [
@@ -1493,7 +1529,7 @@ async function verifyRun(objective, product, files, criteria) {
     ].join("\n") },
     { role: "user", content: `Objective: ${objective}\n\nAcceptance criteria (in order):\n${criteria.map((c, i) => `${i + 1}. ${c.text}`).join("\n")}\n\nProduced work:\n${evidence || "(no work was produced)"}\n\n/no_think` },
   ];
-  const { obj, tokens } = await askJsonReliable(msgs, [1500, 3600]);
+  const { obj, tokens } = await askJsonReliable(msgs, [1500, 3600], { run });
   const results = Array.isArray(obj?.results) ? obj.results : [];
   const items = criteria.map((c, i) => {
     const r = results[i];
@@ -1538,7 +1574,7 @@ async function saveChecklist(baseTitle, md) { return writeDraft(`checklist ${bas
 // (work + criteria + verify) to this agent in the tally.
 async function gatedAgentTask(run, agent, org, objective, prior, depth, tally) {
   let tokens = 0;
-  const crit = await deriveCriteria(objective);
+  const crit = await deriveCriteria(objective, run);
   tokens += crit.tokens; addTally(tally, agent.id, crit.tokens);
   let criteria = crit.items;
   const base = shortTitle(`${agent.name} ${objective}`, 7);
@@ -1560,7 +1596,7 @@ async function gatedAgentTask(run, agent, org, objective, prior, depth, tally) {
     if (!criteria.length || run.stopped) break;
     const toCheck = criteria.filter((c) => c.status !== "met");   // never re-check a pass
     const product = { product: summary, body: workProduct(summary, artifacts) };
-    const v = await verifyRun(obj, product, files, toCheck);
+    const v = await verifyRun(obj, product, files, toCheck, run);
     tokens += v.tokens; addTally(tally, agent.id, v.tokens);
     const byId = new Map(v.items.map((it) => [it.id, it]));
     criteria = criteria.map((c) => { const m = byId.get(c.id); return (m && m.status !== "open") ? m : c; });
@@ -1594,7 +1630,7 @@ function waitForPlan(run, ms = 10 * 60 * 1000) {
 // remediate the specific gaps up to GATE_MAX_ATTEMPTS. worker returns { product, body, tokens }.
 async function runGated(run, worker, persistExtra, perAgentTally) {
   if (run.dryRun) emit(run, "dryrun", {});   // preview: plan + intended actions, nothing real happens
-  const crit = await deriveCriteria(run.objective);
+  const crit = await deriveCriteria(run.objective, run);
   run.criteria = crit.items;
   let tokens = crit.tokens;
   if (run.criteria.length) emit(run, "criteria", { items: run.criteria });
@@ -1635,7 +1671,7 @@ async function runGated(run, worker, persistExtra, perAgentTally) {
     if (!run.criteria.length || run.stopped) break;
     // Only (re-)verify criteria not already met — cheaper, and a flaky re-check can't regress a pass.
     const toCheck = run.criteria.filter((c) => c.status !== "met");
-    const v = await verifyRun(run.objective, product, run.producedFiles, toCheck);
+    const v = await verifyRun(run.objective, product, run.producedFiles, toCheck, run);
     tokens += v.tokens;
     const byId = new Map(v.items.map((it) => [it.id, it]));
     run.criteria = run.criteria.map((c) => {
@@ -1662,7 +1698,7 @@ async function runGated(run, worker, persistExtra, perAgentTally) {
   await persistChecklist(Math.max(0, attempt - 1), verdict);   // final on-disk state carries the verdict
   const b = await persistRun(run.objective, tokens, { ...persistExtra, criteria: run.criteria, unmet: unmet.length, verdict }, perAgentTally, run.memoryEntries, run.paidTally);
   const paidSpentUsd = Math.round(Object.values(run.paidTally || {}).reduce((s, v) => s + v, 0) * 1e6) / 1e6;
-  emit(run, "budget", { runTokens: tokens, totalTokens: b.tokens, ranPaid: !!run.ranPaid, paidTokens: run.paidTokens || 0, paidSpentUsd });
+  emit(run, "budget", { runTokens: tokens, totalTokens: b.tokens, ranPaid: !!run.ranPaid, paidTokens: run.paidTokens || 0, orchPaidTokens: run.orchPaidTokens || 0, paidSpentUsd });
   logAudit({ kind: "run", runId: run.id, agent: persistExtra.agent || "", objective: run.objective,
     tokens, costUsd: paidSpentUsd || 0, verdict, met, unmet: unmet.length, total: run.criteria.length,
     decision: run.autoApprove ? "auto" : "you" });
@@ -1693,6 +1729,10 @@ async function runDelegation(run) {
   const topReports = roots.length ? roots : org.agents;
   const tally = {};
   run.memoryEntries = []; run.producedFiles = []; run.paidAvailable = await paidProviderAvailable();
+  // The CEO (first root agent) funds the JSON-critical orchestration for the whole delegation tree —
+  // decompose, deriveCriteria, verifyRun — as management overhead. Agents' own work bills to themselves.
+  const principal = roots[0] || org.agents[0] || null;
+  run.orch = principal ? { payerId: principal.id, budgetUsd: Number(principal.budgetUsd) || 0, startPaidSpent: Number(principal.paidSpentUsd) || 0 } : null;
   const worker = async (objective) => {
     let result = { product: "", body: "", tokens: 0 };
     try { result = await delegate(run, org, "Manager", null, topReports, objective, "", 0, tally); }
