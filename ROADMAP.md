@@ -20,8 +20,6 @@ Nothing is in active development. The remaining backlog, roughly by value:
   so "defer to Latch" doesn't cover them (would need Latch connector work or a Bureau secret store).
   Unauthenticated public webhooks already work via `api_call`. _Your side: create the org + token
   (see GITHUB.md); Bureau follows it._
-- **Persistence beyond JSON** — move off the single JSON-file-per-workspace + mutex to a real
-  datastore. The most structural change; do it carefully. More relevant now that multi-workspace exists.
 - **Office-view revamp** — the isometric office is functional (renders from `public/assets/iso/`),
   but its visual design was parked. Pure presentation, no behavior change.
 
@@ -44,6 +42,10 @@ assertions + a live `--e2e`; see `test/README.md`).
 - **Deliverable lifecycle** — draft → QA'd → your sign-off → delivered, with versioning.
 - **Dry-run mode**, **run history & replay**, **company templates**.
 - **Multi-workspace** — each workspace is a fully isolated company.
+- **SQLite datastore** — org data + a normalized, uncapped audit log live in `data-bureau.db` (Node's
+  built-in `node:sqlite`, WAL mode) instead of per-workspace JSON files. Atomic writes (no
+  half-written corruption) and real locking (no cross-process clobber). Boot migrates existing JSON in
+  automatically; the JSON is left in place as a rollback fallback. Mutator API unchanged; all tests pass.
 - **Paid-model routing** — funded agents route to a paid provider (Moonshot/Kimi) with per-agent
   model tiers (Standard K2.6 / Coder K2.7 / Heavy K3); cost booked against the model that served the
   call, capped by each agent's `budgetUsd`. Unfunded agents stay on the free local model. _Verified working._

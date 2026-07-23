@@ -19,3 +19,8 @@ agent-profiles-*/
 
 # Prototype / scratch pages
 public/_*.html
+
+# session backups + sqlite db
+_backup-*/
+data-bureau.db
+data-bureau.db-*

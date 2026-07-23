@@ -11,6 +11,7 @@
 // No dependencies. Node built-ins only.
 
 import { readFile, writeFile, mkdir, readdir, stat, rm, rename } from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
 import { createServer } from "node:http";
 import dns from "node:dns/promises";
 import path from "node:path";
@@ -37,7 +38,8 @@ const WS_REGISTRY = path.join(HERE, "data-bureau-workspaces.json");
 const WS_RE = /^[a-z0-9][a-z0-9-]{0,30}$/;                  // safe workspace ids (also used as filename parts)
 const wsStore = new AsyncLocalStorage();
 const currentWs = () => wsStore.getStore()?.ws || "default";
-const orgFile = (ws = currentWs()) => ws === "default" ? _ORGFILE_DEFAULT : path.join(HERE, `data-bureau-ws-${ws}.json`);
+// org data now lives in SQLite (see the datastore section); _ORGFILE_* below are read once by the
+// JSON→SQLite boot migration. Drafts/agent-profiles remain per-workspace folders.
 const profilesDir = (ws = currentWs()) => ws === "default" ? _PROFILES_DEFAULT : path.join(HERE, `agent-profiles-${ws}`);
 const draftsDir = (ws = currentWs()) => ws === "default" ? _DRAFTS_DEFAULT : path.join(HERE, `drafts-${ws}`);
 const versionsDir = (ws = currentWs()) => path.join(draftsDir(ws), ".versions");   // prior versions of each deliverable (name.<ts>)
@@ -52,6 +54,65 @@ const DELIV_NAME_RE = /^[a-z0-9][a-z0-9._-]*\.[a-z0-9]{1,6}$/i;
 export function validDeliverableName(name) { return DELIV_NAME_RE.test(String(name)); }
 
 let TOKEN = "";
+
+// ---------- datastore (SQLite, built-in node:sqlite — no external deps) ------
+// Each workspace's org is a JSON blob in the `workspaces` table; the audit log is normalized into
+// its own `audit` table (uncapped history + real queries). WAL mode + per-statement/transaction
+// locking give atomic writes and safe concurrency (no more half-written-file corruption or the
+// cross-process clobber that a shared JSON file allowed). Drafts/agent-profiles stay as files.
+const DB_FILE = path.join(HERE, "data-bureau.db");
+let db = null;
+function initDb() {
+  db = new DatabaseSync(DB_FILE);
+  db.exec("PRAGMA journal_mode = WAL");
+  db.exec("PRAGMA busy_timeout = 5000");
+  db.exec(`CREATE TABLE IF NOT EXISTS workspaces (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL, org TEXT NOT NULL)`);
+  db.exec(`CREATE TABLE IF NOT EXISTS audit (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT, ws TEXT NOT NULL, id TEXT, at INTEGER NOT NULL,
+    kind TEXT, agent TEXT, agent_id TEXT, action_type TEXT, run_id TEXT, decision TEXT, ok INTEGER,
+    json TEXT NOT NULL)`);
+  db.exec("CREATE INDEX IF NOT EXISTS idx_audit_ws_seq ON audit(ws, seq DESC)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_audit_ws_kind ON audit(ws, kind)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_audit_ws_run ON audit(ws, run_id)");
+}
+// One-time import of the legacy JSON files into SQLite (default org file, per-workspace files, the
+// registry, and each org's audit array). Leaves the JSON files in place as a rollback fallback.
+async function migrateJsonToDb() {
+  if (db.prepare("SELECT COUNT(*) n FROM workspaces").get().n > 0) return;   // already populated
+  let reg = [{ id: "default", name: "Default", createdAt: 0 }];
+  try { const j = JSON.parse(await readFile(WS_REGISTRY, "utf8")); if (Array.isArray(j.workspaces) && j.workspaces.length) reg = j.workspaces; } catch {}
+  if (!reg.some((w) => w.id === "default")) reg.unshift({ id: "default", name: "Default", createdAt: 0 });
+  const insWs = db.prepare("INSERT OR IGNORE INTO workspaces(id,name,created_at,org) VALUES(?,?,?,?)");
+  const insAudit = db.prepare("INSERT INTO audit(ws,id,at,kind,agent,agent_id,action_type,run_id,decision,ok,json) VALUES(?,?,?,?,?,?,?,?,?,?,?)");
+  let imported = 0;
+  for (const w of reg) {
+    const files = w.id === "default" ? [_ORGFILE_DEFAULT, _ORGFILE_LEGACY] : [path.join(HERE, `data-bureau-ws-${w.id}.json`)];
+    let org = {};
+    for (const f of files) { try { org = JSON.parse(await readFile(f, "utf8")); break; } catch {} }
+    const audit = Array.isArray(org.audit) ? org.audit : [];
+    const { audit: _a, ...blob } = org;
+    insWs.run(w.id, w.name || w.id, w.createdAt || 0, JSON.stringify(blob));
+    for (const e of audit.slice().reverse()) auditInsert(w.id, e, insAudit);   // reverse: stored newest-first → insert oldest-first so seq ~ chronological
+    imported++;
+  }
+  console.log(`migrated ${imported} workspace(s) from JSON → SQLite`);
+}
+// Insert one audit entry for a workspace (shared by logAudit + migration).
+function auditInsert(ws, e, stmt) {
+  (stmt || db.prepare("INSERT INTO audit(ws,id,at,kind,agent,agent_id,action_type,run_id,decision,ok,json) VALUES(?,?,?,?,?,?,?,?,?,?,?)"))
+    .run(ws, e.id || "", e.at || 0, e.kind || "", e.agent || "", e.agentId || "", e.actionType || "", e.runId || "", e.decision || "", e.ok ? 1 : 0, JSON.stringify(e));
+}
+// Query audit rows for a workspace, newest-first, with optional filters. Returns parsed entries.
+function auditQuery(ws, { kind = "", agent = "", type = "", runId = "", limit = 200 } = {}) {
+  let q = "SELECT json FROM audit WHERE ws = ?"; const args = [ws];
+  if (kind) { q += " AND kind = ?"; args.push(kind); }
+  if (runId) { q += " AND run_id = ?"; args.push(runId); }
+  if (agent) { q += " AND (agent = ? OR agent_id = ?)"; args.push(agent, agent); }
+  if (type) { q += " AND action_type = ?"; args.push(type); }
+  q += " ORDER BY seq DESC LIMIT ?"; args.push(Math.max(1, Math.min(10000, limit)));
+  return db.prepare(q).all(...args).map((r) => JSON.parse(r.json));
+}
 
 // ---------- org store --------------------------------------------------------
 
@@ -196,11 +257,19 @@ export function ensureBudget(org) {
   return org;
 }
 
-async function readOrg() {
-  try { return ensureBudget({ ...emptyOrg(), ...JSON.parse(await readFile(orgFile(), "utf8")) }); }
-  catch { return ensureBudget({ ...emptyOrg() }); }
+function readOrgSync(ws) {
+  let base = {};
+  try { const row = db.prepare("SELECT org FROM workspaces WHERE id = ?").get(ws); if (row) base = JSON.parse(row.org); } catch {}
+  return ensureBudget({ ...emptyOrg(), ...base });
 }
-async function writeOrg(org) { await writeFile(orgFile(), JSON.stringify(org, null, 2)); }
+async function readOrg() { return readOrgSync(currentWs()); }
+function writeOrgSync(ws, org) {
+  const { audit: _a, ...blob } = org;   // audit lives in its own table, never in the blob
+  const name = WORKSPACES.find((w) => w.id === ws)?.name || (ws === "default" ? "Default" : ws);
+  db.prepare("INSERT INTO workspaces(id,name,created_at,org) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET org = excluded.org")
+    .run(ws, name, Date.now(), JSON.stringify(blob));
+}
+async function writeOrg(org) { writeOrgSync(currentWs(), org); }
 
 // Serialize every read-modify-write on the org file. Without this, two concurrent writers — a
 // finishing run, a scheduled run, a purchase deduction, a UI edit — each read the file, mutate
@@ -214,38 +283,41 @@ const orgLocks = new Map();
 function updateOrg(mutator) {
   const ws = currentWs();
   const prev = orgLocks.get(ws) || Promise.resolve();
-  const next = prev.then(async () => {
-    const org = await readOrg();
-    const r = await mutator(org);
-    await writeOrg(org);
-    return r === undefined ? org : r;
+  const next = prev.then(() => {
+    // Fully synchronous critical section: read → mutate → write inside one IMMEDIATE transaction.
+    // No `await` between BEGIN and COMMIT, so no other DB op on the shared connection can interleave;
+    // BEGIN IMMEDIATE takes the write lock up front, so cross-process writers can't clobber either.
+    // (All mutators are synchronous — verified — so calling mutator(org) directly is safe.)
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const org = readOrgSync(ws);
+      const r = mutator(org);
+      writeOrgSync(ws, org);
+      db.exec("COMMIT");
+      return r === undefined ? org : r;
+    } catch (e) { try { db.exec("ROLLBACK"); } catch {} throw e; }
   });
   orgLocks.set(ws, next.then(() => {}, () => {})); // the chain must keep flowing even if one mutation throws
   return next;
 }
 
 // ---- Workspace registry (which companies exist) -------------------------------------------------
-// A tiny separate file listing workspaces {id,name,createdAt}. "default" always exists (it's the
-// original single company). WORKSPACES is an in-memory cache of the ids for fast per-request validation.
+// Rows in the `workspaces` table. "default" always exists. WORKSPACES is an in-memory cache of
+// {id,name,createdAt} for fast per-request validation, refreshed on any change.
 let WORKSPACES = [{ id: "default", name: "Default", createdAt: 0 }];
-async function loadWorkspaces() {
-  try {
-    const j = JSON.parse(await readFile(WS_REGISTRY, "utf8"));
-    if (Array.isArray(j.workspaces) && j.workspaces.length) {
-      if (!j.workspaces.some((w) => w.id === "default")) j.workspaces.unshift({ id: "default", name: "Default", createdAt: 0 });
-      WORKSPACES = j.workspaces;
-    }
-  } catch { /* no registry yet → just the default */ }
+function loadWorkspaces() {
+  // Make sure a default workspace row exists, then cache the list.
+  db.prepare("INSERT OR IGNORE INTO workspaces(id,name,created_at,org) VALUES('default','Default',0,'{}')").run();
+  WORKSPACES = db.prepare("SELECT id, name, created_at AS createdAt FROM workspaces ORDER BY created_at, id").all();
   return WORKSPACES;
 }
-async function saveWorkspaces() { await writeFile(WS_REGISTRY, JSON.stringify({ workspaces: WORKSPACES }, null, 2)); }
 const wsExists = (id) => WORKSPACES.some((w) => w.id === id);
 
-// Append an entry to the provenance / audit log (newest first, capped). Safe to fire-and-forget.
+// Append an entry to the provenance / audit log — a direct, uncapped table insert (much cheaper than
+// rewriting the whole org, and full history is retained). Safe to fire-and-forget.
 function logAudit(entry) {
-  return updateOrg((o) => {
-    o.audit = [{ id: newId("a"), at: Date.now(), ...entry }, ...(o.audit || [])].slice(0, 400);
-  }).catch(() => {});
+  try { auditInsert(currentWs(), { id: newId("a"), at: Date.now(), ...entry }); } catch {}
+  return Promise.resolve();
 }
 // Optional outgoing webhook for external push (Slack/email relay/etc.). User-configured URL, so
 // this is not model-controlled; fire-and-forget with a short timeout. No-op if unset.
@@ -1819,27 +1891,27 @@ const server = createServer(async (req, res) => {
       const slug = (name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 20)) || "ws";
       let id = `${slug}-${randomUUID().slice(0, 4)}`;
       if (!WS_RE.test(id)) id = `ws-${randomUUID().slice(0, 8)}`;
-      WORKSPACES.push({ id, name, createdAt: Date.now() });
-      await saveWorkspaces();
+      db.prepare("INSERT INTO workspaces(id,name,created_at,org) VALUES(?,?,?,?)").run(id, name, Date.now(), "{}");
+      loadWorkspaces();
       return send(res, 201, { id, name });
     }
     if (p.startsWith("/api/workspaces/") && req.method === "PATCH") {
       const id = p.split("/")[3];
       const body = await readBody(req);
-      const w = WORKSPACES.find((x) => x.id === id);
-      if (!w) return send(res, 404, { error: "not_found" });
-      if (body.name !== undefined) w.name = String(body.name).trim().slice(0, 60) || w.name;
-      await saveWorkspaces();
-      return send(res, 200, w);
+      if (!wsExists(id)) return send(res, 404, { error: "not_found" });
+      if (body.name !== undefined) db.prepare("UPDATE workspaces SET name=? WHERE id=?").run(String(body.name).trim().slice(0, 60) || id, id);
+      loadWorkspaces();
+      return send(res, 200, WORKSPACES.find((x) => x.id === id));
     }
     if (p.startsWith("/api/workspaces/") && req.method === "DELETE") {
       const id = p.split("/")[3];
       if (id === "default") return send(res, 400, { error: "cannot delete the default workspace" });
       if (!wsExists(id)) return send(res, 404, { error: "not_found" });
-      WORKSPACES = WORKSPACES.filter((x) => x.id !== id);
-      await saveWorkspaces();
-      // Remove its data (org file + drafts + profiles). Best-effort; the registry is the source of truth.
-      await rm(orgFile(id), { force: true }).catch(() => {});
+      db.exec("BEGIN IMMEDIATE");
+      try { db.prepare("DELETE FROM workspaces WHERE id=?").run(id); db.prepare("DELETE FROM audit WHERE ws=?").run(id); db.exec("COMMIT"); }
+      catch (e) { try { db.exec("ROLLBACK"); } catch {} throw e; }
+      loadWorkspaces();
+      // Remove its file-based artifacts (drafts + profiles). Best-effort; the DB is the source of truth.
       await rm(draftsDir(id), { recursive: true, force: true }).catch(() => {});
       await rm(profilesDir(id), { recursive: true, force: true }).catch(() => {});
       return send(res, 200, { ok: true, id });
@@ -1887,23 +1959,12 @@ const server = createServer(async (req, res) => {
     }
     // Audit trail: the append-only provenance log (actions taken, runs completed, blocks). Filterable.
     if (p === "/api/audit" && req.method === "GET") {
-      const org = await readOrg();
-      const all = org.audit || [];
+      const ws = currentWs();
       const fAgent = url.searchParams.get("agent") || "", fKind = url.searchParams.get("kind") || "", fType = url.searchParams.get("type") || "";
       const limit = Math.min(400, Math.max(1, Number(url.searchParams.get("limit")) || 200));
-      let rows = all;
-      if (fAgent) rows = rows.filter((r) => (r.agent || "") === fAgent || (r.agentId || "") === fAgent);
-      if (fKind) rows = rows.filter((r) => (r.kind || "") === fKind);
-      if (fType) rows = rows.filter((r) => (r.actionType || "") === fType);
-      return send(res, 200, {
-        audit: rows.slice(0, limit),
-        totals: {
-          total: all.length,
-          actions: all.filter((r) => r.kind === "action").length,
-          runs: all.filter((r) => r.kind === "run").length,
-          blocked: all.filter((r) => r.kind === "blocked" || r.decision === "denied").length,
-        },
-      });
+      const rows = auditQuery(ws, { agent: fAgent, kind: fKind, type: fType, limit });
+      const t = db.prepare("SELECT COUNT(*) total, SUM(kind='action') actions, SUM(kind='run') runs, SUM(kind='blocked' OR decision='denied') blocked FROM audit WHERE ws=?").get(ws);
+      return send(res, 200, { audit: rows, totals: { total: t.total || 0, actions: t.actions || 0, runs: t.runs || 0, blocked: t.blocked || 0 } });
     }
     // Company overview: everything that matters, aggregated for the dashboard.
     if (p === "/api/dashboard" && req.method === "GET") {
@@ -1928,7 +1989,7 @@ const server = createServer(async (req, res) => {
     // token cost) plus a heuristic HR recommendation. Counts reflect recent activity (audit is capped).
     if (p === "/api/performance" && req.method === "GET") {
       const org = await readOrg();
-      const audit = org.audit || [];
+      const audit = auditQuery(currentWs(), { limit: 3000 });   // recent activity window (was the in-org 400 cap)
       const cards = org.agents.map((a) => {
         const name = a.name;
         const acts = audit.filter((r) => r.kind === "action" && r.agent === name);
@@ -2326,10 +2387,10 @@ const server = createServer(async (req, res) => {
     }
     // Run history: past runs reconstructed from the audit log (persistent), + in-memory replay flag.
     if (p === "/api/runs" && req.method === "GET") {
-      const audit = (await readOrg()).audit || [];
-      const runEntries = audit.filter((r) => r.kind === "run");
+      const ws = currentWs();
+      const runEntries = auditQuery(ws, { kind: "run", limit: 5000 });
       const actionByRun = {};
-      for (const a of audit) if (a.kind === "action" && a.runId) actionByRun[a.runId] = (actionByRun[a.runId] || 0) + 1;
+      for (const r of db.prepare("SELECT run_id, COUNT(*) c FROM audit WHERE ws=? AND kind='action' AND run_id<>'' GROUP BY run_id").all(ws)) actionByRun[r.run_id] = r.c;
       const list = runEntries.slice(0, 100).map((r) => ({ runId: r.runId, agent: r.agent || "", objective: r.objective || "", verdict: r.verdict || "", tokens: r.tokens || 0, costUsd: r.costUsd || 0, at: r.at || 0, actions: actionByRun[r.runId] || 0, replayable: runs.has(r.runId) }));
       const trends = {
         total: runEntries.length,
@@ -2343,9 +2404,9 @@ const server = createServer(async (req, res) => {
     }
     if (p.startsWith("/api/runs/") && req.method === "GET") {
       const id = p.slice("/api/runs/".length);
-      const audit = (await readOrg()).audit || [];
-      const summary = audit.find((r) => r.kind === "run" && r.runId === id) || null;
-      const actions = audit.filter((r) => r.kind === "action" && r.runId === id);
+      const ws = currentWs();
+      const summary = auditQuery(ws, { kind: "run", runId: id, limit: 1 })[0] || null;
+      const actions = auditQuery(ws, { kind: "action", runId: id, limit: 2000 });
       const run = runs.get(id);
       return send(res, 200, { runId: id, summary, actions, events: run ? run.events : [], replayable: !!run });
     }
@@ -2589,18 +2650,14 @@ const server = createServer(async (req, res) => {
 // the tests, which exercise the exported pure functions (decideApproval/evaluatePolicy/…) — skip
 // startup so importing doesn't bind a port or tick schedules.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
-// One-time migration for the foreman -> bureau rename: if the default org file doesn't exist yet but
-// a legacy data-foreman.json does, adopt it. Keeps an existing install's company intact after upgrade.
-async function migrateLegacyOrgFile() {
-  try { await stat(_ORGFILE_DEFAULT); return; } catch {}          // new file already present → nothing to do
-  try { await stat(_ORGFILE_LEGACY); } catch { return; }          // no legacy file either → fresh install
-  try { await rename(_ORGFILE_LEGACY, _ORGFILE_DEFAULT); console.log("migrated data-foreman.json -> data-bureau.json"); } catch (e) { console.error("legacy org migration failed:", e.message); }
-}
 if (isMain) {
-  Promise.all([loadToken(), loadWorkspaces(), migrateLegacyOrgFile()])
-    .then(([t]) => {
+  initDb();
+  migrateJsonToDb()                       // one-time import of legacy JSON files → SQLite (reads data-bureau.json or the legacy data-foreman.json)
+    .catch((e) => console.error("JSON→SQLite migration:", e.message))
+    .then(() => { loadWorkspaces(); return loadToken(); })
+    .then((t) => {
       TOKEN = t;
-      server.listen(PORT, "127.0.0.1", () => console.log(`Bureau on http://127.0.0.1:${PORT} (${WORKSPACES.length} workspace${WORKSPACES.length === 1 ? "" : "s"})`));
+      server.listen(PORT, "127.0.0.1", () => console.log(`Bureau on http://127.0.0.1:${PORT} (${WORKSPACES.length} workspace${WORKSPACES.length === 1 ? "" : "s"}, SQLite)`));
       setInterval(() => { tickSchedules().catch((e) => console.error("scheduler tick:", e.message)); }, 60000); // check due schedules every minute
     })
     .catch((e) => { console.error("Could not load Latch operator token:", e.message); process.exit(1); });

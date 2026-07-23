@@ -71,6 +71,10 @@ node test/net.test.mjs
 node test/units.test.mjs
 ```
 
+> The server suites run against the live **SQLite** datastore (`data-bureau.db`), so they also
+> exercise the real persistence layer — atomic transactions, the audit table, and per-workspace
+> isolation — not just in-memory state.
+
 ## `api.test.mjs` — model-free API/CRUD + validation (needs a running server)
 
 46 assertions over the management endpoints — company/budget, guardrails (clamping),
