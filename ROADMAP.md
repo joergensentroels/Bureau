@@ -27,8 +27,6 @@ concurrency gain (measured 4.6x, but confounded). **Outstanding:**
 
 The remaining backlog, roughly by value (competitive-gap analysis, 2026-07-22):
 
-- **SOP / process templates** — reusable multi-step process definitions agents follow for recurring
-  work (e.g. a standard "publish a blog post" pipeline). Builds on the existing Plan/backlog + templates.
 - **Semantic / shared memory** — vector or shared cross-run memory beyond today's keyword RAG.
 - **MCP / A2A interop** — expose Bureau as an MCP server and/or consume external MCP tools.
 - **SOP / process templates** — reusable multi-step process definitions agents follow for recurring work.
@@ -94,6 +92,13 @@ assertions + a live `--e2e`; see `test/README.md`).
   whom` as audited rules) → tier/approval → Latch card → audit row. Not an unaudited side channel.
   _Live-verified 2026-07-23: Jordan (PM) consulted Morgan (CISO), who replied in character, and Jordan
   used the input to finalize. Future: executable hand-off (peer does real work), not just advice._
+- **SOP / process templates** — a named, reusable, ordered step-list (`org.sops`) the company runs
+  step-by-step, each step by a named teammate, in sequence with handoff. Running an SOP **bypasses the
+  LLM decompose entirely** — the determinism payoff, since decompose is the flakiest call on local
+  qwen3. Unresolved assignees fall back loudly (never silently dropped); the DoD gate still applies.
+  CRUD + a "Processes" UI section with a per-step editor. _Live-verified 2026-07-23: a 3-step SOP ran
+  Zoe → Morgan → Jordan in exact order, decompose skipped (zero fallback events), DoD passed. Future:
+  per-step acceptance criteria; scheduling an SOP._
 
 ---
 

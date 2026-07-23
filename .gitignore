@@ -25,5 +25,9 @@ _backup-*/
 data-bureau.db
 data-bureau.db-*
 
+# detached-server runtime logs (from launching `node server.mjs` in the background)
+server.out.log
+server.err.log
+
 # eval harness: timestamped run reports (the committed baseline.json is the tracked reference)
 eval/reports/
