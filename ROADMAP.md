@@ -33,7 +33,10 @@ The remaining backlog, roughly by value (competitive-gap analysis, 2026-07-22):
   embeddings enabled. Once available: embed memory/deliverables, store vectors in SQLite, cosine
   similarity in JS — dropping in behind the existing `rankByRelevance` interface. BM25 recall is the
   stand-in until then.
-- **MCP / A2A interop** — expose Bureau as an MCP server and/or consume external MCP tools.
+- **MCP interop — CONSUME external tools** (the "expose" half shipped, see below). Let agents call
+  external MCP servers' tools as a new gated `mcp_call` action: MCP client transport, per-workspace
+  server config, tool discovery, and every call routed through the guardrail/policy/audit gate. Bigger
+  security surface than exposing — deferred as the heavier follow-up.
 - **SOP / process templates** — reusable multi-step process definitions agents follow for recurring work.
 - **Outbound integrations** — ◐ partial. **GitHub publish is done** (`github_file` / `github_repo`
   actions → Latch's native GitHub connector; Latch holds the token and commits on approval, Bureau
@@ -110,6 +113,12 @@ assertions + a live `--e2e`; see `test/README.md`).
   embedding infra; a vector store can later slot in behind the same interface (see **Next**). Exposed
   at `GET /api/memory?q=`. _Live-verified 2026-07-23: cross-agent recall returned ranked, relevant
   entries; unrelated memories excluded. Units 133 → 147._
+- **MCP server (expose)** — Bureau speaks the Model Context Protocol at `POST /mcp` (JSON-RPC 2.0, no
+  deps), so external MCP clients (Claude Desktop, other agents) can drive the company: `list_agents`,
+  `list_sops`, `run_sop`, `start_run`, `search_memory`, `list_deliverables`, `read_deliverable`.
+  Localhost-only, same trust boundary as the rest of the API — no new surface. _Live-verified
+  2026-07-23: initialize handshake, tools/list (7), tools/call list_agents/search_memory, error codes.
+  Consuming external MCP tools is the deferred follow-up (see **Next**)._
 
 ---
 
