@@ -2177,6 +2177,58 @@ function cleanTraits(v) {
     .slice(0, 8);
 }
 
+// ---- MCP server: expose Bureau over the Model Context Protocol so external MCP clients (Claude
+// Desktop, other agents) can query and drive the company. JSON-RPC 2.0 over HTTP at POST /mcp — no
+// deps (MCP is just JSON-RPC + JSON Schema). Localhost-only, the SAME trust boundary as the rest of
+// the API (the server binds 127.0.0.1 and is unauthenticated by design), so this adds no new surface.
+const MCP_PROTOCOL = "2025-06-18";
+const MCP_TOOLS = [
+  { name: "list_agents", description: "List the company's agents (name, role, department, manager, autonomy tier).",
+    inputSchema: { type: "object", properties: {} },
+    handler: async () => { const org = await readOrg(); return (org.agents || []).map((a) => ({ id: a.id, name: a.name, role: a.role, department: a.department || "", managerId: a.managerId || "", tier: a.tier })); } },
+  { name: "list_sops", description: "List saved process templates (SOPs) and their ordered steps.",
+    inputSchema: { type: "object", properties: {} },
+    handler: async () => { const org = await readOrg(); return (org.sops || []).map((s) => ({ id: s.id, name: s.name, description: s.description || "", steps: (s.steps || []).map((x) => ({ task: x.task, assignee: x.assignee })) })); } },
+  { name: "run_sop", description: "Run a saved SOP by id. Starts a REAL company run that executes the SOP's steps in order; returns the runId. Set hush:true to keep it entirely on the local model (no paid spend).",
+    inputSchema: { type: "object", properties: { sopId: { type: "string" }, autoApprove: { type: "boolean" }, hush: { type: "boolean" } }, required: ["sopId"] },
+    handler: async (args) => { const org = await readOrg(); const sop = (org.sops || []).find((s) => s.id === args.sopId); if (!sop) throw new Error("no SOP with id " + args.sopId); const { run } = beginRun({ mode: "company", sopId: sop.id, objective: sopObjective(sop), autoApprove: !!args.autoApprove, hush: !!args.hush, maxTurns: 6 }); return { runId: run.id, sop: sop.name }; } },
+  { name: "start_run", description: "Start a REAL run from a free-text objective. mode 'company' delegates across the org; 'single' needs an agentId. Returns the runId. hush:true keeps it on the local model.",
+    inputSchema: { type: "object", properties: { objective: { type: "string" }, mode: { type: "string", enum: ["company", "single"] }, agentId: { type: "string" }, autoApprove: { type: "boolean" }, hush: { type: "boolean" } }, required: ["objective"] },
+    handler: async (args) => { const objective = String(args.objective || "").trim(); if (!objective) throw new Error("objective required"); const { run } = beginRun({ mode: args.mode === "single" ? "single" : "company", agentId: args.agentId || "", objective, autoApprove: !!args.autoApprove, hush: !!args.hush, maxTurns: 6 }); return { runId: run.id }; } },
+  { name: "search_memory", description: "Search the company's shared memory (every agent's past work) by relevance; returns the top matching entries.",
+    inputSchema: { type: "object", properties: { query: { type: "string" }, limit: { type: "number" } }, required: ["query"] },
+    handler: async (args) => { const org = await readOrg(); return recallSharedMemory(org, String(args.query || ""), Math.min(20, Math.max(1, Number(args.limit) || 8))); } },
+  { name: "list_deliverables", description: "List the filenames of the company's finished deliverables (the drafts inbox).",
+    inputSchema: { type: "object", properties: {} },
+    handler: async () => { try { return (await readdir(draftsDir())).filter(isDeliverableFile); } catch { return []; } } },
+  { name: "read_deliverable", description: "Read the full content of one deliverable by filename (use list_deliverables first).",
+    inputSchema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] },
+    handler: async (args) => { const r = await readDraftFile(String(args.name || "")); if (!r.ok) throw new Error(r.error || "not found"); return { name: r.name, content: r.content }; } },
+];
+async function handleMcp(req, res) {
+  let msg; try { msg = await readBody(req); } catch { return send(res, 400, { jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } }); }
+  const one = async (m) => {
+    const id = m && m.id !== undefined ? m.id : null;
+    try {
+      if (!m || m.jsonrpc !== "2.0" || typeof m.method !== "string") return { jsonrpc: "2.0", id, error: { code: -32600, message: "invalid request" } };
+      if (m.method === "initialize") return { jsonrpc: "2.0", id, result: { protocolVersion: m.params?.protocolVersion || MCP_PROTOCOL, capabilities: { tools: {} }, serverInfo: { name: "bureau", version: "1.0.0" } } };
+      if (m.method === "ping") return { jsonrpc: "2.0", id, result: {} };
+      if (m.method.startsWith("notifications/")) return null;   // notifications (incl. initialized) get no response
+      if (m.method === "tools/list") return { jsonrpc: "2.0", id, result: { tools: MCP_TOOLS.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })) } };
+      if (m.method === "tools/call") {
+        const tool = MCP_TOOLS.find((t) => t.name === m.params?.name);
+        if (!tool) return { jsonrpc: "2.0", id, error: { code: -32602, message: "unknown tool: " + (m.params?.name || "") } };
+        try { const out = await tool.handler(m.params?.arguments || {}); return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] } }; }
+        catch (e) { return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "Error: " + e.message }], isError: true } }; }
+      }
+      return { jsonrpc: "2.0", id, error: { code: -32601, message: "method not found: " + m.method } };
+    } catch (e) { return { jsonrpc: "2.0", id, error: { code: -32603, message: e.message } }; }
+  };
+  if (Array.isArray(msg)) { const out = []; for (const m of msg) { const r = await one(m); if (r) out.push(r); } return out.length ? send(res, 200, out) : send(res, 202, ""); }
+  const r = await one(msg);
+  return r ? send(res, 200, r) : send(res, 202, "");
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const p = url.pathname;
@@ -2186,6 +2238,11 @@ const server = createServer(async (req, res) => {
   const reqWs = String(req.headers["x-workspace"] || url.searchParams.get("ws") || "default");
   wsStore.enterWith({ ws: wsExists(reqWs) ? reqWs : "default" });
   try {
+    // MCP endpoint (JSON-RPC 2.0). GET has no server-initiated SSE stream → 405 (spec-compliant).
+    if (p === "/mcp") {
+      if (req.method === "POST") return handleMcp(req, res);
+      return send(res, 405, { jsonrpc: "2.0", id: null, error: { code: -32600, message: "use POST for MCP JSON-RPC" } });
+    }
     if (p === "/" || p === "/index.html") {
       const html = await readFile(path.join(HERE, "public", "index.html"), "utf8");
       return send(res, 200, html, "text/html; charset=utf-8");
