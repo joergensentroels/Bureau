@@ -119,7 +119,7 @@ function auditQuery(ws, { kind = "", agent = "", type = "", runId = "", limit = 
 // A FRESH empty org each call — never a shared template. Returning a module-level constant here and
 // spreading it would share the nested arrays/objects across every empty workspace, so pushing into
 // one company's agents would leak into all the others. Build new containers every time.
-const emptyOrg = () => ({ ceo: null, vision: "", companyName: "", agents: [], budget: { tokens: 0 }, activity: [], schedules: [], purchases: [], audit: [], guardrails: {}, deliverables: {}, goals: [], notify: {}, triggers: [], policies: [], github: { repo: "", owner: "" }, plan: [] });
+const emptyOrg = () => ({ ceo: null, vision: "", companyName: "", agents: [], budget: { tokens: 0 }, activity: [], schedules: [], purchases: [], audit: [], guardrails: {}, deliverables: {}, goals: [], notify: {}, triggers: [], policies: [], github: { repo: "", owner: "" }, plan: [], sops: [] });
 // The real "economy": an agent's budget is a DOLLAR allowance for the PAID API model. $0 (default)
 // means the agent may only use the free local model. Token usage is the actual cost, tracked per agent.
 //
@@ -240,6 +240,7 @@ export function ensureBudget(org) {
   if (!Array.isArray(org.policies)) org.policies = [];                  // declarative rules: {id,enabled,when{...},then:block|require|allow,note}
   org.github = { repo: "", owner: "", ...(org.github || {}) };          // per-workspace GitHub target (repo/owner names, NOT the token — token stays in Latch)
   if (!Array.isArray(org.plan)) org.plan = [];                          // the company's persistent backlog: {id,title,detail,status,agentId,goalId,runs[],notes[]}
+  if (!Array.isArray(org.sops)) org.sops = [];                          // reusable process templates: {id,name,description,steps[{id,task,assignee}],runs[]} — run executes steps in order, skipping the LLM decompose
   // Guardrails: autoApproveUnderUsd = purchases/spend below this may auto-approve; maxActionsPerRun =
   // hard cap on real actions per run (0 = unlimited). Per-agent action allowlists live on the agent.
   org.guardrails = { autoApproveUnderUsd: 0, maxActionsPerRun: 0, ...(org.guardrails || {}) };
@@ -1452,13 +1453,27 @@ export function buildDecomposeMsgs(managerName, reports, objective) {
 // further; a report with no reports does the work. Returns { product, tokens }.
 async function delegate(run, org, managerName, managerId, reports, objective, priorWork, depth, tally) {
   let tokens = 0;
+  let tasks;
+  // SOP run: at the top level, execute the process's predefined steps IN ORDER and SKIP the LLM
+  // decompose entirely (the flakiest call on the local model — this is the determinism payoff).
+  const sop = (depth === 0 && run.sopId) ? (org.sops || []).find((s) => s.id === run.sopId) : null;
+  if (sop) {
+    tasks = (sop.steps || []).map((s) => {
+      const match = findAgent(org.agents, s.assignee);          // resolve ORG-WIDE, not just direct reports
+      const agent = match || reports[0] || org.agents[0];       // fail-safe: never silently drop a step
+      if (s.assignee && !match) emit(run, "report", { manager: managerName, depth, text: `SOP step "${s.task.slice(0, 60)}" named "${s.assignee}", who isn't on the roster — assigned to ${agent?.name || "the first agent"} instead.` });
+      return { agent, task: s.task, sop: true };
+    }).filter((t) => t.agent && t.task);
+    if (!tasks.length) { emit(run, "report", { manager: managerName, depth, text: `SOP "${sop.name}" has no runnable steps.` }); return { product: "empty SOP", tokens, body: "" }; }
+    emit(run, "plan", { manager: managerName, depth, plan: `Running SOP: ${sop.name}`, sop: sop.name, tasks: tasks.map((t) => ({ agent: t.agent.name, role: t.agent.role, task: t.task })) });
+  } else {
   const decomposeMsgs = buildDecomposeMsgs(managerName, reports, objective);
   let plan = null;
   try { const j = await askJsonReliable(decomposeMsgs, [900, 3200], { run }); tokens += j.tokens; addTally(tally, managerId, j.tokens); plan = j.obj; }
   catch (e) { emit(run, "report", { manager: managerName, depth, text: "Planning failed: " + e.message }); return { product: "planning failed", tokens, body: "" }; }
 
   const used = new Set();
-  let tasks = (Array.isArray(plan?.tasks) ? plan.tasks : [])
+  tasks = (Array.isArray(plan?.tasks) ? plan.tasks : [])
     .map((t) => ({ agent: resolveReport(reports, t.assignee, used), task: String(t.task || "").slice(0, 500) }))
     .filter((t) => t.agent && t.task).slice(0, 4);
   if (!tasks.length && reports.length >= 2) {
@@ -1484,6 +1499,7 @@ async function delegate(run, org, managerName, managerId, reports, objective, pr
     tasks = [{ agent: reports[0], task: objective }];
   }
   emit(run, "plan", { manager: managerName, depth, plan: plan?.plan || "", tasks: tasks.map((t) => ({ agent: t.agent.name, role: t.agent.role, task: t.task })) });
+  }
 
   // Run one assigned sub-task: recurse if the assignee manages a sub-team, otherwise gate it as a
   // leaf doer. Shared by the sequential and parallel paths below; returns the completed record.
@@ -1492,7 +1508,7 @@ async function delegate(run, org, managerName, managerId, reports, objective, pr
     MEETING.add(t.agent.id);
     const subs = reportsOf(org, t.agent.id);
     let product, tks = 0;
-    if (subs.length && depth < 4) {
+    if (!t.sop && subs.length && depth < 4) {   // SOP steps run as-is by their named agent — never re-decompose
       const res = await delegate(run, org, t.agent.name, t.agent.id, subs, t.task, prior, depth + 1, tally);
       tks = res.tokens; product = res.product;
     } else {
@@ -1941,6 +1957,41 @@ export function normKRs(v) {
     return text ? { id: i, text, done: !!(k && k.done) } : null;
   }).filter(Boolean).slice(0, 10);
 }
+// ---- SOPs / process templates: a named, reusable, ORDERED list of steps the company runs as-is,
+// skipping the LLM decompose (deterministic for recurring work — see delegate's run.sopId branch). ----
+// Normalize a steps payload (array of {task,assignee} or "task | assignee" strings) into stored steps.
+export function normSopSteps(v) {
+  return (Array.isArray(v) ? v : []).map((s, i) => {
+    let task, assignee;
+    if (typeof s === "string") { const parts = s.split("|"); task = parts[0]; assignee = parts[1] || ""; }
+    else { task = s?.task; assignee = s?.assignee; }
+    task = String(task || "").trim().slice(0, 500);
+    assignee = String(assignee || "").trim().slice(0, 80);
+    return task ? { id: i, task, assignee } : null;
+  }).filter(Boolean).slice(0, 12);
+}
+// Normalize an SOP payload (used by create; PATCH edits fields in place).
+export function normSop(body) {
+  const name = String(body.name || "").trim().slice(0, 120);
+  const steps = normSopSteps(body.steps);
+  if (!name || !steps.length) return null;
+  return {
+    id: newId("sop"), name,
+    description: String(body.description || "").slice(0, 600),
+    steps, runs: [], createdAt: Date.now(), updatedAt: Date.now(),
+  };
+}
+// Human-readable objective for an SOP run — gives the DoD gate, feed, and audit log something to show.
+export function sopObjective(sop) {
+  const lines = (sop.steps || []).map((s, i) => `${i + 1}. ${s.task}${s.assignee ? ` (→ ${s.assignee})` : ""}`).join("\n");
+  return `Run the "${sop.name}" process.${sop.description ? " " + sop.description : ""}\n\nSteps, in order:\n${lines}`.slice(0, 1000);
+}
+// Org-wide agent lookup for SOP steps: reuse resolveReport's tolerant name/first-name/substring/role
+// ladder, but over the WHOLE roster (not one manager's direct reports) and with a fresh `used` set so
+// the same agent may be named by more than one step. Returns the agent object or null.
+function findAgent(agents, assignee) {
+  return resolveReport(agents || [], assignee, new Set());
+}
 // Goal auto-advance: keep a schedule (goalId-linked) in sync with the goal's cadence. "off" removes it.
 function setGoalCadence(o, g, cad) {
   cad = ["off", "hourly", "daily", "weekly"].includes(cad) ? cad : "off";
@@ -1987,7 +2038,7 @@ function beginRun(spec) {
     id: newId("run"), mode, agentId: spec.agentId,
     objective: String(spec.objective || "").slice(0, 1000),
     maxTurns: Math.max(1, Math.min(20, Number(spec.maxTurns) || 6)),
-    autoApprove: Boolean(spec.autoApprove), scheduleId: spec.scheduleId || "", goalId: spec.goalId || "", planItemId: spec.planItemId || "", dryRun: Boolean(spec.dryRun),
+    autoApprove: Boolean(spec.autoApprove), scheduleId: spec.scheduleId || "", goalId: spec.goalId || "", planItemId: spec.planItemId || "", sopId: spec.sopId || "", dryRun: Boolean(spec.dryRun),
     hush: Boolean(spec.hush),     // "hush" task: NO agent may use the paid/external LLM — everyone stays on the local model regardless of budget (for sensitive work)
     parallel: Boolean(spec.parallel), // company mode only: run a manager's sibling reports concurrently (no cross-sibling handoff) instead of one-after-another
     ws: spec.ws || currentWs(),   // pin the workspace so the whole run reads/writes the right company
@@ -2889,6 +2940,47 @@ const server = createServer(async (req, res) => {
     if (p.startsWith("/api/schedules/") && req.method === "DELETE") {
       const id = p.split("/")[3];
       await updateOrg((org) => { org.schedules = (org.schedules || []).filter((x) => x.id !== id); });
+      return send(res, 200, { ok: true });
+    }
+    // ---- SOPs / process templates: reusable ordered step-lists the company runs deterministically ----
+    if (p === "/api/sops" && req.method === "GET") {
+      const org = await readOrg();
+      return send(res, 200, { sops: org.sops || [] });
+    }
+    if (p === "/api/sops" && req.method === "POST") {
+      const body = await readBody(req);
+      const sop = normSop(body);
+      if (!sop) return send(res, 400, { error: "name and at least one step required" });
+      await updateOrg((org) => { org.sops = [sop, ...(org.sops || [])].slice(0, 50); });
+      return send(res, 201, sop);
+    }
+    if (p.startsWith("/api/sops/") && p.endsWith("/run") && req.method === "POST") {
+      const id = p.split("/")[3];
+      const body = await readBody(req);
+      const org = await readOrg();
+      const sop = (org.sops || []).find((x) => x.id === id);
+      if (!sop) return send(res, 404, { error: "not found" });
+      const { run } = beginRun({ mode: "company", objective: sopObjective(sop), sopId: sop.id, autoApprove: !!body.autoApprove, parallel: !!body.parallel, hush: !!body.hush, maxTurns: 6 });
+      return send(res, 201, { runId: run.id });
+    }
+    if (p.startsWith("/api/sops/") && req.method === "PATCH") {
+      const id = p.split("/")[3];
+      const body = await readBody(req);
+      const sop = await updateOrg((org) => {
+        const s = (org.sops || []).find((x) => x.id === id);
+        if (!s) return null;
+        if (body.name !== undefined) s.name = String(body.name).trim().slice(0, 120);
+        if (body.description !== undefined) s.description = String(body.description).slice(0, 600);
+        if (body.steps !== undefined) s.steps = normSopSteps(body.steps);
+        s.updatedAt = Date.now();
+        return s;
+      });
+      if (!sop) return send(res, 404, { error: "not found" });
+      return send(res, 200, sop);
+    }
+    if (p.startsWith("/api/sops/") && req.method === "DELETE") {
+      const id = p.split("/")[3];
+      await updateOrg((org) => { org.sops = (org.sops || []).filter((x) => x.id !== id); });
       return send(res, 200, { ok: true });
     }
     if (p.startsWith("/api/run/") && p.endsWith("/stop") && req.method === "POST") {

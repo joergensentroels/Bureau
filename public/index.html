@@ -965,6 +965,12 @@ function renderMain(app){
   const sched=el("div"); sched.id="schedules"; sched.className="delivlist";
   work.appendChild(sched);
 
+  const sopH=el("div"); sopH.style.cssText="display:flex;align-items:center;justify-content:space-between;margin-top:22px";
+  sopH.innerHTML=`<h2 style="margin:0">Processes (SOPs)</h2><button class="miniadd" id="sopAdd">+ SOP</button>`;
+  work.appendChild(sopH);
+  const sops=el("div"); sops.id="sops"; sops.className="delivlist";
+  work.appendChild(sops);
+
   const trigH=el("div"); trigH.style.cssText="display:flex;align-items:center;justify-content:space-between;margin-top:22px";
   trigH.innerHTML=`<h2 style="margin:0">Triggers</h2><button class="miniadd" id="trigAdd">+ Trigger</button>`;
   work.appendChild(trigH);
@@ -984,6 +990,7 @@ function renderMain(app){
   loadDashboard();
   delivH.querySelector("#delivRefresh").onclick=loadDeliverables;
   schedH.querySelector("#schedAdd").onclick=openScheduleDialog;
+  sopH.querySelector("#sopAdd").onclick=()=>openSopDialog();
   buyH.querySelector("#buyBudget").onclick=setCompanyBudget;
   goalH.querySelector("#goalAdd").onclick=()=>openGoalDialog();
   planH.querySelector("#planAdd").onclick=()=>openPlanDialog();
@@ -992,6 +999,7 @@ function renderMain(app){
   loadPlan();
   loadDeliverables();
   loadSchedules();
+  loadSops();
   loadTriggers();
   loadPurchases();
   paintStatus();
@@ -1831,6 +1839,73 @@ function openScheduleDialog(){
     await api("POST","/api/schedules",body); wrap.remove(); loadSchedules();
   };
   wrap.querySelector("#scobj").focus();
+}
+async function loadSops(){
+  const box=document.getElementById("sops"); if(!box) return;
+  let data; try{ data=await api("GET","/api/sops"); }catch{ box.innerHTML=`<div class="dim">Couldn't load processes.</div>`; return; }
+  const list=(data&&data.sops)||[];
+  if(!list.length){ box.innerHTML=`<div class="dim">No processes yet. An SOP is a named, ordered checklist the company runs step-by-step — it skips the AI planning step, so recurring work runs the same way every time.</div>`; return; }
+  box.innerHTML=list.map(s=>{ const n=(s.steps||[]).length;
+    return `<div class="delivrow" style="cursor:default"><span>📋</span>
+      <span style="flex:1;min-width:0"><span class="dn" style="display:block;white-space:normal">${esc(s.name)}</span><span class="dim" style="font-size:11px">${n} step${n===1?"":"s"}${s.description?" · "+esc(s.description.slice(0,70)):""}</span></span>
+      <button class="rvbtn" data-act="run" data-id="${s.id}">▶ Run</button>
+      <button class="rvbtn" data-act="edit" data-id="${s.id}">Edit</button>
+      <button class="rvbtn" data-act="del" data-id="${s.id}" title="Delete">✕</button></div>`;
+  }).join("");
+  box.querySelectorAll(".rvbtn").forEach(b=>b.onclick=async()=>{
+    const id=b.dataset.id, act=b.dataset.act;
+    if(act==="run"){ b.textContent="…"; try{ const {runId}=await api("POST","/api/sops/"+id+"/run",{autoApprove:false}); streamRun(runId); }catch{ b.textContent="▶ Run"; } }
+    else if(act==="edit"){ openSopDialog(list.find(x=>x.id===id)); }
+    else if(act==="del"){ if(confirm("Delete this process?")){ await api("DELETE","/api/sops/"+id); loadSops(); } }
+  });
+}
+function openSopDialog(sop){
+  const isEdit=!!sop;
+  const opts=`<option value="">(anyone / by role)</option>`+(ORG.agents||[]).map(a=>`<option value="${esc(a.name)}">${esc(a.name)} — ${esc(a.role)}</option>`).join("");
+  const wrap=el("div","modalwrap");
+  wrap.innerHTML=`<div class="modal" style="max-width:620px">
+    <h1 style="font-size:16px;margin:0 0 12px;text-transform:none">${isEdit?"Edit process":"New process (SOP)"}</h1>
+    <div class="fields">
+      <div><label>Name</label><input id="sopName" placeholder="Publish a blog post"></div>
+      <div><label>Description (optional)</label><textarea id="sopDesc" placeholder="What this process produces and when to run it."></textarea></div>
+      <div><label>Steps — run in order, each by the named teammate</label><div id="sopSteps"></div>
+        <button id="sopAddStep" style="margin-top:6px">+ Add step</button></div>
+      <div class="dim" style="font-size:11px">Running an SOP skips the AI planning step — the company executes exactly these steps, in order. Steps run sequentially so each can build on the previous one's work.</div>
+    </div>
+    <div class="row" style="justify-content:space-between;margin-top:16px">
+      <div>${isEdit?`<button id="sopDel" style="color:var(--bad,#c0392b)">Delete</button>`:""}</div>
+      <div class="row" style="gap:10px"><button id="sopCancel">Cancel</button><button class="primary" id="sopSave">${isEdit?"Save":"Create"}</button></div></div></div>`;
+  document.body.appendChild(wrap);
+  const stepsBox=wrap.querySelector("#sopSteps");
+  const renumber=()=>{ [...stepsBox.children].forEach((r,i)=>{ const n=r.querySelector(".sopNum"); if(n) n.textContent=(i+1)+"."; }); };
+  const addRow=(task="",assignee="")=>{
+    const row=el("div","row"); row.style.cssText="gap:6px;margin-bottom:6px;align-items:center";
+    row.innerHTML=`<span class="sopNum dim" style="width:18px;text-align:right;font-size:12px"></span>
+      <input class="sopTask" placeholder="what to do" style="flex:1;min-width:0">
+      <select class="sopWho" style="max-width:190px">${opts}</select>
+      <button class="sopRm" title="Remove" style="color:var(--bad,#c0392b)">✕</button>`;
+    stepsBox.appendChild(row);
+    row.querySelector(".sopTask").value=task;
+    row.querySelector(".sopWho").value=assignee||"";
+    row.querySelector(".sopRm").onclick=()=>{ row.remove(); renumber(); };
+    renumber();
+  };
+  wrap.querySelector("#sopName").value=isEdit?(sop.name||""):"";
+  wrap.querySelector("#sopDesc").value=isEdit?(sop.description||""):"";
+  if(isEdit&&(sop.steps||[]).length) sop.steps.forEach(s=>addRow(s.task,s.assignee)); else { addRow(); addRow(); }
+  wrap.querySelector("#sopAddStep").onclick=()=>addRow();
+  wrap.onclick=e=>{ if(e.target===wrap) wrap.remove(); };
+  wrap.querySelector("#sopCancel").onclick=()=>wrap.remove();
+  const del=wrap.querySelector("#sopDel"); if(del) del.onclick=async()=>{ if(confirm("Delete this process?")){ await api("DELETE","/api/sops/"+sop.id); wrap.remove(); loadSops(); } };
+  wrap.querySelector("#sopSave").onclick=async()=>{
+    const name=wrap.querySelector("#sopName").value.trim(); if(!name){wrap.querySelector("#sopName").focus();return;}
+    const steps=[...stepsBox.children].map(r=>({task:r.querySelector(".sopTask").value.trim(),assignee:r.querySelector(".sopWho").value})).filter(s=>s.task);
+    if(!steps.length){ alert("Add at least one step with a task."); return; }
+    const body={name,description:wrap.querySelector("#sopDesc").value.trim(),steps};
+    try{ if(isEdit) await api("PATCH","/api/sops/"+sop.id,body); else await api("POST","/api/sops",body); }catch{ alert("Couldn't save."); return; }
+    wrap.remove(); loadSops();
+  };
+  wrap.querySelector("#sopName").focus();
 }
 function critList(items, showStatus){
   return `<div class="dodlist">`+(items||[]).map(c=>{
