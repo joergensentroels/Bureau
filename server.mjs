@@ -158,7 +158,7 @@ const priceForModel = (model, fallbackTier) =>
 const TIERS = ["supervised", "trusted", "autonomous"];
 // Safe, reversible, in-sandbox actions a "trusted" agent may take unattended: read-only lookups,
 // versioned drafts (revertible), and internal notes. Deliberately excludes purchase/email/shell/api.
-const SAFE_TIER_ACTIONS = new Set(["web_search", "web_research", "read_file", "file_write", "note"]);
+const SAFE_TIER_ACTIONS = new Set(["web_search", "web_research", "read_file", "file_write", "note", "ask_peer"]);
 // The hard floor: actions that ALWAYS require the CEO, regardless of tier or run.autoApprove.
 // shell + api_call (real-world reach), spend over the guardrail ceiling, and sending email.
 function requiresCeoAlways(actType, next, gr) {
@@ -174,7 +174,7 @@ function requiresCeoAlways(actType, next, gr) {
   }
   return false;
 }
-const POLICY_ACTIONS = ["web_search", "web_research", "read_file", "file_write", "note", "purchase", "api_call", "shell", "email_draft"];
+const POLICY_ACTIONS = ["web_search", "web_research", "read_file", "file_write", "note", "purchase", "api_call", "shell", "email_draft", "ask_peer"];
 // Sanitize a rule's condition clause: keep only recognized, well-typed conditions.
 export function cleanPolicyWhen(w) {
   const out = {};
@@ -504,7 +504,7 @@ async function fileApproval(agent, action) {
     });
     return json;
   }
-  const typeMap = { email_draft: "external_contact", note: "context_question", file_write: "context_question", read_file: "context_question" };
+  const typeMap = { email_draft: "external_contact", note: "context_question", file_write: "context_question", read_file: "context_question", ask_peer: "context_question" };
   const { json } = await latch("POST", "/api/approvals", {
     type: typeMap[action.actionType] || "other",
     title: action.title || "Action requested",
@@ -607,11 +607,12 @@ function systemPrompt(org, agent) {
     "- shell: run one command on the worker VM. Put the exact command in \"command\". HIGH RISK — the CEO must explicitly approve every shell command (it is never auto-approved). Use only when genuinely required.",
     "- github_file: publish a file to the company's GitHub repo — title=the repo file path (e.g. \"reports/q3.md\"), command=the COMPLETE file content, details=the commit message/why. The CEO approves every commit (never auto). Use to push finished work out to GitHub.",
     "- plan_add: record a follow-up task you notice but shouldn't do right now into the company's persistent plan — title=the task, details=why/context. It is saved for a future run so nothing is lost. Runs instantly (no approval). Do NOT use it to defer the CURRENT objective.",
+    "- ask_peer: consult a NAMED teammate for input, advice, or a quick review — title=their name or role, command=your question, details=any context. They reply with their expert opinion and it comes back to you. Use it to get a specialist's take or a second opinion instead of guessing. It is advice only — it does NOT make them do real work.",
     "",
     "Respond with STRICT JSON only (no prose, no code fences):",
     '{ "thought":"one sentence", "speak":"what you tell the CEO, in your voice (1-3 sentences)",',
     '  "next": { "type":"propose_action"|"escalate"|"finish",',
-    '     "actionType":"web_search"|"web_research"|"file_write"|"read_file"|"purchase"|"api_call"|"shell"|"github_file"|"plan_add"|"email_draft"|"note"|"other",',
+    '     "actionType":"web_search"|"web_research"|"file_write"|"read_file"|"purchase"|"api_call"|"shell"|"github_file"|"plan_add"|"ask_peer"|"email_draft"|"note"|"other",',
     '     "title":"short title (or filename for file_write)", "details":"what and why", "command":"query for web_search; exact URL for web_research; full document for file_write; exact text otherwise",',
     '     "question":"when type=escalate: the specific thing you need the CEO to decide or provide",',
     '     "summary":"only when finishing" } }',
@@ -620,6 +621,7 @@ function systemPrompt(org, agent) {
     '  search: {"thought":"...","speak":"Searching for competitors.","next":{"type":"propose_action","actionType":"web_search","title":"Find competitors","details":"need current list","command":"top project management SaaS 2026"}}',
     '  fetch a page: {"thought":"...","speak":"Reading their pricing.","next":{"type":"propose_action","actionType":"web_research","title":"Pricing page","details":"exact page","command":"https://example.com/pricing"}}',
     '  deliver a document: {"thought":"...","speak":"Saving the welcome note.","next":{"type":"propose_action","actionType":"file_write","title":"welcome-note","details":"customer welcome note","command":"# Welcome\\n\\nHi there — thanks for joining..."}}',
+    '  consult a teammate: {"thought":"...","speak":"Getting Dana\'s read on the numbers.","next":{"type":"propose_action","actionType":"ask_peer","title":"Dana","details":"need a finance sanity-check","command":"Do these Q3 margins look plausible, or am I missing a cost?"}}',
     "",
     "Propose ONE action at a time. Prefer the smallest useful step.",
     "If you are BLOCKED — you need a decision or information that no teammate can supply and you",
@@ -713,6 +715,7 @@ export function normalizeAction(next, objective) {
   else if (["github", "git", "commit", "publish", "push", "gh"].includes(at)) at = "github_file";   // publish a file to GitHub (via Latch)
   else if (["plan_add", "plan", "backlog", "todo", "track", "add_task", "note_task"].includes(at)) at = "plan_add";   // record a follow-up item into the company plan
   else if (["github_new_repo", "create_repo", "new_repo", "repo"].includes(at)) at = "github_repo";
+  else if (["ask_peer", "ask", "consult", "message", "message_agent", "ask_teammate", "ask_colleague", "ask_agent", "peer"].includes(at)) at = "ask_peer";   // consult a named teammate
   if (at === "web_research" && !urlIn) at = "web_search";                 // wants to research but only has a query
   else if (at === "web_search" && urlIn) { at = "web_research"; n.command = urlIn; } // "search" but gave a URL
   else if (!at || at === "other" || at === "note") {                      // vague/catch-all -> infer intent
@@ -908,6 +911,31 @@ async function retrieveRelevant(query, limit = 3, excludeName = "") {
     try { docs.push({ name, content: await readFile(path.join(draftsDir(), name), "utf8") }); } catch { continue; }
   }
   return rankDeliverables(query, docs, limit, excludeName);
+}
+
+// Agent-to-agent consult: spin up `peer` for a BOUNDED, no-side-effects opinion on `question` from
+// `asker`. Peers have no standing loop (they only run when handed a task), so this is a synchronous
+// one-shot reasoning call, NOT a delivery to a dormant mailbox. It deliberately uses a persona-only
+// prompt — NOT the action-taking systemPrompt — so the peer replies as plain-text advice and CANNOT
+// take real actions (no file writes, purchases, or nested ask_peer). That rules out recursion loops,
+// runaway spend, and unaudited nested effects; the asking agent's ask_peer action is what's gated and
+// audited. Local model only (an internal consult shouldn't spend paid budget). Returns {text, tokens}.
+async function consultPeer(asker, peer, org, question) {
+  const persona = [
+    `You are ${peer.name}, a ${peer.role} at the company.`,
+    peer.persona || "",
+    (peer.traits || []).length ? `Your working style: ${peer.traits.join(", ")}.` : "",
+    peer.department ? `You work in the ${peer.department} team.` : "",
+    peer.bio ? `\nYour profile:\n${peer.bio}` : "",
+  ].filter(Boolean).join("\n");
+  const msgs = [
+    { role: "system", content: persona },
+    { role: "user", content: `Your teammate ${asker.name} (${asker.role}) is asking for your input. This is a quick INTERNAL consult — not a task, and you take no real actions. Reply in plain text (no JSON), drawing on your expertise as ${peer.role}. Be concrete and brief (2-6 sentences). If you genuinely can't help, say so.\n\nTheir question:\n${question}\n\n/no_think` },
+  ];
+  let text = "";
+  try { text = String(await askLlm(msgs, { maxTokens: 700, routingPreference: "local" })).replace(/<think>[\s\S]*?<\/think>/gi, "").trim(); } catch {}
+  const tokens = estTokens(msgs) + Math.ceil((text.length || 0) / 4);
+  return { text: text.slice(0, 1500), tokens };
 }
 
 // One agent working one objective through the propose -> Latch approval -> resume loop.
@@ -1245,6 +1273,28 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
           history.push({ role: "user", content: `APPROVED and EXECUTED — Latch committed it to GitHub${url ? ` (${url})` : " (applying now; URL not yet reported)"}. Continue toward the objective or finish.` });
         } else {
           history.push({ role: "user", content: `APPROVED, but the GitHub publish reported an error: ${err}. Note it honestly and finish, or try a different path/repo.` });
+        }
+      } else if ((next.actionType || "") === "ask_peer") {
+        // Agent-to-agent consult: resolve a teammate by name/role and fold their advisory reply back
+        // in. The peer takes no real action (consultPeer is a bounded, no-side-effects call), and the
+        // whole exchange has already passed the allowlist/policy/tier gate above and is audited below.
+        const recipientName = String(next.title || next.details || "").trim();
+        const question = String(next.command || next.details || "").trim();
+        const peer = resolveReport((org.agents || []).filter((a) => a.id !== agent.id), recipientName, new Set());
+        if (!peer || !question) {
+          emitAct({ agent: who, depth, actionType: "ask_peer", url: recipientName, ok: false, bytes: 0, error: peer ? "no question" : "no matching teammate" });
+          history.push({ role: "user", content: peer ? `ask_peer needs your question in "command". Try again or finish.` : `No teammate matched "${recipientName}". Name a real colleague (their first name or role) or finish.` });
+        } else {
+          setAgentState(agent.id, "waiting", `asking ${peer.name}…`);
+          emit(run, "ask_peer", { by: who, to: peer.name, role: peer.role, depth, question: question.slice(0, 500) });
+          const ans = await consultPeer(agent, peer, org, question);
+          tokens += ans.tokens;
+          if (!run.stopped) setAgentState(agent.id, "working", objective.slice(0, 80));
+          const reply = ans.text || "(no useful reply)";
+          emit(run, "peer_answer", { from: peer.name, to: who, depth, text: reply });
+          emitAct({ agent: who, depth, actionType: "ask_peer", url: peer.name, ok: !!ans.text, bytes: reply.length, error: ans.text ? "" : "no reply" });
+          didExecute = true;
+          history.push({ role: "user", content: `${peer.name} (${peer.role}) replied to your question:\n---\n${reply}\n---\nUse this input as you see fit. Continue toward the objective or finish.` });
         }
       } else {
         // Not yet a real capability — say so plainly rather than claiming it happened.
