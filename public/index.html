@@ -947,6 +947,12 @@ function renderMain(app){
   const goals=el("div"); goals.id="goals"; goals.className="delivlist";
   work.appendChild(goals);
 
+  const planH=el("div"); planH.style.cssText="display:flex;align-items:center;justify-content:space-between;margin-top:22px";
+  planH.innerHTML=`<h2 style="margin:0">Plan</h2><button class="miniadd" id="planAdd">+ Item</button>`;
+  work.appendChild(planH);
+  const plan=el("div"); plan.id="plan"; plan.className="delivlist";
+  work.appendChild(plan);
+
   const delivH=el("div"); delivH.style.cssText="display:flex;align-items:center;justify-content:space-between;margin-top:22px";
   delivH.innerHTML=`<h2 style="margin:0">Deliverables</h2><button class="miniadd" id="delivRefresh">Refresh</button>`;
   work.appendChild(delivH);
@@ -980,8 +986,10 @@ function renderMain(app){
   schedH.querySelector("#schedAdd").onclick=openScheduleDialog;
   buyH.querySelector("#buyBudget").onclick=setCompanyBudget;
   goalH.querySelector("#goalAdd").onclick=()=>openGoalDialog();
+  planH.querySelector("#planAdd").onclick=()=>openPlanDialog();
   trigH.querySelector("#trigAdd").onclick=openTriggerDialog;
   loadGoals();
+  loadPlan();
   loadDeliverables();
   loadSchedules();
   loadTriggers();
@@ -1668,6 +1676,57 @@ function openGoalDialog(g){
   };
   wrap.querySelector("#gtitle").focus();
 }
+const PLAN_ST={todo:"draft",doing:"qa",blocked:"draft",done:"delivered"};
+async function loadPlan(){
+  const box=document.getElementById("plan"); if(!box) return;
+  let data; try{ data=await api("GET","/api/plan"); }catch{ box.innerHTML=`<div class="dim">Couldn't load the plan.</div>`; return; }
+  const list=(data&&data.plan)||[];
+  if(!list.length){ box.innerHTML=`<div class="dim">The plan is empty. It's the company's persistent backlog — add items here, or agents record follow-ups they discover during runs.</div>`; return; }
+  const nameOf=(id)=>{ const a=(ORG.agents||[]).find(x=>x.id===id); return a?a.name:""; };
+  box.innerHTML=list.map(it=>{
+    const owner=nameOf(it.agentId), runs=(it.runs||[]).slice(0,6);
+    return `<div class="goalcard" data-id="${esc(it.id)}">
+      <div class="row" style="justify-content:space-between;align-items:flex-start;gap:8px">
+        <div style="min-width:0;flex:1"><div class="gtitle">${esc(it.title)} <span class="stbadge ${PLAN_ST[it.status]||"draft"}">${esc(it.status)}</span>${owner?` <span class="dim" style="font-size:11px">· ${esc(owner)}</span>`:""}</div>${it.detail?`<div class="dim" style="font-size:11px;margin-top:2px">${esc(it.detail)}</div>`:""}</div>
+        <div class="row" style="gap:6px;flex:none">${it.status!=="done"?`<button class="miniadd pwork">▶ Work on it</button>`:""}<button class="miniadd pedit">Edit</button></div>
+      </div>
+      ${runs.length?`<div class="grow">${runs.map(r=>`<span class="rdotv ${esc(r.verdict||"")}" title="${esc(r.verdict||"")}"></span>`).join("")}<span class="dim" style="font-size:10px;margin-left:5px">${runs.length} run${runs.length===1?"":"s"}</span></div>`:""}
+      ${(it.notes||[]).length?`<div class="dim" style="font-size:11px;margin-top:6px;border-top:1px dashed var(--line-2);padding-top:5px">📝 ${esc(it.notes[0].text)}</div>`:""}
+    </div>`;
+  }).join("");
+  box.querySelectorAll(".goalcard").forEach(card=>{
+    const id=card.dataset.id;
+    const w=card.querySelector(".pwork"); if(w) w.onclick=async()=>{ try{ const {runId}=await api("POST","/api/plan/"+id+"/run",{autoApprove:false}); streamRun(runId); }catch{} };
+    card.querySelector(".pedit").onclick=()=>openPlanDialog(list.find(x=>x.id===id));
+  });
+}
+function openPlanDialog(it){
+  const isEdit=!!it;
+  const agentOpts=`<option value="">(no owner)</option>`+(ORG.agents||[]).map(a=>`<option value="${a.id}"${isEdit&&it.agentId===a.id?" selected":""}>${esc(a.name)}</option>`).join("");
+  const wrap=el("div","modalwrap");
+  wrap.innerHTML=`<div class="modal" style="max-width:520px">
+    <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:10px"><h1 style="font-size:16px;margin:0;text-transform:none">${isEdit?"Edit plan item":"New plan item"}</h1>${isEdit?`<button id="pdel" style="color:var(--danger)">Delete</button>`:""}</div>
+    <div class="fields">
+      <div><label>Task</label><input id="ptitle" placeholder="Add rate-limit tests for the API" value="${isEdit?esc(it.title):""}"></div>
+      <div><label>Detail (optional)</label><textarea id="pdetail" placeholder="Context / why / what done looks like.">${isEdit?esc(it.detail||""):""}</textarea></div>
+      <div><label>Owner (optional)</label><select id="powner">${agentOpts}</select></div>
+      ${isEdit?`<div><label>Status</label><select id="pstatus">${["todo","doing","blocked","done"].map(s=>`<option value="${s}"${it.status===s?" selected":""}>${s}</option>`).join("")}</select></div>
+      <div><label>Add a note (optional)</label><input id="pnote" placeholder="e.g. blocked on the API key"></div>`:""}
+    </div>
+    <div class="row" style="justify-content:flex-end;gap:10px;margin-top:16px"><button id="pcancel">Cancel</button><button class="primary" id="psave">${isEdit?"Save":"Add item"}</button></div></div>`;
+  document.body.appendChild(wrap);
+  wrap.onclick=e=>{ if(e.target===wrap) wrap.remove(); };
+  wrap.querySelector("#pcancel").onclick=()=>wrap.remove();
+  const pd=wrap.querySelector("#pdel"); if(pd) pd.onclick=async()=>{ if(confirm("Delete this plan item?")){ await api("DELETE","/api/plan/"+it.id); wrap.remove(); loadPlan(); } };
+  wrap.querySelector("#psave").onclick=async()=>{
+    const title=wrap.querySelector("#ptitle").value.trim(); if(!title){ wrap.querySelector("#ptitle").focus(); return; }
+    const payload={ title, detail:wrap.querySelector("#pdetail").value.trim(), agentId:wrap.querySelector("#powner").value };
+    if(isEdit){ payload.status=wrap.querySelector("#pstatus").value; const note=wrap.querySelector("#pnote").value.trim(); if(note) payload.addNote=note; await api("PATCH","/api/plan/"+it.id,payload); }
+    else await api("POST","/api/plan",payload);
+    wrap.remove(); loadPlan();
+  };
+  wrap.querySelector("#ptitle").focus();
+}
 async function loadTriggers(){
   const box=document.getElementById("triggers"); if(!box) return;
   let data; try{ data=await api("GET","/api/triggers"); }catch{ box.innerHTML=`<div class="dim">Couldn't load triggers.</div>`; return; }
@@ -1828,7 +1887,7 @@ function handleEvent(ev){
         unverified:{c:"dod",t:"Finished — unverified",s:"The QA verifier was unavailable, so this wasn't checked. Please spot-check it."} }[d.verdict];
       if(m) addEv(m.c,`definition of done · ${esc(d.verdict)}`,`<div style="font-size:13px"><b>${m.t}</b></div><div class="dim" style="font-size:11px;margin-top:3px">${m.s}</div>`);
     }
-    if(ES)ES.close(); resetRun(); loadDeliverables(); loadPurchases(); loadDashboard(); loadGoals(); refreshInbox(); api("GET","/api/org").then(o=>{ORG=o; render();}).catch(()=>{});
+    if(ES)ES.close(); resetRun(); loadDeliverables(); loadPurchases(); loadDashboard(); loadGoals(); loadPlan(); refreshInbox(); api("GET","/api/org").then(o=>{ORG=o; render();}).catch(()=>{});
   }
 }
 

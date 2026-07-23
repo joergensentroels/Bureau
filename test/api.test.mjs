@@ -52,6 +52,17 @@ const ok = (c, m) => (c ? pass : fail).push(m);
       ok(r.j.github.owner === "my-agent-org" && r.j.github.repo === "BureauProjects", "per-workspace github target set");
       ok((await api("GET", "/api/integrations")).j.github.target.repo === "BureauProjects", "target persisted for this workspace"); }
 
+    // ---- plan / backlog CRUD ----
+    ok((await api("POST", "/api/plan", { title: "" })).status === 400, "plan item requires a title (400)");
+    const pi = await api("POST", "/api/plan", { title: "Wire up billing", detail: "stripe" });
+    ok(pi.status === 201 && pi.j.id && pi.j.status === "todo" && pi.j.detail === "stripe", "plan item created (todo)");
+    ok((await api("GET", "/api/plan")).j.plan.length === 1, "plan item listed");
+    ok((await api("PATCH", "/api/plan/" + pi.j.id, { status: "doing" })).j.status === "doing", "plan item → doing");
+    ok((await api("PATCH", "/api/plan/" + pi.j.id, { status: "nonsense" })).j.status === "doing", "bad status ignored");
+    { const u = (await api("PATCH", "/api/plan/" + pi.j.id, { addNote: "blocked on keys" })).j; ok(u.notes.length === 1 && u.notes[0].text === "blocked on keys", "note appended"); }
+    ok((await api("DELETE", "/api/plan/" + pi.j.id)).status === 200, "plan item deleted");
+    ok((await api("GET", "/api/plan")).j.plan.length === 0, "plan empty after delete");
+
     // ---- policies validation + CRUD ----
     ok((await api("POST", "/api/policies", { then: "nope", when: { actionType: "shell" } })).status === 400, "policy rejects bad effect (400)");
     ok((await api("POST", "/api/policies", { then: "block", when: {} })).status === 400, "policy requires >=1 condition (400)");

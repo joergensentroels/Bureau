@@ -14,12 +14,10 @@ Nothing is in active development. The remaining backlog, roughly by value:
 
 - **Outbound integrations** — ◐ partial. **GitHub publish is done** (`github_file` / `github_repo`
   actions → Latch's native GitHub connector; Latch holds the token and commits on approval, Bureau
-  stores nothing; always CEO-gated) with a **per-workspace target repo/owner** (Guardrails → GitHub
-  target) so each company can publish to its own org/repo. Setup: `GITHUB.md`. Still open: GitHub
-  **issues/PRs** and any **authenticated Slack/Notion/webhook** connector — no Latch-side connector yet,
-  so "defer to Latch" doesn't cover them (would need Latch connector work or a Bureau secret store).
-  Unauthenticated public webhooks already work via `api_call`. _Your side: create the org + token
-  (see GITHUB.md); Bureau follows it._
+  stores nothing) with a **per-workspace target repo/owner** (setup: `GITHUB.md`). Still open only:
+  GitHub **issues/PRs** (no Latch connector yet). **Slack was dropped on purpose** — agents coordinate
+  through the internal Plan (shared state), not a chat channel; for *human* digests, point the existing
+  notify-webhook at a Slack incoming webhook yourself.
 - **Office-view revamp** — the isometric office is functional (renders from `public/assets/iso/`),
   but its visual design was parked. Pure presentation, no behavior change.
 
@@ -28,7 +26,7 @@ Nothing is in active development. The remaining backlog, roughly by value:
 ## Shipped
 
 The core vision — *point Bureau at a goal and let it run itself, only surfacing finished, QA'd
-work* — is built, and guarded by an automated suite (`node test/run-all.mjs` — 278 headless
+work* — is built, and guarded by an automated suite (`node test/run-all.mjs` — 292 headless
 assertions + a live `--e2e`; see `test/README.md`).
 
 - **Safe autonomy** — per-agent allowlists → autonomy tiers → declarative policy rules, all under
@@ -39,6 +37,10 @@ assertions + a live `--e2e`; see `test/README.md`).
   guarded `api_call`, `shell` on the VM, **GitHub file publish** via Latch); richer file types + export; keyword RAG memory.
 - **Runs itself** — goals/OKRs with scheduled auto-advance, inbound triggers, notifications, and a
   self-optimizing loop (scorecards → HR recommendations → coaching lessons → goal retrospectives).
+- **Internal Plan / backlog** — a persistent per-workspace to-do list the agents maintain: they see
+  the open plan at the start of every run, record follow-up work they discover with a `plan_add`
+  action (so nothing is lost between runs), and you inspect / reprioritize / assign / "work on" items
+  in Bureau. Runs link back and auto-advance an item's status. This — not Slack — is how an agent org coordinates.
 - **Deliverable lifecycle** — draft → QA'd → your sign-off → delivered, with versioning.
 - **Dry-run mode**, **run history & replay**, **company templates**.
 - **Multi-workspace** — each workspace is a fully isolated company.

@@ -13,8 +13,8 @@ node test/run-all.mjs --e2e    # also the live autonomy e2e
 
 The runner runs the pure suites always, the server suites only if a server is
 reachable on `BUREAU_PORT` (else it skips them with a note), and the live e2e only
-with `--e2e`. Current totals: **187 pure assertions + 87 server assertions** (plus
-the 10-assertion live e2e) — 274 in all.
+with `--e2e`. Current totals: **194 pure assertions + 98 server assertions** (plus
+the 10-assertion live e2e) — 292 in all.
 
 ### What's covered vs. not
 
@@ -47,7 +47,7 @@ the guarantee that a policy `allow` can never auto-approve a floored action.
 
 ## `units.test.mjs` — pure unit tests for standalone logic (fast, no server)
 
-101 assertions over the exported helpers: the **SSRF guard** (`ipv4Blocked` /
+133 assertions over the exported helpers: the **SSRF guard** (`ipv4Blocked` /
 `ipBlocked` — every private/internal range + IPv6/mapped), `normalizeAction` (the
 "do what the model meant" action corrections), `safeParse` (tolerant JSON),
 `ragTerms`, `expectsDeliverable`, `resolveReport` (tolerant assignee matching, no
@@ -77,7 +77,7 @@ node test/units.test.mjs
 
 ## `api.test.mjs` — model-free API/CRUD + validation (needs a running server)
 
-46 assertions over the management endpoints — company/budget, guardrails (clamping),
+57 assertions over the management endpoints — company/budget, guardrails (clamping),
 notify (url validation), goals lifecycle, policies validation + CRUD, triggers CRUD
 (+ bad-token rejection on the public endpoint), agents (tier validation), deliverable
 status transitions + versions endpoint + name/status validation, schedules CRUD, the

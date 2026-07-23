@@ -119,7 +119,7 @@ function auditQuery(ws, { kind = "", agent = "", type = "", runId = "", limit = 
 // A FRESH empty org each call — never a shared template. Returning a module-level constant here and
 // spreading it would share the nested arrays/objects across every empty workspace, so pushing into
 // one company's agents would leak into all the others. Build new containers every time.
-const emptyOrg = () => ({ ceo: null, vision: "", companyName: "", agents: [], budget: { tokens: 0 }, activity: [], schedules: [], purchases: [], audit: [], guardrails: {}, deliverables: {}, goals: [], notify: {}, triggers: [], policies: [], github: { repo: "", owner: "" } });
+const emptyOrg = () => ({ ceo: null, vision: "", companyName: "", agents: [], budget: { tokens: 0 }, activity: [], schedules: [], purchases: [], audit: [], guardrails: {}, deliverables: {}, goals: [], notify: {}, triggers: [], policies: [], github: { repo: "", owner: "" }, plan: [] });
 // The real "economy": an agent's budget is a DOLLAR allowance for the PAID API model. $0 (default)
 // means the agent may only use the free local model. Token usage is the actual cost, tracked per agent.
 //
@@ -239,6 +239,7 @@ export function ensureBudget(org) {
   if (!Array.isArray(org.triggers)) org.triggers = [];                  // inbound webhooks: {id,name,objective,mode,agentId,token,enabled,lastFiredAt}
   if (!Array.isArray(org.policies)) org.policies = [];                  // declarative rules: {id,enabled,when{...},then:block|require|allow,note}
   org.github = { repo: "", owner: "", ...(org.github || {}) };          // per-workspace GitHub target (repo/owner names, NOT the token — token stays in Latch)
+  if (!Array.isArray(org.plan)) org.plan = [];                          // the company's persistent backlog: {id,title,detail,status,agentId,goalId,runs[],notes[]}
   // Guardrails: autoApproveUnderUsd = purchases/spend below this may auto-approve; maxActionsPerRun =
   // hard cap on real actions per run (0 = unlimited). Per-agent action allowlists live on the agent.
   org.guardrails = { autoApproveUnderUsd: 0, maxActionsPerRun: 0, ...(org.guardrails || {}) };
@@ -265,9 +266,10 @@ function readOrgSync(ws) {
 async function readOrg() { return readOrgSync(currentWs()); }
 function writeOrgSync(ws, org) {
   const { audit: _a, ...blob } = org;   // audit lives in its own table, never in the blob
-  const name = WORKSPACES.find((w) => w.id === ws)?.name || (ws === "default" ? "Default" : ws);
-  db.prepare("INSERT INTO workspaces(id,name,created_at,org) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET org = excluded.org")
-    .run(ws, name, Date.now(), JSON.stringify(blob));
+  // UPDATE only — never INSERT. Workspaces are created explicitly (POST /api/workspaces, or the
+  // default at boot), so the row always exists first. An UPDATE that matches 0 rows is a no-op, which
+  // means an org write that races in AFTER a workspace was deleted can't resurrect it.
+  db.prepare("UPDATE workspaces SET org = ? WHERE id = ?").run(JSON.stringify(blob), ws);
 }
 async function writeOrg(org) { writeOrgSync(currentWs(), org); }
 
@@ -599,11 +601,12 @@ function systemPrompt(org, agent) {
     "- api_call: call a public HTTP API. Put a JSON request in \"command\": {\"method\":\"POST\",\"url\":\"https://...\",\"body\":{...}} — or a plain https URL for a GET. Public hosts only; the CEO approves each call.",
     "- shell: run one command on the worker VM. Put the exact command in \"command\". HIGH RISK — the CEO must explicitly approve every shell command (it is never auto-approved). Use only when genuinely required.",
     "- github_file: publish a file to the company's GitHub repo — title=the repo file path (e.g. \"reports/q3.md\"), command=the COMPLETE file content, details=the commit message/why. The CEO approves every commit (never auto). Use to push finished work out to GitHub.",
+    "- plan_add: record a follow-up task you notice but shouldn't do right now into the company's persistent plan — title=the task, details=why/context. It is saved for a future run so nothing is lost. Runs instantly (no approval). Do NOT use it to defer the CURRENT objective.",
     "",
     "Respond with STRICT JSON only (no prose, no code fences):",
     '{ "thought":"one sentence", "speak":"what you tell the CEO, in your voice (1-3 sentences)",',
     '  "next": { "type":"propose_action"|"escalate"|"finish",',
-    '     "actionType":"web_search"|"web_research"|"file_write"|"read_file"|"purchase"|"api_call"|"shell"|"github_file"|"email_draft"|"note"|"other",',
+    '     "actionType":"web_search"|"web_research"|"file_write"|"read_file"|"purchase"|"api_call"|"shell"|"github_file"|"plan_add"|"email_draft"|"note"|"other",',
     '     "title":"short title (or filename for file_write)", "details":"what and why", "command":"query for web_search; exact URL for web_research; full document for file_write; exact text otherwise",',
     '     "question":"when type=escalate: the specific thing you need the CEO to decide or provide",',
     '     "summary":"only when finishing" } }',
@@ -703,6 +706,7 @@ export function normalizeAction(next, objective) {
   if (["bash", "command", "cmd", "run", "exec", "execute", "terminal", "script"].includes(at)) at = "shell";
   else if (["http", "api", "request", "http_request", "rest", "webhook", "curl"].includes(at)) at = "api_call";
   else if (["github", "git", "commit", "publish", "push", "gh"].includes(at)) at = "github_file";   // publish a file to GitHub (via Latch)
+  else if (["plan_add", "plan", "backlog", "todo", "track", "add_task", "note_task"].includes(at)) at = "plan_add";   // record a follow-up item into the company plan
   else if (["github_new_repo", "create_repo", "new_repo", "repo"].includes(at)) at = "github_repo";
   if (at === "web_research" && !urlIn) at = "web_search";                 // wants to research but only has a query
   else if (at === "web_search" && urlIn) { at = "web_research"; n.command = urlIn; } // "search" but gave a URL
@@ -924,6 +928,11 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
   const retros = (org.goals || []).filter((g) => g.retro && g.retro.text).sort((a, b) => (b.retro.at || 0) - (a.retro.at || 0)).slice(0, 2);
   if (retros.length) history.push({ role: "user", content:
     `Retrospectives from completed company goals — apply these lessons:\n${retros.map((g) => `- (${g.title}) ${g.retro.text}`).join("\n")}` });
+  // The company's open plan/backlog — so work carries across runs. If your objective advances one of
+  // these, say so; if you notice new follow-up work, use plan_add to record it (don't lose it).
+  const openPlan = (org.plan || []).filter((i) => i.status !== "done").slice(0, 12);
+  if (openPlan.length) history.push({ role: "user", content:
+    `The company's current plan (open items) — build on it; record new follow-ups with plan_add:\n${openPlan.map((i) => `- [${i.status}] ${i.title}${i.detail ? ` — ${String(i.detail).slice(0, 100)}` : ""}`).join("\n")}` });
   history.push({ role: "user", content: `Your task: ${objective}` });
   let tokens = 0, summary = "", step = 0;
   const gr = org.guardrails || {};   // company guardrails: allowlist (per-agent) + action cap + purchase ceiling
@@ -1055,6 +1064,20 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
       continue;
     }
     run.actionCount = (run.actionCount || 0) + 1;
+    // ---- plan_add: record a follow-up item into the company plan. Internal bookkeeping — no Latch
+    // approval, no outbound effect — so it runs directly (the point is agents track discovered work freely).
+    if (actType === "plan_add") {
+      const title = String(next.title || next.command || next.details || "").trim().slice(0, 160);
+      if (title) {
+        const item = { id: newId("plan"), title, detail: String(next.details || "").slice(0, 1000), status: "todo", agentId: agent.id, goalId: run.goalId || "", runs: [], notes: [], createdAt: Date.now(), updatedAt: Date.now() };
+        await updateOrg((o) => { o.plan = [item, ...(o.plan || [])].slice(0, 200); });
+        emitResult(run, { agent: who, depth, actionType: "plan_add", url: "", ok: true, bytes: 0, error: "" });
+        history.push({ role: "user", content: `Recorded in the company plan: "${title}". It persists for a future run — you don't need to do it now. Continue toward THIS objective or finish.` });
+      } else {
+        history.push({ role: "user", content: `plan_add needs the task in "title". Try again or finish.` });
+      }
+      continue;
+    }
     const tier = String(agent.tier || "supervised").toLowerCase();
     // The autonomy tier + policy + hard-floor decision lives in one place (decideApproval) so it's
     // auditable and unit-tested. Tier can grant auto; a policy can loosen/tighten; the floor
@@ -1651,6 +1674,10 @@ async function runGated(run, worker, persistExtra, perAgentTally) {
   if (run.goalId) {
     await updateOrg((o) => { const g = (o.goals || []).find((x) => x.id === run.goalId); if (g) g.runs = [{ runId: run.id, at: Date.now(), verdict, objective: String(run.objective).slice(0, 120) }, ...(g.runs || [])].slice(0, 20); }).catch(() => {});
   }
+  // Plan: link the run back to its backlog item and advance status — passed → done, otherwise it stays "doing".
+  if (run.planItemId) {
+    await updateOrg((o) => { const it = (o.plan || []).find((x) => x.id === run.planItemId); if (it) { it.runs = [{ runId: run.id, at: Date.now(), verdict }, ...(it.runs || [])].slice(0, 20); if (verdict === "passed") it.status = "done"; else if (it.status === "todo") it.status = "doing"; it.updatedAt = Date.now(); } }).catch(() => {});
+  }
   finishRun(run, { verdict, met, unmet: unmet.length, total: run.criteria.length, criteria: run.criteria });
   if (!run.dryRun) fireWebhook("run_done", { objective: run.objective, verdict, agent: persistExtra.agent || "", tokens });
   return { verdict, tokens };
@@ -1694,6 +1721,24 @@ function finishRun(run, done = {}) {
 export function goalObjective(g) {
   const open = (g.keyResults || []).filter((k) => !k.done).map((k) => `- ${k.text}`).join("\n");
   return `Advance the company goal: "${g.title}".${g.detail ? " " + g.detail : ""}${open ? `\n\nKey results still open:\n${open}` : ""}\n\nMake concrete progress toward it and produce a deliverable capturing the work.`.slice(0, 1000);
+}
+// ---- Plan / backlog: the company's persistent to-do list, maintained by agents + inspected by the CEO ----
+const PLAN_STATUS = ["todo", "doing", "blocked", "done"];
+// Derive a run objective from a backlog item (like goalObjective does for goals).
+export function planObjective(item) {
+  return `Work on this item from the company's plan: "${item.title}".${item.detail ? " " + item.detail : ""}\n\nMake concrete progress; if you discover further work, record it in the plan; produce a deliverable if the item calls for one.`.slice(0, 1000);
+}
+// Normalize a plan-item payload into a stored item (used by create; PATCH edits fields in place).
+export function normPlanItem(body, agentId = "") {
+  const title = String(body.title || "").trim().slice(0, 160);
+  if (!title) return null;
+  return {
+    id: newId("plan"), title,
+    detail: String(body.detail || "").slice(0, 1000),
+    status: PLAN_STATUS.includes(body.status) ? body.status : "todo",
+    agentId: String(body.agentId || agentId || ""), goalId: String(body.goalId || ""),
+    runs: [], notes: [], createdAt: Date.now(), updatedAt: Date.now(),
+  };
 }
 // Normalize a key-results payload (array of strings or {text,done}) into stored {id,text,done}.
 export function normKRs(v) {
@@ -1748,7 +1793,7 @@ function beginRun(spec) {
     id: newId("run"), mode, agentId: spec.agentId,
     objective: String(spec.objective || "").slice(0, 1000),
     maxTurns: Math.max(1, Math.min(20, Number(spec.maxTurns) || 6)),
-    autoApprove: Boolean(spec.autoApprove), scheduleId: spec.scheduleId || "", goalId: spec.goalId || "", dryRun: Boolean(spec.dryRun),
+    autoApprove: Boolean(spec.autoApprove), scheduleId: spec.scheduleId || "", goalId: spec.goalId || "", planItemId: spec.planItemId || "", dryRun: Boolean(spec.dryRun),
     hush: Boolean(spec.hush),     // "hush" task: NO agent may use the paid/external LLM — everyone stays on the local model regardless of budget (for sensitive work)
     ws: spec.ws || currentWs(),   // pin the workspace so the whole run reads/writes the right company
     events: [], listeners: new Set(), done: false, stopped: false,
@@ -2481,6 +2526,51 @@ const server = createServer(async (req, res) => {
         if (g && g.scheduleId) o.schedules = (o.schedules || []).filter((s) => s.id !== g.scheduleId);   // remove the linked auto-advance schedule
         o.goals = (o.goals || []).filter((x) => x.id !== id);
       });
+      return send(res, 200, { ok: true });
+    }
+
+    // ----- plan / backlog: the company's persistent to-do list (agents append, CEO inspects/reprioritizes) -----
+    if (p === "/api/plan" && req.method === "GET") {
+      return send(res, 200, { plan: (await readOrg()).plan || [] });
+    }
+    if (p === "/api/plan" && req.method === "POST") {
+      const body = await readBody(req);
+      const item = normPlanItem(body);
+      if (!item) return send(res, 400, { error: "title required" });
+      await updateOrg((o) => { o.plan = [item, ...(o.plan || [])].slice(0, 200); });   // newest first; cap 200
+      return send(res, 201, item);
+    }
+    if (p.startsWith("/api/plan/") && p.endsWith("/run") && req.method === "POST") {
+      const id = p.split("/")[3];
+      const org = await readOrg();
+      const item = (org.plan || []).find((x) => x.id === id);
+      if (!item) return send(res, 404, { error: "not_found" });
+      const body = await readBody(req);
+      const single = item.agentId && (org.agents || []).some((a) => a.id === item.agentId);
+      const { run } = beginRun({ mode: single ? "single" : "company", agentId: single ? item.agentId : "", objective: planObjective(item), planItemId: id, autoApprove: !!body.autoApprove, maxTurns: 6 });
+      await updateOrg((o) => { const x = (o.plan || []).find((y) => y.id === id); if (x && x.status === "todo") { x.status = "doing"; x.updatedAt = Date.now(); } });
+      return send(res, 201, { runId: run.id });
+    }
+    if (p.startsWith("/api/plan/") && req.method === "PATCH") {
+      const id = p.split("/")[3];
+      const body = await readBody(req);
+      const item = await updateOrg((o) => {
+        const x = (o.plan || []).find((y) => y.id === id);
+        if (!x) return null;
+        if (body.title !== undefined) x.title = String(body.title).trim().slice(0, 160) || x.title;
+        if (body.detail !== undefined) x.detail = String(body.detail).slice(0, 1000);
+        if (body.status !== undefined && PLAN_STATUS.includes(body.status)) x.status = body.status;
+        if (body.agentId !== undefined) x.agentId = String(body.agentId).slice(0, 40);
+        if (body.goalId !== undefined) x.goalId = String(body.goalId).slice(0, 40);
+        if (body.addNote) x.notes = [{ text: String(body.addNote).slice(0, 300), at: Date.now(), by: "you" }, ...(x.notes || [])].slice(0, 20);
+        x.updatedAt = Date.now();
+        return x;
+      });
+      return item ? send(res, 200, item) : send(res, 404, { error: "not_found" });
+    }
+    if (p.startsWith("/api/plan/") && req.method === "DELETE") {
+      const id = p.split("/")[3];
+      await updateOrg((o) => { o.plan = (o.plan || []).filter((x) => x.id !== id); });
       return send(res, 200, { ok: true });
     }
 

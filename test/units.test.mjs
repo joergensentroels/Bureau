@@ -4,6 +4,7 @@ import {
   ipv4Blocked, ipBlocked, normalizeAction, safeParse, ragTerms, expectsDeliverable,
   resolveReport, goalObjective, normKRs, cadenceMs, cleanPolicyWhen, htmlToText,
   ensureBudget, renderChecklist, validDeliverableName, rankDeliverables, workProduct,
+  planObjective, normPlanItem,
 } from "../server.mjs";
 
 let pass = 0, fail = 0;
@@ -161,6 +162,16 @@ console.log("# rankDeliverables — pure RAG keyword ranker (score >= 2, best fi
   eq("  no query terms → []", rankDeliverables("the a of to", docs), []);
   eq("  excludeName is skipped", rankDeliverables("competitor pricing analysis", docs, 3, "market.md").map((x) => x.name), ["pricing.md"]);
   chk("  limit respected", rankDeliverables("competitor pricing analysis", docs, 1).length === 1); }
+
+console.log("# planObjective + normPlanItem — the company backlog");
+{ const s = planObjective({ title: "Ship onboarding", detail: "email + docs" });
+  chk("  objective includes title + detail", s.includes("Ship onboarding") && s.includes("email + docs")); }
+{ const it = normPlanItem({ title: "Backlog thing" });
+  chk("  new item: todo status, empty runs/notes, has id", it && it.status === "todo" && Array.isArray(it.runs) && Array.isArray(it.notes) && !!it.id && it.detail === ""); }
+eq("  empty title → null", normPlanItem({ title: "  " }), null);
+eq("  valid status honored", normPlanItem({ title: "T", status: "doing" }).status, "doing");
+eq("  bad status → todo", normPlanItem({ title: "T", status: "nonsense" }).status, "todo");
+chk("  owner defaults from arg", normPlanItem({ title: "T" }, "agent_9").agentId === "agent_9");
 
 console.log(`\n${fail === 0 ? "ALL PASS ✓" : "FAILURES ✗"} — ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
