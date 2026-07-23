@@ -57,20 +57,27 @@ a large purchase without you.
 | 9 | LOW | `ask_peer` well-contained (persona-only, local, no actions, no recursion); SOP runs don't bypass the approval gate | **Accepted** — no action needed |
 | 10 | LOW | Clickjacking: with the token now in the browser, a page could frame Bureau and trick authed clicks | **FIXED** (`dd8c7c1`) — `X-Frame-Options: DENY` + CSP `frame-ancestors 'none'` (plus `nosniff`, `no-referrer`) on every response |
 
-## Remaining hardening (backlog, none critical)
+## Hardening — all backlog items done
 
-- **`api_call` DNS-rebinding pin**: route `apiCall` through the same `pinnedRequest`/`pinnedLookup` as
-  `fetchUrl` (Finding 8 is fixed for `web_research`; `api_call` is human-gated so lower priority).
-- **Role separation**: Bureau uses a single operator token. Latch has operator/agent/draft/user roles;
-  Bureau could add a read-only token and an operator-only class for config-mutation + steer.
-- **Server-side spend ceiling / rate limits**: Latch enforces credit reservation (402) and email
-  rate limits (429). Bureau relies on per-agent `budgetUsd` + the per-run action cap + the auto-approve
-  ceiling + the hard floor; consider a server-side per-run/day paid-budget cap.
-- **`?token=` in the SSE URL** can appear in local server logs. Acceptable for a localhost operator
+- **DNS-rebinding pin (both outbound paths)** — `fetchUrl` (`dd8c7c1`) and `apiCall` (`f0c7c56`) use
+  core http/https with a validating `pinnedLookup`: one resolution validates *and* supplies the connect
+  IP; IP literals validated directly. No rebinding window.
+- **Anti-clickjacking + nosniff headers** (`dd8c7c1`): `X-Frame-Options: DENY`, CSP `frame-ancestors
+  'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` on every response.
+- **Off-loopback bind-guard** (`dd8c7c1`): `BUREAU_HOST` (default loopback); loud SECURITY warning if
+  bound to a non-loopback interface.
+- **Server-side per-run paid ceiling** (`f0c7c56`): guardrail `maxPaidUsdPerRun` (0 = unlimited);
+  `canUsePaid` + `orchestrationRouting` fall back to local once the run's total paid spend reaches it.
+- **Role separation** (`f0c7c56`): a read-only token (Latch `agentToken` / `BUREAU_READ_TOKEN`) grants
+  `readonly` — reads + read-only MCP tools only; mutations, run-starts, steer, config, and MCP
+  `run_sop`/`start_run` require the operator token.
+
+### Residual (accepted)
+
+- **`?token=` in the SSE URL** can appear in local server logs. Accepted for a localhost operator
   token; revisit if Bureau ever moves off loopback.
-
-_Done in `dd8c7c1`: DNS-rebinding pin for `web_research`, anti-clickjacking + nosniff headers, and the
-off-loopback bind-guard (`BUREAU_HOST`, warns on non-loopback)._
+- **Single-host token store**: Bureau reuses Latch's `data/auth.json` tokens. Rotating there rotates
+  both — intended (one operator identity for the control plane).
 
 ## Operating guidance
 
