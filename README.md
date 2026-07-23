@@ -16,12 +16,57 @@ Bureau *proposes*; Latch *approves and does*. Bureau stores no secrets.
 
 ## How it works
 
+```mermaid
+flowchart TB
+  UI["Operator · browser UI"]
+  SCHED["Scheduler · triggers · goals"]
+  MCPC["External MCP client<br/>(Claude Desktop, agents)"]
+
+  subgraph BUREAU["🏢 Bureau — control surface · localhost · token-gated · holds no secrets"]
+    direction TB
+    RUN["Run loop<br/>decompose → delegate → agent turns<br/>(sequential or parallel)"]
+    GATE{"Guardrails + approval decision<br/>allowlist · per-run caps · policy · tier<br/>HARD FLOOR: shell / api / email / mcp / …"}
+    DOD["Definition-of-Done gate<br/>criteria → verify → remediate"]
+    MEM["Shared memory · SOPs"]
+  end
+
+  subgraph LATCH["🔐 Latch — security boundary · holds ALL credentials"]
+    direction TB
+    APPR["Approvals<br/>you decide in Compass<br/>(or Latch auto-approves blessed/typed)"]
+    EXEC["Executes the real action<br/>(sandboxed worker)"]
+    CREDS[("LLM keys · GitHub token<br/>mailbox · MCP servers")]
+  end
+
+  subgraph WORLD["🌐 Real world"]
+    LLM["LLM providers<br/>local qwen3 · paid Kimi"]
+    ACT["Web · GitHub · email<br/>shell VM · external MCP tools"]
+  end
+
+  UI --> RUN
+  SCHED --> RUN
+  MCPC --> RUN
+  RUN <--> MEM
+  RUN -- "propose action" --> GATE
+  GATE -- "credentialed / hard-floor" --> APPR
+  APPR --> EXEC
+  EXEC -. "uses" .-> CREDS
+  EXEC --> ACT
+  ACT -- "result (untrusted data)" --> RUN
+  RUN -- "think / verify<br/>(via Latch LLM proxy)" --> LLM
+  LLM -. "key held by" .-> CREDS
+  RUN --> DOD
+  DOD --> OUT["Deliverable<br/>draft → QA'd → your sign-off → delivered"]
+```
+
 Each agent runs a small loop: **think → propose an action → (approval) → get the result → continue.**
 Every real-world action is filed as a Latch approval and either auto-approved (per the agent's autonomy
 tier / your policy rules) or decided by you. A **hard floor** — `shell`, `api_call`, `email`, repo
 creation, over-ceiling purchases, external tool calls — *always* requires your explicit approval,
 regardless of tier or automation. Finished work flows through a draft → QA'd → signed-off → delivered
 lifecycle.
+
+_(Low-risk actions Bureau performs directly and safely — versioned draft file writes, and
+SSRF-guarded web fetches — while everything credentialed or high-reach goes through Latch as above.)_
 
 ## Features
 
