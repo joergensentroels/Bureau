@@ -53,21 +53,24 @@ a large purchase without you.
 | 5 | HIGH | `POST /api/run/:id/steer` injects text as trusted "CEO course correction" | **MITIGATED** — now behind auth. Residual (accepted): the *authenticated operator* can still steer, by design; steer text is deliberately high-trust framing, so only the operator should hold the token |
 | 6 | — | Hard floor `requiresCeoAlways` uneditable via API | **Positive control** — unchanged; caps blast radius of 3–5 |
 | 7 | MED | All company data readable + `/mcp` mirrors it | **MITIGATED** — now behind auth |
-| 8 | MED | SSRF guard correct & applied, but DNS-rebinding TOCTOU between `assertPublicHost` check and `fetch` | **DEFERRED** — bounded: `api_call`/`shell` are on the hard floor (human-gated) already. _Fix later: pin the resolved IP for the actual connection._ |
+| 8 | MED | SSRF guard correct & applied, but DNS-rebinding TOCTOU between the check and `fetch` | **FIXED for `web_research`** (`dd8c7c1`) — `fetchUrl` uses core http/https with a `pinnedLookup`: one resolution validates AND supplies the connect IP (no rebinding window); IP literals validated directly. `api_call` still uses `assertPublicHost`+`fetch` — accepted, since it's hard-floored (human-approved); pin it too as a follow-up. |
 | 9 | LOW | `ask_peer` well-contained (persona-only, local, no actions, no recursion); SOP runs don't bypass the approval gate | **Accepted** — no action needed |
+| 10 | LOW | Clickjacking: with the token now in the browser, a page could frame Bureau and trick authed clicks | **FIXED** (`dd8c7c1`) — `X-Frame-Options: DENY` + CSP `frame-ancestors 'none'` (plus `nosniff`, `no-referrer`) on every response |
 
 ## Remaining hardening (backlog, none critical)
 
-- **DNS-rebinding TOCTOU** (Finding 8): resolve the host once and connect to that pinned IP.
-- **Bind-guard**: refuse to start bound to a non-loopback interface unless a token is explicitly set
-  (defense-in-depth against a future `HOST=0.0.0.0` misconfiguration).
+- **`api_call` DNS-rebinding pin**: route `apiCall` through the same `pinnedRequest`/`pinnedLookup` as
+  `fetchUrl` (Finding 8 is fixed for `web_research`; `api_call` is human-gated so lower priority).
 - **Role separation**: Bureau uses a single operator token. Latch has operator/agent/draft/user roles;
   Bureau could add a read-only token and an operator-only class for config-mutation + steer.
 - **Server-side spend ceiling / rate limits**: Latch enforces credit reservation (402) and email
-  rate limits (429). Bureau relies on the per-run action cap + the auto-approve ceiling + the hard
-  floor; consider a server-side per-run/day spend cap for paid-model budget.
+  rate limits (429). Bureau relies on per-agent `budgetUsd` + the per-run action cap + the auto-approve
+  ceiling + the hard floor; consider a server-side per-run/day paid-budget cap.
 - **`?token=` in the SSE URL** can appear in local server logs. Acceptable for a localhost operator
   token; revisit if Bureau ever moves off loopback.
+
+_Done in `dd8c7c1`: DNS-rebinding pin for `web_research`, anti-clickjacking + nosniff headers, and the
+off-loopback bind-guard (`BUREAU_HOST`, warns on non-loopback)._
 
 ## Operating guidance
 
