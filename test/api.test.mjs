@@ -149,6 +149,9 @@ const ok = (c, m) => (c ? pass : fail).push(m);
     ok((await api("GET", "/api/sops")).j.sops.length === 1, "sop: listed");
     ok((await api("DELETE", "/api/sops/" + sop.j.id)).status === 200, "sop: deleted");
 
+    // ---- shared memory search endpoint (empty on a fresh ws, but well-formed + authed) ----
+    { const r = await api("GET", "/api/memory?q=quarterly%20plan"); ok(r.status === 200 && r.j.query === "quarterly plan" && Array.isArray(r.j.results), "memory: /api/memory?q= returns {query, results[]}"); }
+
     // ---- steering endpoint: routing + auth (no run needed) ----
     ok((await api("POST", "/api/run/nope_run/steer", { action: "pause" })).status === 404, "steer: unknown run → 404 (routed + authed)");
 

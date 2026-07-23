@@ -1,0 +1,25 @@
+name: tests
+
+# Authoritative test gate: runs on every push to main and every PR. Unlike the local pre-push hook,
+# this can't be bypassed with --no-verify. Runs the pure + server suites via run-all --serve (which
+# self-hosts a throwaway Bureau and generates its own token — no Latch, no secrets needed). The live
+# --e2e suite is intentionally NOT run here: it needs Latch + a local LLM.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"   # node:sqlite (DatabaseSync) + node --test
+      - name: Run tests (pure + server, self-hosted)
+        run: node test/run-all.mjs --serve
+        env:
+          OPERATOR_TOKEN: ci-operator-token   # shared by the self-hosted server + the test clients
+      - name: Coverage audit (soft — reports untested exports/routes, never fails the build)
+        run: node test/coverage-audit.mjs || true

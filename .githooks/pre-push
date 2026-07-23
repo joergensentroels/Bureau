@@ -1,0 +1,13 @@
+#!/bin/sh
+# Bureau pre-push gate — runs the full offline test suite (pure + server, self-hosted) before every
+# push and blocks it on any failure. This is what stops a change (e.g. the auth gate that 401'd the
+# whole server suite) from being pushed untested.
+#
+# Enabled via:  git config core.hooksPath .githooks   (run once; already set in this clone)
+# Emergency bypass (use sparingly):  git push --no-verify
+echo "pre-push: node test/run-all.mjs --serve"
+node test/run-all.mjs --serve || {
+  echo ""
+  echo "✗ pre-push blocked: tests failed. Fix them, or bypass with 'git push --no-verify' (not recommended)."
+  exit 1
+}
