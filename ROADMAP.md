@@ -10,8 +10,26 @@ _Forward-looking only — the detail of what's shipped lives in the code, the te
 
 ## Next
 
-Nothing is in active development. The remaining backlog, roughly by value:
+**In flight — Parallel execution.** Stage 1 shipped (2026-07-23, commit `6dbe3a9`): opt-in
+`run.parallel` / **⚡ parallel reports** toggle runs a manager's sibling reports concurrently through
+a bounded semaphore (`ORCH_MAX_PARALLEL`, default 3), with no cross-sibling handoff — the manager's
+synthesis step integrates their work. Sequential stays the default. **Outstanding:**
+  - **Live A/B not yet run** — sequential-vs-parallel wall-clock delta + output parity needs a server
+    restart + real delegation runs. Only unit-level verification is done so far.
+  - **Stage 2 — dependency-aware decompose** — let the manager emit `dependsOn` per task and run
+    independent tasks concurrently / dependent ones in topological levels. Gated on data: measure with
+    the eval harness whether adding the field regresses decompose reliability (already the flakiest
+    JSON call) before committing to it.
 
+The remaining backlog, roughly by value (competitive-gap analysis, 2026-07-22):
+
+- **Mid-run human steering** — pause a live run, inject a note/correction, or redirect an agent, then
+  resume. UX-facing, demo-friendly; needs a control channel into the run loop + UI wiring.
+- **Agent-to-agent comms** — let agents message each other directly (peer review, hand-offs) instead
+  of only up/down the manager hierarchy. Interacts with the guardrail/policy engine.
+- **Semantic / shared memory** — vector or shared cross-run memory beyond today's keyword RAG.
+- **MCP / A2A interop** — expose Bureau as an MCP server and/or consume external MCP tools.
+- **SOP / process templates** — reusable multi-step process definitions agents follow for recurring work.
 - **Outbound integrations** — ◐ partial. **GitHub publish is done** (`github_file` / `github_repo`
   actions → Latch's native GitHub connector; Latch holds the token and commits on approval, Bureau
   stores nothing) with a **per-workspace target repo/owner** (setup: `GITHUB.md`). Still open only:
@@ -51,6 +69,16 @@ assertions + a live `--e2e`; see `test/README.md`).
 - **Paid-model routing** — funded agents route to a paid provider (Moonshot/Kimi) with per-agent
   model tiers (Standard K2.6 / Coder K2.7 / Heavy K3); cost booked against the model that served the
   call, capped by each agent's `budgetUsd`. Unfunded agents stay on the free local model. _Verified working._
+- **Paid reliability for JSON-critical calls** — decompose / deriveCriteria / verifyRun route to the
+  cheapest paid tier when the run's principal is funded (the weak local model is worst exactly at
+  strict JSON). Off for hush runs; falls back to local when unfunded/unavailable.
+- **Eval / regression harness** (`eval/run-eval.mjs`) — offline, no-side-effects harness that replays
+  golden cases through the three JSON-critical calls against local qwen3 and (opt-in) paid Kimi, and
+  reports single-shot / effective / schema-valid / fan-out / verdict rates + latency + cost. Committed
+  `baseline.json` + a `--baseline` regression gate. Turns "qwen3 is flaky at JSON" into a measured,
+  gateable number.
+- **Parallel execution (Stage 1)** — opt-in concurrent sibling delegation (see **Next** for what's
+  outstanding).
 
 ---
 
