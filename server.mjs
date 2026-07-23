@@ -13,6 +13,9 @@
 import { readFile, writeFile, mkdir, readdir, stat, rm, rename } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { createServer } from "node:http";
+import http from "node:http";
+import https from "node:https";
+import net from "node:net";
 import dns from "node:dns/promises";
 import path from "node:path";
 import os from "node:os";
@@ -789,6 +792,53 @@ async function assertPublicHost(hostname) {
   if (!addrs.length) throw new Error("no DNS records");
   for (const a of addrs) if (ipBlocked(a.address)) throw new Error("refused: resolves to a private/internal address");
 }
+// DNS-pinned lookup for outbound fetches: resolve once, refuse any private/internal address, and hand
+// the SAME validated IP to the socket. Because validation and connection share one resolution, there
+// is no second, independent DNS lookup for a hostile resolver to rebind to an internal address between
+// the check and the connect (closes the SSRF TOCTOU). Node-callback shape for http/https `lookup`.
+function pinnedLookup(hostname, options, cb) {
+  if (typeof options === "function") { cb = options; options = {}; }
+  const wantAll = !!(options && options.all);   // net/http may request the array form; honor both shapes
+  dns.lookup(hostname, { all: true })
+    .then((addrs) => {
+      const good = (addrs || []).filter((a) => !ipBlocked(a.address));
+      if (!good.length) return cb(new Error("refused: resolves to a private/internal address"));
+      if (wantAll) return cb(null, good.map((a) => ({ address: a.address, family: a.family })));
+      cb(null, good[0].address, good[0].family);
+    })
+    .catch(() => cb(new Error("DNS resolution failed")));
+}
+// One request over the DNS-pinned lookup: no auto-redirect (caller validates each hop by re-issuing),
+// hard timeout, and a response-size cap enforced while streaming. Returns a minimal fetch-like result.
+function pinnedRequest(urlObj, { method = "GET", headers = {}, timeoutMs = 12000, capBytes = 512 * 1024, body } = {}) {
+  const isHttps = urlObj.protocol === "https:";
+  const lib = isHttps ? https : http;
+  // Node skips `lookup` entirely when the host is already an IP literal — so validate literals HERE,
+  // otherwise a private literal (127.0.0.1, 192.168.x, 100.64.x…) would connect unchecked.
+  const litFamily = net.isIP(urlObj.hostname);
+  if (litFamily && ipBlocked(urlObj.hostname)) return Promise.reject(new Error("refused: resolves to a private/internal address"));
+  // Build EXPLICIT options (passing a URL object + options together makes Node drop the hostname).
+  const options = {
+    protocol: urlObj.protocol, hostname: urlObj.hostname,
+    port: urlObj.port || (isHttps ? 443 : 80),
+    path: (urlObj.pathname || "/") + (urlObj.search || ""),
+    method, headers,
+    lookup: litFamily ? undefined : pinnedLookup,   // hostnames go through the validating pinned lookup
+  };
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const req = lib.request(options, (res) => {
+      const chunks = []; let received = 0;
+      res.on("data", (c) => { received += c.length; if (received <= capBytes) chunks.push(c); else { try { res.destroy(); } catch {} } });
+      res.on("end", () => { if (!done) { done = true; resolve({ status: res.statusCode || 0, headers: res.headers || {}, body: Buffer.concat(chunks) }); } });
+      res.on("error", (e) => { if (!done) { done = true; reject(e); } });
+    });
+    req.setTimeout(timeoutMs, () => req.destroy(new Error("timeout")));
+    req.on("error", (e) => { if (!done) { done = true; reject(e); } });
+    if (body) req.write(body);
+    req.end();
+  });
+}
 export function htmlToText(html) {
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ")
@@ -802,30 +852,22 @@ export async function fetchUrl(raw) {
   try { current = new URL(raw); } catch { return { ok: false, error: "not a valid URL" }; }
   if (current.protocol !== "http:" && current.protocol !== "https:") return { ok: false, error: "only http(s) URLs are allowed" };
   for (let hops = 0; hops <= 4; hops++) {
-    try { await assertPublicHost(current.hostname); } catch (e) { return { ok: false, error: e.message, url: current.href }; }
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 12000);
+    // The pinned lookup inside pinnedRequest validates AND connects to the same IP, so the private-
+    // address refusal happens per hop with no separate assertPublicHost/DNS round (no rebinding gap).
     let res;
     try {
-      res = await fetch(current.href, { redirect: "manual", signal: ctrl.signal,
-        headers: { "user-agent": "Bureau-agent/1.0 (+local)", "accept": "text/html,text/plain,application/json,application/xml;q=0.8,*/*;q=0.3" } });
-    } catch (e) { clearTimeout(timer); return { ok: false, error: "fetch failed: " + e.message, url: current.href }; }
-    clearTimeout(timer);
-    if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
+      res = await pinnedRequest(current, { headers: { "user-agent": "Bureau-agent/1.0 (+local)", "accept": "text/html,text/plain,application/json,application/xml;q=0.8,*/*;q=0.3" } });
+    } catch (e) { return { ok: false, error: "fetch failed: " + e.message, url: current.href }; }
+    if (res.status >= 300 && res.status < 400 && res.headers["location"]) {
       let nxt;
-      try { nxt = new URL(res.headers.get("location"), current); } catch { return { ok: false, error: "bad redirect target" }; }
+      try { nxt = new URL(res.headers["location"], current); } catch { return { ok: false, error: "bad redirect target" }; }
       if (nxt.protocol !== "http:" && nxt.protocol !== "https:") return { ok: false, error: "redirect to non-http(s)" };
       current = nxt; continue;
     }
-    if (!res.ok) return { ok: false, error: `HTTP ${res.status}`, url: current.href };
-    const ct = (res.headers.get("content-type") || "").toLowerCase();
+    if (!(res.status >= 200 && res.status < 300)) return { ok: false, error: `HTTP ${res.status}`, url: current.href };
+    const ct = String(res.headers["content-type"] || "").toLowerCase();
     if (!/text\/html|text\/plain|application\/(json|xml)|\+xml|\/xml/.test(ct)) return { ok: false, error: "unsupported content-type: " + (ct || "unknown"), url: current.href };
-    let text = "";
-    if (res.body) {
-      const reader = res.body.getReader(); const CAP = 512 * 1024; let received = 0; const chunks = [];
-      while (true) { const { done, value } = await reader.read(); if (done) break; received += value.length; chunks.push(Buffer.from(value)); if (received > CAP) { try { await reader.cancel(); } catch {} break; } }
-      text = Buffer.concat(chunks).toString("utf8");
-    }
+    let text = res.body.toString("utf8");
     if (/html/.test(ct)) text = htmlToText(text);
     text = text.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim().slice(0, 6000);
     return { ok: true, url: current.href, status: res.status, text };
@@ -2161,8 +2203,18 @@ async function tickSchedulesForCurrentWs() {
 
 // ---------- http -------------------------------------------------------------
 
+// Defense-in-depth headers on every response: never sniff content types; leak no referrer; and —
+// now that the operator token lives in the browser — forbid framing so a malicious page can't frame
+// Bureau and clickjack authenticated actions. frame-ancestors 'none' is the modern equivalent of
+// X-Frame-Options: DENY (both sent); a frame-ancestors-only CSP doesn't constrain the inline UI.
+const SECURITY_HEADERS = {
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "no-referrer",
+  "x-frame-options": "DENY",
+  "content-security-policy": "frame-ancestors 'none'",
+};
 function send(res, status, body, type = "application/json") {
-  res.writeHead(status, { "content-type": type, "cache-control": "no-store" });
+  res.writeHead(status, { "content-type": type, "cache-control": "no-store", ...SECURITY_HEADERS });
   res.end(typeof body === "string" ? body : JSON.stringify(body));
 }
 const STATIC_MIME = {
@@ -2172,7 +2224,7 @@ const STATIC_MIME = {
   ".html": "text/html; charset=utf-8", ".woff2": "font/woff2",
 };
 function sendRaw(res, status, buf, type) {
-  res.writeHead(status, { "content-type": type, "cache-control": "public, max-age=31536000, immutable" });
+  res.writeHead(status, { "content-type": type, "cache-control": "public, max-age=31536000, immutable", ...SECURITY_HEADERS });
   res.end(buf);
 }
 const MAX_BODY = 4 * 1024 * 1024;   // 4 MB cap — a run objective/document is KBs; anything larger is abuse
@@ -3193,7 +3245,14 @@ if (isMain) {
     .then(() => { loadWorkspaces(); return loadToken(); })
     .then((t) => {
       TOKEN = t;
-      server.listen(PORT, "127.0.0.1", () => console.log(`Bureau on http://127.0.0.1:${PORT} (${WORKSPACES.length} workspace${WORKSPACES.length === 1 ? "" : "s"}, SQLite) — API + /mcp require the operator token (Authorization: Bearer <token>)`));
+      const HOST = (process.env.BUREAU_HOST || "127.0.0.1").trim();
+      const loopback = HOST === "127.0.0.1" || HOST === "::1" || HOST === "localhost";
+      if (!loopback) {
+        console.warn(`\n⚠  SECURITY: Bureau is binding a NON-loopback interface (${HOST}). The API is token-gated, but`);
+        console.warn(`   this exposes the control plane on the network — only do this on a trusted private overlay`);
+        console.warn(`   (e.g. Tailscale), never a public interface. Unset BUREAU_HOST to bind loopback only.\n`);
+      }
+      server.listen(PORT, HOST, () => console.log(`Bureau on http://${HOST}:${PORT} (${WORKSPACES.length} workspace${WORKSPACES.length === 1 ? "" : "s"}, SQLite) — API + /mcp require the operator token (Authorization: Bearer <token>)`));
       setInterval(() => { tickSchedules().catch((e) => console.error("scheduler tick:", e.message)); }, 60000); // check due schedules every minute
     })
     .catch((e) => { console.error("Could not load Latch operator token:", e.message); process.exit(1); });
