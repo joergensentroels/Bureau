@@ -1441,6 +1441,8 @@ function workPanel(){
           <input id="dryrun" type="checkbox" style="width:auto"> dry run</label>
         <label class="row" style="text-transform:none;letter-spacing:0;color:var(--ink-2);gap:8px;margin:18px 0 0;cursor:pointer" title="Hush: keep this task entirely on the local model — no agent may use the paid/external LLM, whatever its budget. For sensitive work.">
           <input id="hush" type="checkbox" style="width:auto"> 🤫 hush (local only)</label>
+        <label class="row" id="parallelWrap" style="text-transform:none;letter-spacing:0;color:var(--ink-2);gap:8px;margin:18px 0 0;cursor:pointer" title="Company mode: run a manager's direct reports concurrently instead of one after another. No cross-report handoff — the manager integrates their work at the end. Best for independent fan-out; biggest speed-up on paid runs.">
+          <input id="parallel" type="checkbox" style="width:auto"> ⚡ parallel reports</label>
       </div>
       <div class="row" style="justify-content:space-between">
         <span class="dim" id="runhint">Actions you don't auto-approve appear in Latch for you to decide.</span>
@@ -1477,8 +1479,8 @@ async function launchRun(body){
 async function startRun(){
   const agentId=$("#who").value, objective=$("#obj").value.trim();
   if(!objective){$("#obj").focus();return;}
-  const maxTurns=Number($("#turns").value)||6, autoApprove=$("#auto").checked, dryRun=$("#dryrun").checked, hush=$("#hush").checked;
-  launchRun(agentId==="__company__" ? {mode:"company",objective,maxTurns,autoApprove,dryRun,hush} : {agentId,objective,maxTurns,autoApprove,dryRun,hush});
+  const maxTurns=Number($("#turns").value)||6, autoApprove=$("#auto").checked, dryRun=$("#dryrun").checked, hush=$("#hush").checked, parallel=$("#parallel").checked;
+  launchRun(agentId==="__company__" ? {mode:"company",objective,maxTurns,autoApprove,dryRun,hush,parallel} : {agentId,objective,maxTurns,autoApprove,dryRun,hush});
 }
 function resetRun(){ const b=$("#runBtn"); if(b){b.disabled=false;b.textContent="Run";} }
 
