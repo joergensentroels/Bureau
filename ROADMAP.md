@@ -23,8 +23,8 @@ synthesis step integrates their work. Sequential stays the default. **Outstandin
 
 The remaining backlog, roughly by value (competitive-gap analysis, 2026-07-22):
 
-- **Agent-to-agent comms** — let agents message each other directly (peer review, hand-offs) instead
-  of only up/down the manager hierarchy. Interacts with the guardrail/policy engine.
+- **SOP / process templates** — reusable multi-step process definitions agents follow for recurring
+  work (e.g. a standard "publish a blog post" pipeline). Builds on the existing Plan/backlog + templates.
 - **Semantic / shared memory** — vector or shared cross-run memory beyond today's keyword RAG.
 - **MCP / A2A interop** — expose Bureau as an MCP server and/or consume external MCP tools.
 - **SOP / process templates** — reusable multi-step process definitions agents follow for recurring work.
@@ -83,6 +83,13 @@ assertions + a live `--e2e`; see `test/README.md`).
   cursor over an append-only steer list — works for single, company, and parallel runs. _Live pause/steer
   against a running server is an untested-by-us step (needs a restart); code + UI script pass node --check
   and the unit suites. Future refinement: per-agent targeting (v1 broadcasts run-wide)._
+- **Agent-to-agent comms** — the `ask_peer` action lets an agent consult a named teammate mid-task
+  and fold their reply back into its own reasoning. Because agents have no standing loop, it's a
+  synchronous, advisory-only consult (persona-only prompt, one local call — the peer can't take real
+  actions or recurse), run through the FULL gate: allowlist → action cap → policy (`who may talk to
+  whom` as audited rules) → tier/approval → Latch card → audit row. Not an unaudited side channel.
+  _Live exercise is user-side (needs a restart). Future: executable hand-off (peer does real work),
+  not just advice._
 
 ---
 
