@@ -27,7 +27,12 @@ concurrency gain (measured 4.6x, but confounded). **Outstanding:**
 
 The remaining backlog, roughly by value (competitive-gap analysis, 2026-07-22):
 
-- **Semantic / shared memory** — vector or shared cross-run memory beyond today's keyword RAG.
+- **Semantic memory — TRUE vector embeddings** (the "semantic" half; the "shared" half shipped, see
+  below). Blocked on infra: the local model server (llama.cpp-backed, port 11434) does NOT serve
+  embeddings, so this needs a dedicated embedding model pulled (~270MB) or the server relaunched with
+  embeddings enabled. Once available: embed memory/deliverables, store vectors in SQLite, cosine
+  similarity in JS — dropping in behind the existing `rankByRelevance` interface. BM25 recall is the
+  stand-in until then.
 - **MCP / A2A interop** — expose Bureau as an MCP server and/or consume external MCP tools.
 - **SOP / process templates** — reusable multi-step process definitions agents follow for recurring work.
 - **Outbound integrations** — ◐ partial. **GitHub publish is done** (`github_file` / `github_repo`
@@ -99,6 +104,12 @@ assertions + a live `--e2e`; see `test/README.md`).
   CRUD + a "Processes" UI section with a per-step editor. _Live-verified 2026-07-23: a 3-step SOP ran
   Zoe → Morgan → Jordan in exact order, decompose skipped (zero fallback events), DoD passed. Future:
   per-step acceptance criteria; scheduling an SOP._
+- **Shared company memory** — every agent now recalls the most RELEVANT prior work from ACROSS the
+  team (not just its own last 5 by recency), injected into its prompt so knowledge compounds org-wide.
+  Relevance is a pure-JS BM25 ranker (`rankByRelevance`) over the pooled memory corpus — no deps, no
+  embedding infra; a vector store can later slot in behind the same interface (see **Next**). Exposed
+  at `GET /api/memory?q=`. _Live-verified 2026-07-23: cross-agent recall returned ranked, relevant
+  entries; unrelated memories excluded. Units 133 → 147._
 
 ---
 
