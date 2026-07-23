@@ -1,0 +1,45 @@
+{
+  "_note": "Golden cases for the offline orchestration-reliability eval. Hand-authored, versioned. Keep the set small and high-signal — a full --paid sweep should cost only cents. See eval/README.md.",
+
+  "criteria": [
+    { "id": "crit-onboarding", "objective": "Write a one-page onboarding guide for new engineers covering environment setup, the code review process, and who to ask for help." },
+    { "id": "crit-compare", "objective": "Produce a competitive analysis comparing three project-management SaaS tools on price, integrations, and mobile support." },
+    { "id": "crit-cities-csv", "objective": "Create a CSV of the top 10 US cities by population with columns city, state, population." },
+    { "id": "crit-fuzzy-morale", "objective": "Improve team morale." }
+  ],
+
+  "decompose": [
+    { "id": "dec-postgres", "objective": "Research the top 3 managed Postgres providers and produce a recommendation memo.",
+      "reports": [ { "name": "Ada", "role": "Engineer", "traits": ["backend", "databases"] }, { "name": "Rob", "role": "Researcher" }, { "name": "Mia", "role": "Technical Writer" } ] },
+    { "id": "dec-weather-api", "objective": "Build and document a REST endpoint that returns the current weather for a given city.",
+      "reports": [ { "name": "Ada", "role": "Engineer", "traits": ["backend", "APIs"] }, { "name": "Rob", "role": "Researcher" }, { "name": "Mia", "role": "Technical Writer" } ] },
+    { "id": "dec-launch-post", "objective": "Plan and write the launch announcement blog post for our new mobile app.",
+      "reports": [ { "name": "Mia", "role": "Writer" }, { "name": "Leo", "role": "Designer" }, { "name": "Sam", "role": "Marketer" } ] },
+    { "id": "dec-atomic-bug", "objective": "Fix the off-by-one error in the pagination helper and add a regression test.",
+      "reports": [ { "name": "Ada", "role": "Engineer" }, { "name": "Nio", "role": "QA" } ] }
+  ],
+
+  "verify": [
+    { "id": "ver-faq", "objective": "Write a product FAQ with at least 5 questions and a support contact email.",
+      "criteria": [
+        { "text": "Contains at least 5 distinct questions", "expectedMet": true },
+        { "text": "Includes a support contact email address", "expectedMet": false }
+      ],
+      "evidence": "# Product FAQ\n\n**Q: What is Acme?** A cloud file store.\n**Q: How much does it cost?** Plans start at $9/mo.\n**Q: Is my data encrypted?** Yes, at rest and in transit.\n**Q: Can I share files?** Yes, via signed links.\n**Q: How do I cancel?** From Settings > Billing.\n" },
+
+    { "id": "ver-cities-csv", "objective": "Create a CSV of 3 cities with columns city, state, population.",
+      "criteria": [
+        { "text": "Has a header row naming city, state, and population", "expectedMet": true },
+        { "text": "Contains exactly 3 data rows", "expectedMet": true },
+        { "text": "All population values are numeric", "expectedMet": false }
+      ],
+      "evidence": "city,state,population\nNew York,NY,8804190\nLos Angeles,CA,3898747\nChicago,IL,many\n" },
+
+    { "id": "ver-pricing", "objective": "Draft a pricing section with three tiers, each showing a monthly price.",
+      "criteria": [
+        { "text": "Describes at least 3 pricing tiers", "expectedMet": true },
+        { "text": "Each tier lists a monthly price", "expectedMet": true }
+      ],
+      "evidence": "## Pricing\n\n**Starter** — $9/mo. 5 seats, 10 GB.\n**Team** — $29/mo. 20 seats, 100 GB.\n**Business** — $99/mo. Unlimited seats, 1 TB.\n" }
+  ]
+}

@@ -352,6 +352,11 @@ async function loadToken() {
   return parsed.operatorToken;
 }
 
+// Load the operator token WITHOUT starting the server. The server bootstrap (isMain block) sets
+// TOKEN itself; this exported init lets an out-of-process consumer (the offline eval harness in
+// eval/run-eval.mjs) authenticate to Latch and exercise the real askLlm path. No-op side effects.
+export async function initLatchAuth() { TOKEN = await loadToken(); return TOKEN; }
+
 async function latch(method, route, body) {
   // Tag every approval this Bureau files with its workspace, so each company's Inbox only sees its own.
   if (method === "POST" && route === "/api/approvals" && body) {
@@ -385,7 +390,7 @@ async function latchHealth() {
   } catch (e) { return { ok: false, latchUrl: LATCH_URL, pending: 0, reason: e.message }; }
 }
 
-async function askLlm(messages, opts = {}) {
+export async function askLlm(messages, opts = {}) {
   // Default 0.3 for creative/agent work; callers wanting stable structured output pass a lower
   // temperature (the gate/JSON calls use near-0 via askJsonReliable). ?? so an explicit 0 is honored.
   const { json } = await latch("POST", "/api/llm/chat", {
@@ -1278,7 +1283,7 @@ export function expectsDeliverable(objective) {
 
 // Is a PAID provider actually configured in Latch right now? Checked once per run so funded agents
 // only route to the paid API when it exists (otherwise they stay local — see runAgentTask.canUsePaid).
-async function paidProviderAvailable() {
+export async function paidProviderAvailable() {
   try { const h = await latchHealth(); return !!(h.ok && h.paid); } catch { return false; }
 }
 
@@ -1328,15 +1333,12 @@ export function resolveReport(reports, assignee, used) {
   return null;
 }
 
-// Recursive, hierarchy-following delegation. A manager decomposes its objective among its
-// DIRECT REPORTS; a report who has reports of their own becomes a sub-manager and delegates
-// further; a report with no reports does the work. Returns { product, tokens }.
-async function delegate(run, org, managerName, managerId, reports, objective, priorWork, depth, tally) {
-  let tokens = 0;
+// The manager's decompose prompt: split the objective among DIRECT REPORTS as STRICT JSON.
+export function buildDecomposeMsgs(managerName, reports, objective) {
   const wantsDoc = expectsDeliverable(objective);
   const roster = reports.map((a) => `- ${a.name} (${a.role})${a.traits?.length ? " — " + a.traits.join(", ") : ""}`).join("\n");
   const exampleNames = reports.slice(0, 2).map((a) => a.name);
-  const decomposeMsgs = [
+  return [
     { role: "system", content: [
       `You are ${managerName}, a manager with a TEAM. Break the objective into concrete, non-overlapping sub-tasks`,
       "and assign each to the single best-suited person among your DIRECT REPORTS. Respond STRICT JSON only:",
@@ -1354,6 +1356,13 @@ async function delegate(run, org, managerName, managerId, reports, objective, pr
     ].filter(Boolean).join("\n") },
     { role: "user", content: `Objective: ${objective}\n\nYour direct reports:\n${roster}\n\n/no_think` },
   ];
+}
+// Recursive, hierarchy-following delegation. A manager decomposes its objective among its
+// DIRECT REPORTS; a report who has reports of their own becomes a sub-manager and delegates
+// further; a report with no reports does the work. Returns { product, tokens }.
+async function delegate(run, org, managerName, managerId, reports, objective, priorWork, depth, tally) {
+  let tokens = 0;
+  const decomposeMsgs = buildDecomposeMsgs(managerName, reports, objective);
   let plan = null;
   try { const j = await askJsonReliable(decomposeMsgs, [900, 3200], { run }); tokens += j.tokens; addTally(tally, managerId, j.tokens); plan = j.obj; }
   catch (e) { emit(run, "report", { manager: managerName, depth, text: "Planning failed: " + e.message }); return { product: "planning failed", tokens, body: "" }; }
@@ -1484,8 +1493,11 @@ async function askJsonReliable(msgs, budgets = [1200, 3200], opts = {}) {
   return { obj: null, raw: lastRaw, tokens };
 }
 
-async function deriveCriteria(objective, run) {
-  const msgs = [
+// Prompt builders for the three JSON-critical orchestration calls are exported as pure functions so
+// the offline eval harness (eval/run-eval.mjs) measures the EXACT production prompts, not a copy that
+// can drift. The server calls them here; the harness imports them.
+export function buildCriteriaMsgs(objective) {
+  return [
     { role: "system", content: [
       "You are a meticulous QA lead. Turn the objective into a checklist of concrete, TESTABLE acceptance criteria that define 'done'.",
       "Each item must be objectively checkable by inspecting the produced work — specific ('includes a pricing section with at least 3 tiers'), never vague ('is high quality').",
@@ -1494,6 +1506,9 @@ async function deriveCriteria(objective, run) {
     ].join("\n") },
     { role: "user", content: `Objective: ${objective}\n\n/no_think` },
   ];
+}
+async function deriveCriteria(objective, run) {
+  const msgs = buildCriteriaMsgs(objective);
   const { obj, raw, tokens } = await askJsonReliable(msgs, [1200, 3200], { run });
   let list = (Array.isArray(obj?.criteria) ? obj.criteria : []).map((s) => String(s || "").slice(0, 240)).filter(Boolean).slice(0, 6);
   if (!list.length) {   // salvage: pull complete quoted strings even from a truncated array
@@ -1511,6 +1526,39 @@ async function readProducedFiles(files) {
   return out.join("\n\n");
 }
 
+// Shape validators mirroring what the orchestrator actually ACCEPTS from each JSON-critical call —
+// exported so the eval harness scores against the same bar the server uses, not a parallel guess.
+// (parse-ok = safeParse returned an object; schema-ok = that object passes the matching validator.)
+export function validateCriteria(obj) {
+  const items = (Array.isArray(obj?.criteria) ? obj.criteria : []).map((s) => String(s || "").trim()).filter(Boolean);
+  return { ok: items.length >= 3 && items.length <= 6, count: items.length, items };
+}
+export function validateVerify(obj, nCriteria) {
+  const results = Array.isArray(obj?.results) ? obj.results : [];
+  const shaped = results.length > 0 && results.every((r) => r && ("met" in r) && /^(true|false|yes|no|met|unmet)$/i.test(String(r.met)));
+  return {
+    ok: results.length === nCriteria && shaped, count: results.length,
+    verdicts: results.map((r) => r?.met === true || /^(true|yes|met)$/i.test(String(r?.met))),
+  };
+}
+export function validateDecompose(obj, reports) {
+  const used = new Set();
+  const tasks = (Array.isArray(obj?.tasks) ? obj.tasks : [])
+    .map((t) => ({ agent: resolveReport(reports, t?.assignee, used), task: String(t?.task || "").trim() }))
+    .filter((t) => t.agent && t.task).slice(0, 4);
+  return { ok: tasks.length >= 1, count: tasks.length, fannedOut: tasks.length >= 2, assignees: tasks.map((t) => t.agent.name) };
+}
+export function buildVerifyMsgs(objective, criteria, evidence) {
+  return [
+    { role: "system", content: [
+      "You are an independent QA verifier. You did NOT do the work. Judge STRICTLY whether the produced work satisfies each acceptance criterion.",
+      "Mark met=true ONLY when there is concrete evidence in the work that the criterion is satisfied. If evidence is missing or unclear, met=false with a one-line reason.",
+      "Keep each note to a short phrase (under 15 words).",
+      "Respond STRICT JSON only: { \"results\": [ { \"met\": true|false, \"note\": \"...\" } ] } — exactly one entry per criterion, IN ORDER. No commentary.",
+    ].join("\n") },
+    { role: "user", content: `Objective: ${objective}\n\nAcceptance criteria (in order):\n${criteria.map((c, i) => `${i + 1}. ${c.text}`).join("\n")}\n\nProduced work:\n${evidence || "(no work was produced)"}\n\n/no_think` },
+  ];
+}
 // Independent QA: the verifier did NOT do the work; it checks the real artifacts against each criterion.
 async function verifyRun(objective, product, files, criteria, run) {
   if (!criteria.length) return { items: criteria, tokens: 0 };
@@ -1520,15 +1568,7 @@ async function verifyRun(objective, product, files, criteria, run) {
     product.body ? `WORK:\n${String(product.body).slice(0, 4000)}` : "",
     fileText ? `SAVED DELIVERABLES:\n${fileText}` : "",
   ].filter(Boolean).join("\n\n").slice(0, 12000);
-  const msgs = [
-    { role: "system", content: [
-      "You are an independent QA verifier. You did NOT do the work. Judge STRICTLY whether the produced work satisfies each acceptance criterion.",
-      "Mark met=true ONLY when there is concrete evidence in the work that the criterion is satisfied. If evidence is missing or unclear, met=false with a one-line reason.",
-      "Keep each note to a short phrase (under 15 words).",
-      "Respond STRICT JSON only: { \"results\": [ { \"met\": true|false, \"note\": \"...\" } ] } — exactly one entry per criterion, IN ORDER. No commentary.",
-    ].join("\n") },
-    { role: "user", content: `Objective: ${objective}\n\nAcceptance criteria (in order):\n${criteria.map((c, i) => `${i + 1}. ${c.text}`).join("\n")}\n\nProduced work:\n${evidence || "(no work was produced)"}\n\n/no_think` },
-  ];
+  const msgs = buildVerifyMsgs(objective, criteria, evidence);
   const { obj, tokens } = await askJsonReliable(msgs, [1500, 3600], { run });
   const results = Array.isArray(obj?.results) ? obj.results : [];
   const items = criteria.map((c, i) => {

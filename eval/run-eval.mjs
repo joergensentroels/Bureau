@@ -1,0 +1,214 @@
+#!/usr/bin/env node
+// Bureau — offline eval / regression harness for the JSON-critical orchestration calls.
+//
+// Measures how reliably the three calls the weak local model is worst at — deriveCriteria,
+// verifyRun, and delegate's decompose — produce PARSEABLE, SCHEMA-VALID output, and (with --paid)
+// how much the cheap paid Kimi tier improves that over local qwen3. This turns "qwen3 is flaky at
+// JSON" from a war story into a number you can watch and regression-gate.
+//
+// It has NO side effects on a running Bureau: it imports the REAL prompt builders + safeParse +
+// validators + askLlm from server.mjs (which is import-safe — its bootstrap is guarded behind isMain)
+// and talks to Latch directly. It never starts the server, opens the DB, writes drafts, or files
+// approvals. So what's measured is the exact production prompt + production parser.
+//
+// Usage:
+//   node eval/run-eval.mjs                  # local only (free), all call-types, 5 reps
+//   node eval/run-eval.mjs --paid           # ALSO run the cheap paid Kimi tier (spends real cents)
+//   node eval/run-eval.mjs --reps=8         # repetitions per case (flakiness is a rate, not a bool)
+//   node eval/run-eval.mjs --type=decompose # just one call-type (criteria|verify|decompose)
+//   node eval/run-eval.mjs --save-baseline  # write the LOCAL aggregates to eval/baseline.json
+//   node eval/run-eval.mjs --baseline       # compare LOCAL run to the baseline; exit 1 on regression
+//
+// No dependencies. Node built-ins only.
+
+import { readFile, writeFile, mkdir } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  initLatchAuth, askLlm, safeParse, paidProviderAvailable,
+  buildCriteriaMsgs, buildVerifyMsgs, buildDecomposeMsgs,
+  validateCriteria, validateVerify, validateDecompose,
+} from "../server.mjs";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const REPORTS_DIR = path.join(HERE, "reports");
+const BASELINE_FILE = path.join(HERE, "baseline.json");
+
+// The escalation ladders below MIRROR the production askJsonReliable budgets for each call. The gate
+// runs at temperature 0 (GATE_TEMPERATURE); the paid tier is kimi-k2.6 at $0.002/1K (ORCH_TIER).
+const LADDERS = { criteria: [1200, 3200], verify: [1500, 3600], decompose: [900, 3200] };
+const ORCH_MODEL = "kimi-k2.6";
+const ORCH_PRICE_PER_1K = 0.002;
+const estTokens = (msgs) => Math.ceil(msgs.reduce((n, m) => n + String(m.content || "").length, 0) / 4);
+
+// ---- args ----
+const argv = process.argv.slice(2);
+const flag = (name) => argv.includes(`--${name}`);
+const opt = (name, dflt) => { const m = argv.find((a) => a.startsWith(`--${name}=`)); return m ? m.split("=")[1] : dflt; };
+const REPS = Math.max(1, Number(opt("reps", 5)) || 5);
+const ONLY_TYPE = opt("type", "");
+const WANT_PAID = flag("paid");
+const SAVE_BASELINE = flag("save-baseline");
+const CHECK_BASELINE = flag("baseline");
+const TOL = Number(opt("tol", 0.15)) || 0.15;   // regression tolerance (absolute rate drop) for --baseline
+
+const pct = (x) => `${(x * 100).toFixed(0)}%`;
+const mean = (xs) => xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0;
+const quantile = (xs, q) => { if (!xs.length) return 0; const s = [...xs].sort((a, b) => a - b); const i = Math.min(s.length - 1, Math.floor(q * s.length)); return s[i]; };
+
+// Run one case once through the escalation ladder, controlling routing. Stops at the first parse
+// success, exactly like production askJsonReliable. Returns per-run telemetry.
+async function runLadder(msgs, budgets, mode) {
+  const t0 = performance.now();
+  let rungs = 0, obj = null, raw = "", tokens = 0, paid = false, usd = 0;
+  for (const maxTokens of budgets) {
+    rungs++;
+    const meta = {};
+    let text = "";
+    try {
+      text = await askLlm(msgs, { maxTokens, temperature: 0, meta, ...(mode === "paid" ? { routingPreference: "external", model: ORCH_MODEL } : {}) });
+    } catch { break; }   // provider/network error — matches production (break the ladder)
+    tokens += estTokens(msgs) + Math.ceil(text.length / 4);
+    if (meta.paid) { paid = true; const t = meta.usage?.total_tokens || (estTokens(msgs) + Math.ceil(text.length / 4)); usd += (t / 1000) * ORCH_PRICE_PER_1K; }
+    if (text) raw = text;
+    const parsed = safeParse(text);
+    if (parsed) { obj = parsed; break; }
+  }
+  const ms = performance.now() - t0;
+  return { rungs, obj, raw, tokens, paid, usd, ms, singleShotParseOk: obj != null && rungs === 1, effectiveParseOk: obj != null };
+}
+
+// Score one parsed object against the matching production validator; returns {schemaOk, extra}.
+function score(type, obj, kase) {
+  if (type === "criteria") { const v = validateCriteria(obj); return { schemaOk: v.ok, count: v.count }; }
+  if (type === "decompose") { const v = validateDecompose(obj, kase.reports); return { schemaOk: v.ok, count: v.count, fannedOut: v.fannedOut }; }
+  if (type === "verify") {
+    const v = validateVerify(obj, kase.criteria.length);
+    let correct = 0;
+    if (v.ok) for (let i = 0; i < kase.criteria.length; i++) if (v.verdicts[i] === !!kase.criteria[i].expectedMet) correct++;
+    return { schemaOk: v.ok, count: v.count, verdictCorrect: v.ok ? correct : null, verdictTotal: kase.criteria.length };
+  }
+  return { schemaOk: false };
+}
+
+function buildMsgs(type, kase) {
+  if (type === "criteria") return buildCriteriaMsgs(kase.objective);
+  if (type === "decompose") return buildDecomposeMsgs("Manager", kase.reports, kase.objective);
+  if (type === "verify") return buildVerifyMsgs(kase.objective, kase.criteria.map((c) => ({ text: c.text })), kase.evidence);
+  throw new Error(`unknown type ${type}`);
+}
+
+async function evalTypeMode(type, cases, mode) {
+  const rows = [];
+  for (const kase of cases) {
+    const msgs = buildMsgs(type, kase);
+    for (let rep = 0; rep < REPS; rep++) {
+      const r = await runLadder(msgs, LADDERS[type], mode);
+      const s = r.obj ? score(type, r.obj, kase) : { schemaOk: false, verdictCorrect: null, verdictTotal: type === "verify" ? kase.criteria.length : 0, fannedOut: false };
+      rows.push({ ...r, ...s });
+      process.stdout.write(r.effectiveParseOk ? (s.schemaOk ? "." : "x") : "!");
+    }
+  }
+  process.stdout.write(` ${type}/${mode}\n`);
+
+  const schemaRows = rows.filter((r) => r.schemaOk);
+  const vc = rows.filter((r) => r.verdictCorrect != null);
+  return {
+    n: rows.length,
+    singleShotRate: mean(rows.map((r) => r.singleShotParseOk ? 1 : 0)),
+    effectiveRate: mean(rows.map((r) => r.effectiveParseOk ? 1 : 0)),
+    schemaRate: mean(rows.map((r) => r.schemaOk ? 1 : 0)),
+    fanOutRate: type === "decompose" ? mean(schemaRows.map((r) => r.fannedOut ? 1 : 0)) : null,
+    verdictAccuracy: type === "verify" && vc.length ? mean(vc.map((r) => r.verdictCorrect / r.verdictTotal)) : null,
+    verdictSample: type === "verify" ? vc.length : null,
+    p50ms: Math.round(quantile(rows.map((r) => r.ms), 0.5)),
+    p95ms: Math.round(quantile(rows.map((r) => r.ms), 0.95)),
+    meanTokens: Math.round(mean(rows.map((r) => r.tokens))),
+    usd: Math.round(rows.reduce((a, r) => a + r.usd, 0) * 1e6) / 1e6,
+  };
+}
+
+function renderTable(results) {
+  const lines = [];
+  const hdr = "| call-type | mode | single-shot | effective | schema-valid | extra | p50 | p95 | tok | $ |";
+  const sep = "|---|---|---|---|---|---|---|---|---|---|";
+  lines.push(hdr, sep);
+  for (const { type, mode, agg } of results) {
+    const extra = type === "decompose" ? `fan-out ${agg.fanOutRate == null ? "—" : pct(agg.fanOutRate)}`
+      : type === "verify" ? `verdict ${agg.verdictAccuracy == null ? "—" : pct(agg.verdictAccuracy)} (n=${agg.verdictSample})`
+        : "—";
+    lines.push(`| ${type} | ${mode} | ${pct(agg.singleShotRate)} | ${pct(agg.effectiveRate)} | ${pct(agg.schemaRate)} | ${extra} | ${agg.p50ms}ms | ${agg.p95ms}ms | ${agg.meanTokens} | ${agg.usd ? "$" + agg.usd.toFixed(4) : "—"} |`);
+  }
+  return lines.join("\n");
+}
+
+async function main() {
+  await initLatchAuth();
+
+  const raw = JSON.parse(await readFile(path.join(HERE, "cases.json"), "utf8"));
+  const allTypes = ["criteria", "decompose", "verify"];
+  const types = ONLY_TYPE ? allTypes.filter((t) => t === ONLY_TYPE) : allTypes;
+  if (!types.length) { console.error(`Unknown --type=${ONLY_TYPE} (expected criteria|decompose|verify)`); process.exit(2); }
+
+  const modes = ["local"];
+  if (WANT_PAID) {
+    if (await paidProviderAvailable()) {
+      modes.push("paid");
+      const paidCases = types.reduce((n, t) => n + raw[t].length, 0);
+      console.log(`⚠ --paid: ~${paidCases * REPS} paid Kimi calls queued (est. a few cents). Kimi is slow (up to ~120s/call).`);
+    } else {
+      console.log("⚠ --paid requested but no paid provider is available via Latch — running LOCAL only.");
+    }
+  }
+
+  console.log(`\nBureau orchestration eval — ${REPS} reps/case, types: ${types.join(", ")}, modes: ${modes.join(", ")}\n`);
+  const results = [];
+  for (const type of types) {
+    for (const mode of modes) {
+      const agg = await evalTypeMode(type, raw[type], mode);
+      results.push({ type, mode, agg });
+    }
+  }
+
+  const table = renderTable(results);
+  console.log("\n" + table + "\n");
+  console.log("Legend: single-shot = parsed on first token budget · effective = parsed anywhere in the ladder · schema-valid = parsed AND passed the production validator.");
+
+  // Persist a timestamped report (raw + rendered) — reports/ is gitignored.
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  await mkdir(REPORTS_DIR, { recursive: true });
+  const report = { at: new Date().toISOString(), reps: REPS, types, modes, results };
+  await writeFile(path.join(REPORTS_DIR, `${stamp}.json`), JSON.stringify(report, null, 2));
+  await writeFile(path.join(REPORTS_DIR, `${stamp}.md`), `# Bureau orchestration eval — ${report.at}\n\n${REPS} reps/case · modes: ${modes.join(", ")}\n\n${table}\n`);
+  console.log(`\nReport: eval/reports/${stamp}.{json,md}`);
+
+  // Baseline: local aggregates keyed by type (the reliability floor we don't want to regress below).
+  const localBaseline = Object.fromEntries(results.filter((r) => r.mode === "local").map((r) => [r.type,
+    { singleShotRate: r.agg.singleShotRate, effectiveRate: r.agg.effectiveRate, schemaRate: r.agg.schemaRate }]));
+
+  if (SAVE_BASELINE) {
+    await writeFile(BASELINE_FILE, JSON.stringify({ at: report.at, reps: REPS, local: localBaseline }, null, 2));
+    console.log(`\nSaved baseline → eval/baseline.json (local rates, ${REPS} reps).`);
+  }
+
+  if (CHECK_BASELINE) {
+    let base;
+    try { base = JSON.parse(await readFile(BASELINE_FILE, "utf8")); }
+    catch { console.error("\nNo eval/baseline.json — run with --save-baseline first."); process.exit(2); }
+    const regressions = [];
+    for (const [type, cur] of Object.entries(localBaseline)) {
+      const b = base.local?.[type]; if (!b) continue;
+      for (const metric of ["singleShotRate", "effectiveRate", "schemaRate"]) {
+        const drop = (b[metric] ?? 0) - (cur[metric] ?? 0);
+        if (drop > TOL) regressions.push(`${type}.${metric}: ${pct(b[metric])} → ${pct(cur[metric])} (−${pct(drop)})`);
+      }
+    }
+    if (regressions.length) {
+      console.error(`\n✗ REGRESSION vs baseline (tolerance ${pct(TOL)}):\n  ${regressions.join("\n  ")}`);
+      process.exit(1);
+    }
+    console.log(`\n✓ No regression vs baseline (tolerance ${pct(TOL)}).`);
+  }
+}
+
+main().catch((e) => { console.error("\neval failed:", e.stack || e.message); process.exit(1); });

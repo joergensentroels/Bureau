@@ -1,0 +1,21 @@
+{
+  "at": "2026-07-23T10:40:05.925Z",
+  "reps": 5,
+  "local": {
+    "criteria": {
+      "singleShotRate": 1,
+      "effectiveRate": 1,
+      "schemaRate": 1
+    },
+    "decompose": {
+      "singleShotRate": 0.5,
+      "effectiveRate": 0.75,
+      "schemaRate": 0.75
+    },
+    "verify": {
+      "singleShotRate": 1,
+      "effectiveRate": 1,
+      "schemaRate": 1
+    }
+  }
+}

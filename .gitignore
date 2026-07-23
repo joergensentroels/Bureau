@@ -24,3 +24,6 @@ public/_*.html
 _backup-*/
 data-bureau.db
 data-bureau.db-*
+
+# eval harness: timestamped run reports (the committed baseline.json is the tracked reference)
+eval/reports/
