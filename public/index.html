@@ -139,7 +139,7 @@
   main{max-width:1100px;margin:0 auto;padding:22px;display:grid;grid-template-columns:1.15fr 1fr;gap:22px}
   @media (max-width:860px){main{grid-template-columns:1fr}}
   main.officemode{grid-template-columns:1fr}
-  main.officemode>section{min-width:0}   /* let the office scroll INSIDE its box instead of overflowing the page */
+  main>section{min-width:0}   /* let wide content (office floor, hierarchy chart) scroll INSIDE its box instead of blowing out the grid column and overflowing the page */
   h2{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3);font-weight:500;margin:0 0 14px}
 
   .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px}
@@ -172,7 +172,9 @@
   .toggle button:hover:not(.on){color:var(--accent);background:transparent}
   .miniadd{font-size:12px;padding:5px 12px}
 
-  .chart{overflow-x:auto;padding:6px 0 10px;text-align:center}
+  .chart{overflow:auto;padding:6px 0 10px;text-align:center;cursor:grab;touch-action:none}
+  .chart.panning{cursor:grabbing;user-select:none}
+  .chart.panning .treenode{pointer-events:none}
   .chart ul{padding-top:22px;position:relative;margin:0;list-style:none;white-space:nowrap;text-align:center}
   .chart li{display:inline-block;vertical-align:top;position:relative;padding:22px 12px 0;text-align:center;list-style:none}
   .chart li::before,.chart li::after{content:"";position:absolute;top:0;right:50%;border-top:1px solid var(--line-2);width:50%;height:22px}
@@ -927,7 +929,7 @@ function renderMain(app){
   org.querySelector("#tmplBtn").onclick=openTemplates;
   const hp=org.querySelector("#hrPlanBtn"); if(hp) hp.onclick=openTalkToHR;
   const openFromNode=(n)=>{ const a=ORG.agents.find(x=>x.id===n.dataset.node); if(a) openAgentModal("edit",a); };
-  if(view==="tree") body.querySelectorAll(".treenode[data-node]").forEach(n=>n.onclick=()=>openFromNode(n));
+  if(view==="tree"){ body.querySelectorAll(".treenode[data-node]").forEach(n=>n.onclick=()=>openFromNode(n)); wireChartPan(body); }
   if(view==="office") wireFloor(body);
 
   const work=el("section");
@@ -1017,6 +1019,44 @@ function orgTreeHTML(){
   const ceo=`<div class="treenode ceo">${avatar("ceo",40)}<div class="nm">You</div><div class="rl">Chief Executive</div></div>`;
   const node=(card,children)=>`<li>${card}${children.length?`<ul>${children.map(c=>node(mini(c),kids(c.id))).join("")}</ul>`:""}</li>`;
   return `<div class="chart"><ul>${node(ceo,kids(""))}</ul></div>`;
+}
+// Map-style hold-and-drag panning for the hierarchy chart: grab anywhere and drag to scroll it,
+// with light inertia on release. A small movement threshold keeps plain clicks opening the agent
+// modal; once a real drag starts, the click that follows pointerup is swallowed (same kill-click
+// trick as the office view) so releasing over a node doesn't open it.
+function wireChartPan(container){
+  const chart=container.querySelector(".chart"); if(!chart) return;
+  let down=false, moved=false, sx=0, sy=0, sl=0, st=0, vx=0, vy=0, lx=0, lt=0, glide=null;
+  chart.addEventListener("pointerdown",(e)=>{
+    if(e.button!==0) return;
+    if(glide){ cancelAnimationFrame(glide); glide=null; }   // grabbing stops any ongoing glide
+    down=true; moved=false; sx=lx=e.clientX; sy=e.clientY; sl=chart.scrollLeft; st=chart.scrollTop; vx=vy=0; lt=performance.now();
+    try{ chart.setPointerCapture(e.pointerId); }catch{}
+  });
+  chart.addEventListener("pointermove",(e)=>{
+    if(!down) return;
+    const dx=e.clientX-sx, dy=e.clientY-sy;
+    if(!moved && Math.abs(dx)+Math.abs(dy)>5){ moved=true; chart.classList.add("panning"); }
+    if(moved){
+      chart.scrollLeft=sl-dx; chart.scrollTop=st-dy;
+      const now=performance.now(), dt=Math.max(1,now-lt);           // track velocity for inertia
+      vx=(e.clientX-lx)/dt; lx=e.clientX; lt=now;
+    }
+  });
+  const end=()=>{
+    if(!down) return;
+    down=false; chart.classList.remove("panning");
+    if(moved){
+      const kill=(ev)=>{ ev.stopPropagation(); ev.preventDefault(); };
+      chart.addEventListener("click",kill,true); setTimeout(()=>chart.removeEventListener("click",kill,true),0);
+      // inertia: keep gliding in the release direction, decaying like a map fling (velocity clamped
+      // so a fast flick coasts pleasantly instead of rocketing across the whole chart)
+      let v=Math.max(-35, Math.min(35, vx*12));                      // px per frame-ish
+      const step=()=>{ if(Math.abs(v)<0.5){ glide=null; return; } chart.scrollLeft-=v; v*=0.92; glide=requestAnimationFrame(step); };
+      if(Math.abs(v)>1) glide=requestAnimationFrame(step);
+    }
+  };
+  chart.addEventListener("pointerup",end); chart.addEventListener("pointercancel",end);
 }
 function descendantIds(id){ const out=new Set(); (function walk(m){ ORG.agents.filter(a=>(a.managerId||"")===m).forEach(c=>{ if(!out.has(c.id)){ out.add(c.id); walk(c.id); } }); })(id); return out; }
 
