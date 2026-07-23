@@ -889,6 +889,49 @@ async function readDraftFile(nameOrTitle) {
 // many significant query terms appear in each deliverable (filename + head).
 const RAG_STOP = new Set("the a an and or of to in for on with is are be this that it as by from at into you your our we they will can should draft document report note guide plan".split(" "));
 export function ragTerms(s) { return [...new Set(String(s).toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w.length > 3 && !RAG_STOP.has(w)))]; }
+// Same tokenizer WITHOUT de-duping — keeps repeats so a term-frequency ranker can weight them.
+export function ragTokens(s) { return String(s).toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w.length > 3 && !RAG_STOP.has(w)); }
+// Pure-JS BM25 relevance ranker (no deps, no embeddings): score `items` against `query` by term
+// frequency × inverse document frequency over the item corpus, best first. `getText(item)` yields the
+// text to index. This is the "semantic-ish" upgrade over recency/substring recall — it surfaces the
+// most RELEVANT prior work, and drops in behind the same interface a vector store would use later.
+export function rankByRelevance(query, items, getText, limit = 5) {
+  const q = ragTerms(query);
+  if (!q.length || !Array.isArray(items) || !items.length) return [];
+  const docs = items.map((it) => ({ it, terms: ragTokens(getText(it)) }));
+  const N = docs.length;
+  const df = new Map();
+  for (const d of docs) for (const t of new Set(d.terms)) df.set(t, (df.get(t) || 0) + 1);
+  const avgdl = (docs.reduce((s, d) => s + d.terms.length, 0) / N) || 1;
+  const k1 = 1.5, b = 0.75;
+  const scored = [];
+  for (const d of docs) {
+    const dl = d.terms.length || 1;
+    const tf = new Map(); for (const t of d.terms) tf.set(t, (tf.get(t) || 0) + 1);
+    let score = 0;
+    for (const t of q) {
+      const f = tf.get(t); if (!f) continue;
+      const n = df.get(t) || 0;
+      const idf = Math.log(1 + (N - n + 0.5) / (n + 0.5));
+      score += idf * (f * (k1 + 1)) / (f + k1 * (1 - b + b * dl / avgdl));
+    }
+    if (score > 0) scored.push({ item: d.it, score });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, limit);
+}
+// SHARED memory recall: pool EVERY agent's memory entries into one corpus and return the most relevant
+// to `query` (BM25). This is the "shared" half of semantic/shared memory — an agent can build on what
+// the whole company has already done, not just its own last few runs. `excludeAgentId` drops the
+// asking agent (it already gets its own recent-work block).
+export function recallSharedMemory(org, query, limit = 4, excludeAgentId = "") {
+  const items = [];
+  for (const a of (org?.agents || [])) {
+    if (a.id === excludeAgentId) continue;
+    for (const m of (a.memory || [])) items.push({ agentName: a.name, role: a.role, objective: m.objective || "", summary: m.summary || "", files: m.files || [], at: m.at });
+  }
+  return rankByRelevance(query, items, (it) => `${it.objective} ${it.summary}`, limit).map((r) => r.item);
+}
 // Pure keyword ranker (no disk): score each doc by how many significant query terms appear in its
 // name+content, keep those scoring >= 2, best first. Split out so it can be unit-tested directly.
 export function rankDeliverables(query, docs, limit = 3, excludeName = "") {
@@ -950,6 +993,14 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
   if ((agent.memory || []).length) history.push({ role: "user", content:
     "Your own recent work — build on it, don't repeat it. To revise a document you wrote before, use read_file with its filename to get the current content, then file_write the SAME title to overwrite it:\n" +
     agent.memory.slice(0, 5).map((m) => `- "${m.objective}" → ${m.summary}${(m.files || []).length ? ` [files: ${m.files.join(", ")}]` : ""}`).join("\n") });
+  // Shared company memory: the most RELEVANT prior work from ACROSS the team (BM25 recall, not just
+  // this agent's own recency) so work compounds company-wide instead of siloing per agent.
+  try {
+    const shared = recallSharedMemory(org, objective, 4, agent.id);
+    if (shared.length) history.push({ role: "user", content:
+      "What the company already knows that's relevant here — prior work by teammates. Build on it; reuse their files; don't duplicate it or ask them to re-supply it:\n" +
+      shared.map((m) => `- ${m.agentName} (${m.role}): "${m.objective}" → ${m.summary}${(m.files || []).length ? ` [files: ${m.files.join(", ")}]` : ""}`).join("\n") });
+  } catch {}
   if (priorWork) history.push({ role: "user", content:
     `Work your teammates have already produced toward this goal. USE it directly — do NOT ask anyone to provide it:\n\n${priorWork}` });
   // RAG: surface relevant PAST company deliverables so work compounds (reuse/extend, don't duplicate).
@@ -2982,6 +3033,14 @@ const server = createServer(async (req, res) => {
       const id = p.split("/")[3];
       await updateOrg((org) => { org.sops = (org.sops || []).filter((x) => x.id !== id); });
       return send(res, 200, { ok: true });
+    }
+    // Shared company memory search: BM25 recall across EVERY agent's memory (the same corpus injected
+    // into agent prompts). Inspectable here and usable by a future "company knowledge" UI.
+    if (p === "/api/memory" && req.method === "GET") {
+      const org = await readOrg();
+      const q = url.searchParams.get("q") || "";
+      const limit = Math.min(20, Math.max(1, Number(url.searchParams.get("limit")) || 8));
+      return send(res, 200, { query: q, results: recallSharedMemory(org, q, limit) });
     }
     if (p.startsWith("/api/run/") && p.endsWith("/stop") && req.method === "POST") {
       const id = p.split("/")[3];

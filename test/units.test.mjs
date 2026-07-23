@@ -4,7 +4,8 @@ import {
   ipv4Blocked, ipBlocked, normalizeAction, safeParse, ragTerms, expectsDeliverable,
   resolveReport, goalObjective, normKRs, cadenceMs, cleanPolicyWhen, htmlToText,
   ensureBudget, renderChecklist, validDeliverableName, rankDeliverables, workProduct,
-  planObjective, normPlanItem,
+  planObjective, normPlanItem, normSop, normSopSteps, sopObjective,
+  rankByRelevance, recallSharedMemory,
 } from "../server.mjs";
 
 let pass = 0, fail = 0;
@@ -162,6 +163,37 @@ console.log("# rankDeliverables — pure RAG keyword ranker (score >= 2, best fi
   eq("  no query terms → []", rankDeliverables("the a of to", docs), []);
   eq("  excludeName is skipped", rankDeliverables("competitor pricing analysis", docs, 3, "market.md").map((x) => x.name), ["pricing.md"]);
   chk("  limit respected", rankDeliverables("competitor pricing analysis", docs, 1).length === 1); }
+
+console.log("# rankByRelevance — pure-JS BM25 relevance ranker");
+{ const items = [
+    { t: "quarterly revenue report and financial forecast" },
+    { t: "office snack inventory and coffee supplies" },
+    { t: "revenue growth analysis with forecast models" } ];
+  const r = rankByRelevance("revenue forecast", items, (x) => x.t, 5);
+  chk("  relevant docs ranked, irrelevant excluded", r.length === 2 && r.every((x) => !x.item.t.includes("snack")));
+  chk("  most relevant first (both query terms)", r[0].item.t.includes("revenue") && r[0].item.t.includes("forecast"));
+  eq("  no query terms → []", rankByRelevance("the a of to", items, (x) => x.t), []);
+  eq("  empty corpus → []", rankByRelevance("revenue", [], (x) => x.t), []);
+  chk("  limit respected", rankByRelevance("revenue forecast analysis", items, (x) => x.t, 1).length === 1); }
+
+console.log("# recallSharedMemory — cross-agent BM25 recall");
+{ const org = { agents: [
+    { id: "a1", name: "Zoe", role: "Marketing", memory: [{ objective: "draft Q3 marketing themes", summary: "three themes: growth, retention, trust" }] },
+    { id: "a2", name: "Morgan", role: "CISO", memory: [{ objective: "office coffee order", summary: "bought beans" }, { objective: "Q3 security review of marketing themes", summary: "flagged trust claims need audit" }] } ] };
+  const r = recallSharedMemory(org, "Q3 marketing themes", 4);
+  chk("  pools across agents (Zoe + Morgan surface, coffee doesn't)", r.length === 2 && r.some((m) => m.agentName === "Zoe") && r.some((m) => m.agentName === "Morgan") && !r.some((m) => /coffee/.test(m.summary)));
+  chk("  excludeAgentId drops that agent", recallSharedMemory(org, "Q3 marketing themes", 4, "a1").every((m) => m.agentName !== "Zoe"));
+  chk("  carries author + role", (() => { const m = r.find((x) => x.agentName === "Zoe"); return m && m.role === "Marketing"; })()); }
+
+console.log("# normSop / sopObjective — process templates");
+{ const sop = normSop({ name: "Publish post", steps: [{ task: "research", assignee: "Ada" }, "draft | Ben", { task: "", assignee: "X" }] });
+  chk("  keeps valid steps, drops empty-task, ids assigned", sop && sop.steps.length === 2 && sop.steps[0].assignee === "Ada" && sop.steps[1].task === "draft" && sop.steps[1].assignee === "Ben");
+  chk("  has id/runs/timestamps", !!sop.id && Array.isArray(sop.runs) && !!sop.createdAt);
+  const obj = sopObjective(sop);
+  chk("  objective lists steps in order with assignees", obj.includes("Publish post") && obj.includes("1. research") && obj.includes("Ada")); }
+eq("  no name → null", normSop({ steps: [{ task: "x" }] }), null);
+eq("  no steps → null", normSop({ name: "Empty" }), null);
+eq("  normSopSteps caps at 12", normSopSteps(Array.from({ length: 20 }, (_, i) => ({ task: "t" + i }))).length, 12);
 
 console.log("# planObjective + normPlanItem — the company backlog");
 { const s = planObjective({ title: "Ship onboarding", detail: "email + docs" });
