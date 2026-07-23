@@ -3,18 +3,24 @@
 // throwaway workspaces created and deleted here — the real (default) company is never touched.
 //   start:  BUREAU_PORT=4174 node server.mjs
 //   run:    BUREAU_PORT=4174 node test/robustness.test.mjs
+import { readFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 const PORT = process.env.BUREAU_PORT || 4174;
 const B = `http://127.0.0.1:${PORT}`;
 let WS = "default";
-// JSON helper (adds workspace header)
+const TOKEN = (() => { if (process.env.OPERATOR_TOKEN) return process.env.OPERATOR_TOKEN.trim();
+  try { const dir = process.env.LATCH_DATA || path.join(os.homedir(), "Documents", "LLM server", "openclaw-command-center", "data"); return JSON.parse(readFileSync(path.join(dir, "auth.json"), "utf8")).operatorToken || ""; } catch { return ""; } })();
+const AUTH = TOKEN ? { authorization: `Bearer ${TOKEN}` } : {};
+// JSON helper (adds workspace + auth header)
 const api = async (m, p, body) => {
-  const r = await fetch(B + p, { method: m, headers: { "content-type": "application/json", "x-workspace": WS }, body: body ? JSON.stringify(body) : undefined });
+  const r = await fetch(B + p, { method: m, headers: { "content-type": "application/json", "x-workspace": WS, ...AUTH }, body: body ? JSON.stringify(body) : undefined });
   const t = await r.text(); let j = {}; try { j = t ? JSON.parse(t) : {}; } catch { j = { raw: t }; }
   return { status: r.status, j };
 };
 // raw helper (send an arbitrary string body — for malformed / oversized cases)
 const raw = async (m, p, bodyStr) => {
-  const r = await fetch(B + p, { method: m, headers: { "content-type": "application/json", "x-workspace": WS }, body: bodyStr });
+  const r = await fetch(B + p, { method: m, headers: { "content-type": "application/json", "x-workspace": WS, ...AUTH }, body: bodyStr });
   const t = await r.text(); let j = {}; try { j = t ? JSON.parse(t) : {}; } catch { j = { raw: t }; }
   return { status: r.status, j };
 };
@@ -63,7 +69,7 @@ const ok = (c, m) => (c ? pass : fail).push(m);
     // ---- run lifecycle endpoints on unknown ids ----
     ok((await api("POST", "/api/run/nope_run/stop")).j.ok === true, "stop on unknown run is a no-op ok (idempotent)");
     ok((await api("POST", "/api/run/nope_run/plan", { decision: "approve" })).status === 404, "plan on unknown run → 404");
-    { const r = await fetch(B + "/api/run/nope_run/stream", { headers: { "x-workspace": WS } }); ok(r.status === 404, "stream of unknown run → 404"); }
+    { const r = await fetch(B + "/api/run/nope_run/stream", { headers: { "x-workspace": WS, ...AUTH } }); ok(r.status === 404, "stream of unknown run → 404"); }
     { const r = (await api("GET", "/api/runs/nope_run")).j; ok(r.summary === null && Array.isArray(r.actions) && r.replayable === false, "runs/:id reconstructs empty for unknown id (200, null summary)"); }
 
     // ---- not-found sweep: PATCH/DELETE on unknown ids → 404 ----

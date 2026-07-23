@@ -3,10 +3,16 @@
 // mutates the default workspace (only reads its counts to prove they don't change).
 //   start:  BUREAU_PORT=4174 node server.mjs
 //   run:    BUREAU_PORT=4174 node test/workspaces.test.mjs
+import { readFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 const PORT = process.env.BUREAU_PORT || 4174;
 const B = `http://127.0.0.1:${PORT}`;
+const TOKEN = (() => { if (process.env.OPERATOR_TOKEN) return process.env.OPERATOR_TOKEN.trim();
+  try { const dir = process.env.LATCH_DATA || path.join(os.homedir(), "Documents", "LLM server", "openclaw-command-center", "data"); return JSON.parse(readFileSync(path.join(dir, "auth.json"), "utf8")).operatorToken || ""; } catch { return ""; } })();
 const api = async (m, p, body, ws) => {
   const headers = { "content-type": "application/json" };
+  if (TOKEN) headers["authorization"] = `Bearer ${TOKEN}`;
   if (ws) headers["x-workspace"] = ws;
   const r = await fetch(B + p, { method: m, headers, body: body ? JSON.stringify(body) : undefined });
   const t = await r.text(); let j = {}; try { j = t ? JSON.parse(t) : {}; } catch { j = { raw: t }; }

@@ -5,7 +5,7 @@ import {
   resolveReport, goalObjective, normKRs, cadenceMs, cleanPolicyWhen, htmlToText,
   ensureBudget, renderChecklist, validDeliverableName, rankDeliverables, workProduct,
   planObjective, normPlanItem, normSop, normSopSteps, sopObjective,
-  rankByRelevance, recallSharedMemory,
+  rankByRelevance, recallSharedMemory, makeSemaphore,
 } from "../server.mjs";
 
 let pass = 0, fail = 0;
@@ -204,6 +204,21 @@ eq("  empty title → null", normPlanItem({ title: "  " }), null);
 eq("  valid status honored", normPlanItem({ title: "T", status: "doing" }).status, "doing");
 eq("  bad status → todo", normPlanItem({ title: "T", status: "nonsense" }).status, "todo");
 chk("  owner defaults from arg", normPlanItem({ title: "T" }, "agent_9").agentId === "agent_9");
+
+// makeSemaphore is async, so run it in a top-level await block before the summary prints.
+await (async () => {
+  console.log("# makeSemaphore — bounded async concurrency (parallel delegation primitive)");
+  const sem = makeSemaphore(3);
+  let active = 0, peak = 0, done = 0;
+  const results = await Promise.all(Array.from({ length: 12 }, (_, i) => sem(async () => {
+    active++; peak = Math.max(peak, active);
+    await new Promise((r) => setTimeout(r, 15));
+    active--; done++; return i * 2;
+  })));
+  chk("  caps concurrency at max (1 <= peak <= 3)", peak >= 1 && peak <= 3);
+  chk("  runs every task", done === 12);
+  eq("  preserves result order", results, Array.from({ length: 12 }, (_, i) => i * 2));
+})();
 
 console.log(`\n${fail === 0 ? "ALL PASS ✓" : "FAILURES ✗"} — ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

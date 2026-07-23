@@ -3,11 +3,18 @@
 // workspace that is created and deleted here, so your real (default) company is never touched.
 //   start:  BUREAU_PORT=4174 node server.mjs
 //   run:    BUREAU_PORT=4174 node test/api.test.mjs
+import { readFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 const PORT = process.env.BUREAU_PORT || 4174;
 const B = `http://127.0.0.1:${PORT}`;
 let WS = "default";
+// The API is token-gated. Load the operator token the same way the server does (env or Latch auth.json).
+const TOKEN = (() => { if (process.env.OPERATOR_TOKEN) return process.env.OPERATOR_TOKEN.trim();
+  try { const dir = process.env.LATCH_DATA || path.join(os.homedir(), "Documents", "LLM server", "openclaw-command-center", "data"); return JSON.parse(readFileSync(path.join(dir, "auth.json"), "utf8")).operatorToken || ""; } catch { return ""; } })();
+const AUTH = TOKEN ? { authorization: `Bearer ${TOKEN}` } : {};
 const api = async (m, p, body) => {
-  const r = await fetch(B + p, { method: m, headers: { "content-type": "application/json", "x-workspace": WS }, body: body ? JSON.stringify(body) : undefined });
+  const r = await fetch(B + p, { method: m, headers: { "content-type": "application/json", "x-workspace": WS, ...AUTH }, body: body ? JSON.stringify(body) : undefined });
   const t = await r.text(); let j = {}; try { j = t ? JSON.parse(t) : {}; } catch { j = { raw: t }; }
   return { status: r.status, j };
 };
@@ -117,6 +124,42 @@ const ok = (c, m) => (c ? pass : fail).push(m);
     { const r = (await api("GET", "/api/runs")).j; ok(Array.isArray(r.runs) && r.trends && r.trends.total === 0, "runs history empty + trends on a fresh ws"); }
     { const pf = (await api("GET", "/api/performance")).j; ok(Array.isArray(pf.agents) && typeof pf.auditWindow === "number", "performance well-formed"); }
     { const au = (await api("GET", "/api/audit?kind=deliverable")).j; ok(Array.isArray(au.audit) && au.totals && au.audit.every((r) => r.kind === "deliverable"), "audit endpoint filters by kind"); }
+
+    // ---- auth gate + role separation ----
+    const RTOK = (() => { try { const dir = process.env.LATCH_DATA || path.join(os.homedir(), "Documents", "LLM server", "openclaw-command-center", "data"); return JSON.parse(readFileSync(path.join(dir, "auth.json"), "utf8")).agentToken || ""; } catch { return ""; } })();
+    const bare = (m, p, hdr = {}) => fetch(B + p, { method: m, headers: { "x-workspace": WS, ...hdr } });
+    ok((await bare("GET", "/api/org")).status === 401, "auth: no token → 401");
+    ok((await bare("GET", "/api/org", { authorization: "Bearer wrong-xyz" })).status === 401, "auth: wrong token → 401");
+    ok((await bare("GET", "/api/org", { authorization: `Bearer ${TOKEN}` })).status === 200, "auth: operator token → 200");
+    ok((await fetch(B + "/")).status === 200, "auth: static shell needs no token");
+    { const r = await fetch(B + "/"); ok(r.headers.get("x-frame-options") === "DENY" && /frame-ancestors 'none'/.test(r.headers.get("content-security-policy") || "") && r.headers.get("x-content-type-options") === "nosniff", "security headers present (XFO + CSP frame-ancestors + nosniff)"); }
+    if (RTOK) {
+      ok((await bare("GET", "/api/org", { authorization: `Bearer ${RTOK}` })).status === 200, "role: read token → GET 200");
+      ok((await bare("POST", "/api/guardrails", { authorization: `Bearer ${RTOK}`, "content-type": "application/json" })).status === 403, "role: read token → POST 403 (operator_required)");
+    } else { console.log("  (skipped read-token role checks — no agentToken in auth.json)"); }
+
+    // ---- per-run paid cap round-trips ----
+    await api("POST", "/api/guardrails", { maxPaidUsdPerRun: 3.5 });
+    ok((await api("GET", "/api/guardrails")).j.maxPaidUsdPerRun === 3.5, "guardrail: maxPaidUsdPerRun persists");
+
+    // ---- SOP CRUD (no run started) ----
+    ok((await api("POST", "/api/sops", { name: "", steps: [] })).status === 400, "sop: requires name + steps (400)");
+    const sop = await api("POST", "/api/sops", { name: "Publish", steps: [{ task: "draft", assignee: "Ada" }, "review | Ben"] });
+    ok(sop.status === 201 && sop.j.id && sop.j.steps.length === 2 && sop.j.steps[1].task === "review" && sop.j.steps[1].assignee === "Ben", "sop: created, steps normalized (obj + 'task | assignee')");
+    ok((await api("GET", "/api/sops")).j.sops.length === 1, "sop: listed");
+    ok((await api("DELETE", "/api/sops/" + sop.j.id)).status === 200, "sop: deleted");
+
+    // ---- steering endpoint: routing + auth (no run needed) ----
+    ok((await api("POST", "/api/run/nope_run/steer", { action: "pause" })).status === 404, "steer: unknown run → 404 (routed + authed)");
+
+    // ---- MCP JSON-RPC endpoint ----
+    ok((await fetch(B + "/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status === 401, "mcp: no token → 401");
+    const mcp = async (body, tok = TOKEN) => { const r = await fetch(B + "/mcp", { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${tok}` }, body: JSON.stringify(body) }); return { status: r.status, j: await r.json().catch(() => ({})) }; };
+    { const r = await mcp({ jsonrpc: "2.0", id: 1, method: "initialize" }); ok(r.j.result && r.j.result.serverInfo && r.j.result.capabilities, "mcp: initialize → serverInfo + capabilities"); }
+    { const r = await mcp({ jsonrpc: "2.0", id: 2, method: "tools/list" }); ok(r.j.result && Array.isArray(r.j.result.tools) && r.j.result.tools.length === 7, "mcp: tools/list → 7 tools"); }
+    { const r = await mcp({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "list_agents", arguments: {} } }); ok(r.j.result && r.j.result.content && Array.isArray(JSON.parse(r.j.result.content[0].text)), "mcp: tools/call list_agents → content array"); }
+    { const r = await mcp({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "nope", arguments: {} } }); ok(r.j.error && r.j.error.code === -32602, "mcp: unknown tool → -32602"); }
+    if (RTOK) { const r = await mcp({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "run_sop", arguments: { sopId: "x" } } }, RTOK); ok(r.j.error && /operator/.test(r.j.error.message || ""), "mcp: run_sop with read token → operator required (writes blocked)"); }
   } finally {
     // always tear the workspace down
     WS = "default";

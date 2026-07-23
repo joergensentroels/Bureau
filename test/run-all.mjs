@@ -28,7 +28,9 @@ function run(file) {
 }
 
 async function serverUp() {
-  try { const r = await fetch(`http://127.0.0.1:${PORT}/api/org`); return r.ok; } catch { return false; }
+  // Probe the static shell ("/"), which is intentionally NOT token-gated — /api/* would 401 and read
+  // as "down" now that the API requires the operator token.
+  try { const r = await fetch(`http://127.0.0.1:${PORT}/`); return r.ok; } catch { return false; }
 }
 
 (async () => {
