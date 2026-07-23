@@ -13,9 +13,13 @@ _Forward-looking only — the detail of what's shipped lives in the code, the te
 **In flight — Parallel execution.** Stage 1 shipped (2026-07-23, commit `6dbe3a9`): opt-in
 `run.parallel` / **⚡ parallel reports** toggle runs a manager's sibling reports concurrently through
 a bounded semaphore (`ORCH_MAX_PARALLEL`, default 3), with no cross-sibling handoff — the manager's
-synthesis step integrates their work. Sequential stays the default. **Outstanding:**
-  - **Live A/B not yet run** — sequential-vs-parallel wall-clock delta + output parity needs a server
-    restart + real delegation runs. Only unit-level verification is done so far.
+synthesis step integrates their work. Sequential stays the default. Live-verified 2026-07-23: a
+company run completed with siblings dispatched concurrently (3 sub-tasks at the same timestamp) and a
+deliverable produced. A clean wall-clock speedup number is NOT yet established — local qwen3's
+non-deterministic decompose gives the two runs unequal work, so a single A/B can't isolate the
+concurrency gain (measured 4.6x, but confounded). **Outstanding:**
+  - **Clean speedup measurement** — needs repeated runs or the more-deterministic paid tier to control
+    for decompose variance.
   - **Stage 2 — dependency-aware decompose** — let the manager emit `dependsOn` per task and run
     independent tasks concurrently / dependent ones in topological levels. Gated on data: measure with
     the eval harness whether adding the field regresses decompose reliability (already the flakiest
@@ -80,16 +84,16 @@ assertions + a live `--e2e`; see `test/README.md`).
 - **Mid-run human steering** — pause / resume a live run and inject CEO course-corrections that active
   agents fold into their next turn (`POST /api/run/:id/steer`; run-control bar in the UI, which also
   finally wires up the pre-existing `/stop` endpoint). Broadcast to every active agent via a per-agent
-  cursor over an append-only steer list — works for single, company, and parallel runs. _Live pause/steer
-  against a running server is an untested-by-us step (needs a restart); code + UI script pass node --check
-  and the unit suites. Future refinement: per-agent targeting (v1 broadcasts run-wide)._
+  cursor over an append-only steer list — works for single, company, and parallel runs. _Live-verified
+  2026-07-23: paused a run, injected a steer, resumed — the agent changed course to the new instruction
+  on its next turn. Future refinement: per-agent targeting (v1 broadcasts run-wide)._
 - **Agent-to-agent comms** — the `ask_peer` action lets an agent consult a named teammate mid-task
   and fold their reply back into its own reasoning. Because agents have no standing loop, it's a
   synchronous, advisory-only consult (persona-only prompt, one local call — the peer can't take real
   actions or recurse), run through the FULL gate: allowlist → action cap → policy (`who may talk to
   whom` as audited rules) → tier/approval → Latch card → audit row. Not an unaudited side channel.
-  _Live exercise is user-side (needs a restart). Future: executable hand-off (peer does real work),
-  not just advice._
+  _Live-verified 2026-07-23: Jordan (PM) consulted Morgan (CISO), who replied in character, and Jordan
+  used the input to finalize. Future: executable hand-off (peer does real work), not just advice._
 
 ---
 
