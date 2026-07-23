@@ -580,6 +580,7 @@ async function openGuardrails(){
     <div class="fields">
       <div><label>Auto-approve purchases under ($ — 0 = off)</label><input id="gAuto" type="number" min="0" step="1" value="${g.autoApproveUnderUsd||0}"></div>
       <div><label>Max real actions per run (0 = unlimited)</label><input id="gCap" type="number" min="0" max="100" step="1" value="${g.maxActionsPerRun||0}"></div>
+      <div><label>Max paid-model spend per run ($ — 0 = unlimited)</label><input id="gPaid" type="number" min="0" step="0.01" value="${g.maxPaidUsdPerRun||0}"></div>
       <div><label>Notification webhook <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">— optional; POSTed on run-done &amp; needs-approval</span></label><input id="gWebhook" type="text" placeholder="https://hooks.slack.com/… (blank = none)" value="${esc(nt.webhook||"")}"></div>
     </div>
     <div class="dim" style="font-size:11px;margin-top:8px">Purchases over the threshold always require your decision in Latch — even on auto-approve or scheduled runs. Which action types each agent may use is set per-agent (open an agent → Advanced).</div>
@@ -622,7 +623,7 @@ async function openGuardrails(){
   wrap.onclick=e=>{ if(e.target===wrap) wrap.remove(); };
   wrap.querySelector("#gc").onclick=()=>wrap.remove();
   wrap.querySelector("#gs").onclick=async()=>{
-    await api("POST","/api/guardrails",{ autoApproveUnderUsd:parseFloat(wrap.querySelector("#gAuto").value)||0, maxActionsPerRun:parseInt(wrap.querySelector("#gCap").value)||0 });
+    await api("POST","/api/guardrails",{ autoApproveUnderUsd:parseFloat(wrap.querySelector("#gAuto").value)||0, maxActionsPerRun:parseInt(wrap.querySelector("#gCap").value)||0, maxPaidUsdPerRun:parseFloat(wrap.querySelector("#gPaid").value)||0 });
     await api("POST","/api/notify",{ webhook: wrap.querySelector("#gWebhook").value.trim() });
     const b=wrap.querySelector("#gs"); const t=b.textContent; b.textContent="Saved ✓"; setTimeout(()=>{ b.textContent=t; },1200);
   };

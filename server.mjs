@@ -245,8 +245,9 @@ export function ensureBudget(org) {
   if (!Array.isArray(org.plan)) org.plan = [];                          // the company's persistent backlog: {id,title,detail,status,agentId,goalId,runs[],notes[]}
   if (!Array.isArray(org.sops)) org.sops = [];                          // reusable process templates: {id,name,description,steps[{id,task,assignee}],runs[]} — run executes steps in order, skipping the LLM decompose
   // Guardrails: autoApproveUnderUsd = purchases/spend below this may auto-approve; maxActionsPerRun =
-  // hard cap on real actions per run (0 = unlimited). Per-agent action allowlists live on the agent.
-  org.guardrails = { autoApproveUnderUsd: 0, maxActionsPerRun: 0, ...(org.guardrails || {}) };
+  // hard cap on real actions per run (0 = unlimited); maxPaidUsdPerRun = server-side ceiling on TOTAL
+  // paid-model spend per run across all agents (0 = unlimited). Per-agent allowlists live on the agent.
+  org.guardrails = { autoApproveUnderUsd: 0, maxActionsPerRun: 0, maxPaidUsdPerRun: 0, ...(org.guardrails || {}) };
   if (!Array.isArray(org.agents)) org.agents = [];                      // self-sufficient even on a bare {}
   org.agents.forEach((a) => {
     if (!a) return;
@@ -370,14 +371,25 @@ function safeEqual(a, b) {
   const hb = createHash("sha256").update(String(b)).digest();
   return timingSafeEqual(ha, hb);
 }
-// Accept the token from the Authorization: Bearer header, the x-command-token header, or a ?token=
-// query param (the query form exists ONLY because EventSource can't set headers for the SSE stream).
-// Fails closed: no configured TOKEN → deny.
-function authOk(req, url) {
-  if (!TOKEN) return false;
+// Optional read-only token: Latch's narrower agentToken (or BUREAU_READ_TOKEN). A caller holding it
+// gets "readonly" — reads + read-only MCP tools, but no mutations, run-starts, steer, or config edits.
+// Absent → only the operator role exists.
+let READ_TOKEN = "";
+async function loadReadToken() {
+  if (process.env.BUREAU_READ_TOKEN) return process.env.BUREAU_READ_TOKEN.trim();
+  try { const parsed = JSON.parse(await readFile(path.join(DATA_DIR, "auth.json"), "utf8")); return String(parsed.agentToken || "").trim(); } catch { return ""; }
+}
+// Classify the request's credential. Token comes from Authorization: Bearer, x-command-token, or a
+// ?token= query param (the query form exists ONLY because EventSource can't set headers for the SSE
+// stream). Returns "operator" | "readonly" | null. Fails closed.
+function authRole(req, url) {
+  if (!TOKEN) return null;
   const h = String(req.headers["authorization"] || "");
   const t = (h.startsWith("Bearer ") ? h.slice(7) : (req.headers["x-command-token"] || url.searchParams.get("token") || "")).trim();
-  return !!t && safeEqual(t, TOKEN);
+  if (!t) return null;
+  if (safeEqual(t, TOKEN)) return "operator";
+  if (READ_TOKEN && safeEqual(t, READ_TOKEN)) return "readonly";
+  return null;
 }
 
 async function latch(method, route, body) {
@@ -876,8 +888,9 @@ export async function fetchUrl(raw) {
 }
 
 // ---------- real capability: approved outbound API call (public hosts only) ----------
-// Parses either a JSON request {method,url,headers?,body?} or a plain https URL (GET). Reuses the
-// SSRF guard (assertPublicHost) and does not follow redirects (a public URL can't bounce to internal).
+// Parses either a JSON request {method,url,headers?,body?} or a plain https URL (GET). Uses the same
+// DNS-pinned request path as fetchUrl (validate+connect on one resolution — no rebinding) and does not
+// follow redirects (a public URL can't bounce to internal).
 export async function apiCall(raw) {
   const s = String(raw || "").trim();
   let method = "GET", url = "", body = null, headers = {};
@@ -886,12 +899,11 @@ export async function apiCall(raw) {
   if (!/^https?:\/\//i.test(url)) return { ok: false, error: "provide a JSON {method,url,body} or a plain https URL" };
   if (!["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"].includes(method)) method = "GET";
   let u; try { u = new URL(url); } catch { return { ok: false, error: "bad URL" }; }
-  try { await assertPublicHost(u.hostname); } catch (e) { return { ok: false, error: e.message }; }
   const h = { "content-type": "application/json", "user-agent": "Bureau-agent/1.0 (+local)" };
   for (const [k, v] of Object.entries(headers)) if (/^(accept|content-type|x-[a-z-]+)$/i.test(k)) h[k] = String(v).slice(0, 500); // no auth/cookie forwarding
   try {
-    const res = await fetch(u.href, { method, headers: h, body: (method === "GET" || method === "HEAD") ? undefined : (body ?? "{}"), redirect: "manual" });
-    const text = (await res.text()).slice(0, 6000);
+    const res = await pinnedRequest(u, { method, headers: h, body: (method === "GET" || method === "HEAD") ? undefined : (body ?? "{}") });
+    const text = res.body.toString("utf8").slice(0, 6000);
     return { ok: res.status < 400, status: res.status, method, url: u.href, text };
   } catch (e) { return { ok: false, error: e.message }; }
 }
@@ -1093,7 +1105,8 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
   const startPaidSpent = Number(agent.paidSpentUsd) || 0;
   const paidTier = tierOf(agent);   // which paid model this agent uses (its "seniority") + its price — NOT the autonomy `tier` used further down
   let paidThisRun = 0, paidTokensThisRun = 0;
-  const canUsePaid = () => run.paidAvailable && !run.hush && budgetUsd > 0 && (startPaidSpent + paidThisRun) < budgetUsd;
+  const canUsePaid = () => run.paidAvailable && !run.hush && budgetUsd > 0 && (startPaidSpent + paidThisRun) < budgetUsd
+    && (!run.maxPaidUsd || runPaidTotal(run) < run.maxPaidUsd);   // server-side per-run paid ceiling (guardrails.maxPaidUsdPerRun)
   // reliability guards: the weak local model tends to "finish" claiming it did work it never did.
   let didExecute = false, finishRejections = 0;
   // Who approved the current action (auto vs a named approver), for the audit trail. Kept function-LOCAL
@@ -1496,6 +1509,7 @@ async function runSingle(run) {
   if (!agent) { emit(run, "error", { message: "agent not found" }); return finishRun(run); }
   emit(run, "start", { agent: agent.name, role: agent.role, objective: run.objective, hush: run.hush });
   run.memoryEntries = []; run.producedFiles = []; run.paidAvailable = await paidProviderAvailable();
+  run.maxPaidUsd = Number(org.guardrails?.maxPaidUsdPerRun) || 0;   // server-side per-run paid ceiling (0 = unlimited)
   // The single agent funds the JSON-critical orchestration calls (deriveCriteria/verifyRun) for its run.
   run.orch = { payerId: agent.id, budgetUsd: Number(agent.budgetUsd) || 0, startPaidSpent: Number(agent.paidSpentUsd) || 0 };
   const tally = {};
@@ -1693,10 +1707,13 @@ const GATE_TEMPERATURE = 0;
 // and shows up in the run's existing paid totals. `run.orch` is set once at run start (runSingle /
 // runDelegation); when it's absent, not funded, or the provider is unavailable, calls stay local.
 const ORCH_TIER = PAID_TIERS.standard;
+// Total paid-model dollars booked to a run so far, across ALL agents/payers (for the per-run ceiling).
+function runPaidTotal(run) { return Object.values((run && run.paidTally) || {}).reduce((s, v) => s + (Number(v) || 0), 0); }
 function orchestrationRouting(run) {
   const off = { paid: false, model: "", book() {} };
   const o = run && run.orch;
   if (!run || !run.paidAvailable || run.hush || !o || !o.payerId || !(o.budgetUsd > 0)) return off;
+  if (run.maxPaidUsd && runPaidTotal(run) >= run.maxPaidUsd) return off;   // server-side per-run paid ceiling reached → local
   const spent = (o.startPaidSpent || 0) + ((run.paidTally && run.paidTally[o.payerId]) || 0);
   // NOTE (parallel delegation): this budget check and book() below straddle an await, so with
   // run.parallel several concurrent JSON calls can each pass the guard before any books. The
@@ -2011,6 +2028,7 @@ async function runDelegation(run) {
   const topReports = roots.length ? roots : org.agents;
   const tally = {};
   run.memoryEntries = []; run.producedFiles = []; run.paidAvailable = await paidProviderAvailable();
+  run.maxPaidUsd = Number(org.guardrails?.maxPaidUsdPerRun) || 0;   // server-side per-run paid ceiling (0 = unlimited)
   // The CEO (first root agent) funds the JSON-critical orchestration for the whole delegation tree —
   // decompose, deriveCriteria, verifyRun — as management overhead. Agents' own work bills to themselves.
   const principal = roots[0] || org.agents[0] || null;
@@ -2260,10 +2278,10 @@ const MCP_TOOLS = [
   { name: "list_sops", description: "List saved process templates (SOPs) and their ordered steps.",
     inputSchema: { type: "object", properties: {} },
     handler: async () => { const org = await readOrg(); return (org.sops || []).map((s) => ({ id: s.id, name: s.name, description: s.description || "", steps: (s.steps || []).map((x) => ({ task: x.task, assignee: x.assignee })) })); } },
-  { name: "run_sop", description: "Run a saved SOP by id. Starts a REAL company run that executes the SOP's steps in order; returns the runId. Set hush:true to keep it entirely on the local model (no paid spend).",
+  { name: "run_sop", writes: true, description: "Run a saved SOP by id. Starts a REAL company run that executes the SOP's steps in order; returns the runId. Set hush:true to keep it entirely on the local model (no paid spend).",
     inputSchema: { type: "object", properties: { sopId: { type: "string" }, autoApprove: { type: "boolean" }, hush: { type: "boolean" } }, required: ["sopId"] },
     handler: async (args) => { const org = await readOrg(); const sop = (org.sops || []).find((s) => s.id === args.sopId); if (!sop) throw new Error("no SOP with id " + args.sopId); const { run } = beginRun({ mode: "company", sopId: sop.id, objective: sopObjective(sop), autoApprove: !!args.autoApprove, hush: !!args.hush, maxTurns: 6 }); return { runId: run.id, sop: sop.name }; } },
-  { name: "start_run", description: "Start a REAL run from a free-text objective. mode 'company' delegates across the org; 'single' needs an agentId. Returns the runId. hush:true keeps it on the local model.",
+  { name: "start_run", writes: true, description: "Start a REAL run from a free-text objective. mode 'company' delegates across the org; 'single' needs an agentId. Returns the runId. hush:true keeps it on the local model.",
     inputSchema: { type: "object", properties: { objective: { type: "string" }, mode: { type: "string", enum: ["company", "single"] }, agentId: { type: "string" }, autoApprove: { type: "boolean" }, hush: { type: "boolean" } }, required: ["objective"] },
     handler: async (args) => { const objective = String(args.objective || "").trim(); if (!objective) throw new Error("objective required"); const { run } = beginRun({ mode: args.mode === "single" ? "single" : "company", agentId: args.agentId || "", objective, autoApprove: !!args.autoApprove, hush: !!args.hush, maxTurns: 6 }); return { runId: run.id }; } },
   { name: "search_memory", description: "Search the company's shared memory (every agent's past work) by relevance; returns the top matching entries.",
@@ -2276,7 +2294,7 @@ const MCP_TOOLS = [
     inputSchema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] },
     handler: async (args) => { const r = await readDraftFile(String(args.name || "")); if (!r.ok) throw new Error(r.error || "not found"); return { name: r.name, content: r.content }; } },
 ];
-async function handleMcp(req, res) {
+async function handleMcp(req, res, role = "operator") {
   let msg; try { msg = await readBody(req); } catch { return send(res, 400, { jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } }); }
   const one = async (m) => {
     const id = m && m.id !== undefined ? m.id : null;
@@ -2289,6 +2307,7 @@ async function handleMcp(req, res) {
       if (m.method === "tools/call") {
         const tool = MCP_TOOLS.find((t) => t.name === m.params?.name);
         if (!tool) return { jsonrpc: "2.0", id, error: { code: -32602, message: "unknown tool: " + (m.params?.name || "") } };
+        if (tool.writes && role !== "operator") return { jsonrpc: "2.0", id, error: { code: -32602, message: "operator token required for " + tool.name } };
         try { const out = await tool.handler(m.params?.arguments || {}); return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] } }; }
         catch (e) { return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "Error: " + e.message }], isError: true } }; }
       }
@@ -2316,10 +2335,17 @@ const server = createServer(async (req, res) => {
     // alone does NOT stop CSRF/drive-by or local processes; a required Authorization header does (a
     // cross-site page can't attach the token, and adding the header forces a CORS preflight we fail).
     const needsAuth = (p.startsWith("/api/") && !p.startsWith("/api/trigger/")) || p === "/mcp";
-    if (needsAuth && !authOk(req, url)) return send(res, 401, { error: "unauthorized", hint: "send the operator token as 'Authorization: Bearer <token>'" });
+    let role = null;
+    if (needsAuth) {
+      role = authRole(req, url);
+      if (!role) return send(res, 401, { error: "unauthorized", hint: "send the operator token as 'Authorization: Bearer <token>'" });
+      // A read-only token may only READ: GET on /api, and read-only MCP tools (enforced in handleMcp).
+      // Everything else (mutations, run-starts, steer, config) needs the operator token.
+      if (role === "readonly" && p !== "/mcp" && req.method !== "GET") return send(res, 403, { error: "operator_required" });
+    }
     // MCP endpoint (JSON-RPC 2.0). GET has no server-initiated SSE stream → 405 (spec-compliant).
     if (p === "/mcp") {
-      if (req.method === "POST") return handleMcp(req, res);
+      if (req.method === "POST") return handleMcp(req, res, role);
       return send(res, 405, { jsonrpc: "2.0", id: null, error: { code: -32600, message: "use POST for MCP JSON-RPC" } });
     }
     if (p === "/" || p === "/index.html") {
@@ -2429,6 +2455,7 @@ const server = createServer(async (req, res) => {
       const org = await updateOrg((o) => {
         if (body.autoApproveUnderUsd !== undefined) o.guardrails.autoApproveUnderUsd = Math.max(0, Math.round((parseFloat(body.autoApproveUnderUsd) || 0) * 100) / 100);
         if (body.maxActionsPerRun !== undefined) o.guardrails.maxActionsPerRun = Math.max(0, Math.min(100, Math.round(Number(body.maxActionsPerRun) || 0)));
+        if (body.maxPaidUsdPerRun !== undefined) o.guardrails.maxPaidUsdPerRun = Math.max(0, Math.round((parseFloat(body.maxPaidUsdPerRun) || 0) * 100) / 100);
       });
       return send(res, 200, org.guardrails);
     }
@@ -3243,8 +3270,9 @@ if (isMain) {
   migrateJsonToDb()                       // one-time import of legacy JSON files → SQLite (reads data-bureau.json or the legacy data-foreman.json)
     .catch((e) => console.error("JSON→SQLite migration:", e.message))
     .then(() => { loadWorkspaces(); return loadToken(); })
-    .then((t) => {
+    .then(async (t) => {
       TOKEN = t;
+      READ_TOKEN = await loadReadToken();   // optional read-only role (Latch agentToken / BUREAU_READ_TOKEN)
       const HOST = (process.env.BUREAU_HOST || "127.0.0.1").trim();
       const loopback = HOST === "127.0.0.1" || HOST === "::1" || HOST === "localhost";
       if (!loopback) {
