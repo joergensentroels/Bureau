@@ -23,8 +23,6 @@ synthesis step integrates their work. Sequential stays the default. **Outstandin
 
 The remaining backlog, roughly by value (competitive-gap analysis, 2026-07-22):
 
-- **Mid-run human steering** — pause a live run, inject a note/correction, or redirect an agent, then
-  resume. UX-facing, demo-friendly; needs a control channel into the run loop + UI wiring.
 - **Agent-to-agent comms** — let agents message each other directly (peer review, hand-offs) instead
   of only up/down the manager hierarchy. Interacts with the guardrail/policy engine.
 - **Semantic / shared memory** — vector or shared cross-run memory beyond today's keyword RAG.
@@ -79,6 +77,12 @@ assertions + a live `--e2e`; see `test/README.md`).
   gateable number.
 - **Parallel execution (Stage 1)** — opt-in concurrent sibling delegation (see **Next** for what's
   outstanding).
+- **Mid-run human steering** — pause / resume a live run and inject CEO course-corrections that active
+  agents fold into their next turn (`POST /api/run/:id/steer`; run-control bar in the UI, which also
+  finally wires up the pre-existing `/stop` endpoint). Broadcast to every active agent via a per-agent
+  cursor over an append-only steer list — works for single, company, and parallel runs. _Live pause/steer
+  against a running server is an untested-by-us step (needs a restart); code + UI script pass node --check
+  and the unit suites. Future refinement: per-agent targeting (v1 broadcasts run-wide)._
 
 ---
 
