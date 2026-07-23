@@ -960,10 +960,25 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
   // emitAct threads it into every real-action result; emitResult falls back to the run's default.
   let decidedBy = "";
   const emitAct = (d) => emitResult(run, { ...d, decidedBy });
+  let seenSteers = 0;   // how many run.steer entries this agent has already folded into its history (broadcast: every agent drains every steer exactly once)
   const actionExpected = /\b(write|draft|compose|save|create|make|search|find|look ?up|research|fetch|read|send|email|publish|build|document|report|note|guide|memo|summary|list|announcement|letter|plan)\b/i.test(String(objective));
   setAgentState(agent.id, "working", objective.slice(0, 80));
   try {
   for (let turn = 1; turn <= run.maxTurns && !run.stopped; turn++) {
+    // ---- Mid-run human steering ----------------------------------------------------------------
+    // Hold here while the run is paused (cooperative, same as the stop guard), then splice any new
+    // CEO course-corrections into this agent's history so the very next LLM turn incorporates them.
+    // Broadcast: run.steer is append-only; each agent tracks its own cursor and drains each entry once.
+    if (run.paused && !run.stopped) {
+      setAgentState(agent.id, "waiting", "paused by you");
+      while (run.paused && !run.stopped) await new Promise((r) => setTimeout(r, 1000));
+      if (!run.stopped) setAgentState(agent.id, "working", objective.slice(0, 80));
+    }
+    if (run.stopped) break;
+    if (run.steer.length > seenSteers) {
+      for (const s of run.steer.slice(seenSteers)) history.push({ role: "user", content: `COURSE CORRECTION from the CEO (mid-run): ${s.text}\n\nAdjust your remaining work to honor this. Continue toward the objective or finish.` });
+      seenSteers = run.steer.length;
+    }
     let raw;
     const usePaid = canUsePaid();
     const meta = {};
@@ -1927,6 +1942,7 @@ function beginRun(spec) {
     parallel: Boolean(spec.parallel), // company mode only: run a manager's sibling reports concurrently (no cross-sibling handoff) instead of one-after-another
     ws: spec.ws || currentWs(),   // pin the workspace so the whole run reads/writes the right company
     events: [], listeners: new Set(), done: false, stopped: false,
+    paused: false, steer: [],     // mid-run human steering: `paused` holds every turn loop; `steer` is an append-only list of {text,at} CEO course-corrections each agent drains once
   };
   runs.set(run.id, run);
   const go = mode === "company" ? runDelegation : runSingle;
@@ -2829,6 +2845,21 @@ const server = createServer(async (req, res) => {
       const id = p.split("/")[3];
       const run = runs.get(id); if (run) run.stopped = true;
       return send(res, 200, { ok: true });
+    }
+    // Mid-run steering: pause/resume the run, or inject a CEO course-correction that active agents
+    // pick up on their next turn. Same shape as /stop and /plan — mutate a field on the in-memory run.
+    if (p.startsWith("/api/run/") && p.endsWith("/steer") && req.method === "POST") {
+      const id = p.split("/")[3];
+      const run = runs.get(id);
+      if (!run) return send(res, 404, { error: "no such run" });
+      if (run.done) return send(res, 409, { error: "run already finished" });
+      const body = await readBody(req);
+      const action = String(body.action || "").toLowerCase();
+      const text = String(body.text || "").slice(0, 600).trim();
+      if (action === "pause") { run.paused = true; emit(run, "paused", {}); }
+      else if (action === "resume") { run.paused = false; emit(run, "resumed", {}); }
+      if (text) { run.steer.push({ text, at: Date.now() }); emit(run, "steered", { text }); }
+      return send(res, 200, { ok: true, paused: run.paused, steers: run.steer.length });
     }
     // Plan-approval gate: the CEO approves (optionally with edited criteria) or rejects the plan.
     if (p.startsWith("/api/run/") && p.endsWith("/plan") && req.method === "POST") {
