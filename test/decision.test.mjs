@@ -35,6 +35,11 @@ chk("autonomous github_file auto (commits are NOT floored)", decideApproval("aut
 chk("policy allow auto-approves github_file (a commit can be loosened)", decideApproval("supervised", "github_file", {}, gr, false, "allow"), { auto: true, approver: "policy" });
 chk("autonomous github_repo STILL floored (repo creation always asks)", decideApproval("autonomous", "github_repo", {}, gr, false), { auto: false, approver: "" });
 chk("policy allow CANNOT auto github_repo (floor wins)", decideApproval("autonomous", "github_repo", {}, gr, false, "allow"), { auto: false, approver: "" });
+// mcp_call: external tool calls are hard-floored so Bureau never auto-PATCH-approves them (Latch's
+// per-tool allowlist/fingerprint guards stay authoritative). No tier, run-auto, or policy allow crosses it.
+chk("autonomous mcp_call floored", decideApproval("autonomous", "mcp_call", {}, gr, false), { auto: false, approver: "" });
+chk("run-auto mcp_call floored", decideApproval("supervised", "mcp_call", {}, gr, true), { auto: false, approver: "" });
+chk("policy allow CANNOT auto mcp_call (floor wins)", decideApproval("autonomous", "mcp_call", {}, gr, false, "allow"), { auto: false, approver: "" });
 // run-level auto-approve (the checkbox / scheduled): floor still holds
 chk("run file_write auto", decideApproval("supervised", "file_write", {}, gr, true), { auto: true, approver: "run" });
 chk("run purchase-over floored", decideApproval("supervised", "purchase", pricey, gr, true), { auto: false, approver: "" });
