@@ -17,7 +17,7 @@ import dns from "node:dns/promises";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash, timingSafeEqual } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -357,6 +357,25 @@ async function loadToken() {
 // TOKEN itself; this exported init lets an out-of-process consumer (the offline eval harness in
 // eval/run-eval.mjs) authenticate to Latch and exercise the real askLlm path. No-op side effects.
 export async function initLatchAuth() { TOKEN = await loadToken(); return TOKEN; }
+
+// ---- Inbound auth: gate Bureau's own API with the SAME operator token it uses to reach Latch ----
+// One operator credential for the whole control plane. Bureau already loads this token at boot (and
+// refuses to start without it), so there is no separate secret to generate or store. Constant-time
+// compare over SHA-256 digests (equal-length buffers; no length or early-exit timing leak).
+function safeEqual(a, b) {
+  const ha = createHash("sha256").update(String(a)).digest();
+  const hb = createHash("sha256").update(String(b)).digest();
+  return timingSafeEqual(ha, hb);
+}
+// Accept the token from the Authorization: Bearer header, the x-command-token header, or a ?token=
+// query param (the query form exists ONLY because EventSource can't set headers for the SSE stream).
+// Fails closed: no configured TOKEN → deny.
+function authOk(req, url) {
+  if (!TOKEN) return false;
+  const h = String(req.headers["authorization"] || "");
+  const t = (h.startsWith("Bearer ") ? h.slice(7) : (req.headers["x-command-token"] || url.searchParams.get("token") || "")).trim();
+  return !!t && safeEqual(t, TOKEN);
+}
 
 async function latch(method, route, body) {
   // Tag every approval this Bureau files with its workspace, so each company's Inbox only sees its own.
@@ -2238,6 +2257,14 @@ const server = createServer(async (req, res) => {
   const reqWs = String(req.headers["x-workspace"] || url.searchParams.get("ws") || "default");
   wsStore.enterWith({ ws: wsExists(reqWs) ? reqWs : "default" });
   try {
+    // AUTH GATE: every /api and /mcp call requires the operator token. Exempt: the static UI shell
+    // (served below — HTML/CSS/JS, no secrets) and /api/trigger/:token (external webhooks carry their
+    // own unguessable per-trigger token). Without this, any local process — or any website the operator
+    // visits (the browser will POST to 127.0.0.1) — could drive the whole company. Localhost binding
+    // alone does NOT stop CSRF/drive-by or local processes; a required Authorization header does (a
+    // cross-site page can't attach the token, and adding the header forces a CORS preflight we fail).
+    const needsAuth = (p.startsWith("/api/") && !p.startsWith("/api/trigger/")) || p === "/mcp";
+    if (needsAuth && !authOk(req, url)) return send(res, 401, { error: "unauthorized", hint: "send the operator token as 'Authorization: Bearer <token>'" });
     // MCP endpoint (JSON-RPC 2.0). GET has no server-initiated SSE stream → 405 (spec-compliant).
     if (p === "/mcp") {
       if (req.method === "POST") return handleMcp(req, res);
@@ -3166,7 +3193,7 @@ if (isMain) {
     .then(() => { loadWorkspaces(); return loadToken(); })
     .then((t) => {
       TOKEN = t;
-      server.listen(PORT, "127.0.0.1", () => console.log(`Bureau on http://127.0.0.1:${PORT} (${WORKSPACES.length} workspace${WORKSPACES.length === 1 ? "" : "s"}, SQLite)`));
+      server.listen(PORT, "127.0.0.1", () => console.log(`Bureau on http://127.0.0.1:${PORT} (${WORKSPACES.length} workspace${WORKSPACES.length === 1 ? "" : "s"}, SQLite) — API + /mcp require the operator token (Authorization: Bearer <token>)`));
       setInterval(() => { tickSchedules().catch((e) => console.error("scheduler tick:", e.message)); }, 60000); // check due schedules every minute
     })
     .catch((e) => { console.error("Could not load Latch operator token:", e.message); process.exit(1); });
