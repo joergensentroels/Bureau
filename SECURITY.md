@@ -32,6 +32,17 @@ operator credential for the whole control plane; Bureau already refuses to boot 
   server (sending no CORS headers) fails. Latch uses the same header-token approach for the same reason
   — it is why neither service needs CSRF tokens.
 
+## External MCP tools (`mcp_call`)
+
+Agents can call external MCP tools, but the design keeps the trust boundary at Latch. `mcp_call` is
+**hard-floored** (`requiresCeoAlways`): Bureau only ever *files* a Latch `mcp_tool_call` approval and
+waits — it never auto-approves, because Bureau holds the operator token and an auto-approve would let
+it `PATCH`-approve the Latch approval and bypass Latch's per-tool allowlist + tool-definition
+fingerprint (rug-pull) guard. Latch runs the tool on the trusted host with the server's own
+credentials (Bureau never sees them) and returns only the result, which the agent receives **framed as
+untrusted external data**. Bureau opens no outbound MCP connections. When MCP is unconfigured on the
+host, the capability is dormant (never advertised to agents).
+
 ## The approval boundary (what protects real-world actions)
 
 Bureau proposes actions → **Latch approves (human) → Latch executes with its credentials**. The
