@@ -21,9 +21,14 @@ Every `/api/*` and `/mcp` request must present the **operator token** — the *s
 to authenticate to Latch (`data/auth.json` `operatorToken`, or the `OPERATOR_TOKEN` env var). One
 operator credential for the whole control plane; Bureau already refuses to boot without it.
 
-- Sent as `Authorization: Bearer <token>` (or `x-command-token`, or `?token=` for the SSE stream only,
-  since `EventSource` can't set headers). Compared in constant time (`safeEqual`: SHA-256 +
-  `timingSafeEqual`). Fails closed.
+- Sent as `Authorization: Bearer <token>` or `x-command-token` — **headers only, never a query param**
+  (a token in a URL is copied into the access log of every proxy/tunnel/CDN in the path). The SSE run
+  stream is therefore read with `fetch()` in the UI rather than `EventSource`, which cannot set headers.
+  Compared in constant time (`safeEqual`: SHA-256 + `timingSafeEqual`). Fails closed.
+- **Rejected credentials are counted per client address**, refused with `429` past `AUTH_FAIL_MAX` (10)
+  inside a 10-minute window, and written to the audit log (`kind: "auth"`) plus the console. The token
+  is far too large to guess — this exists for the *alarm*, so a sustained probe is visible rather than
+  silent. Any success clears that address's counter.
 - **Exempt from the token gate:** the static UI shell (HTML/CSS/JS — no secrets) and
   `POST /api/trigger/:token` (external webhooks that carry their own 122-bit unguessable per-trigger
   token as their auth).
@@ -83,17 +88,43 @@ a large purchase without you.
   `readonly` — reads + read-only MCP tools only; mutations, run-starts, steer, config, and MCP
   `run_sop`/`start_run` require the operator token.
 
+- **Tokens are header-only** (2026-07-25): `?token=` is no longer accepted anywhere, including the SSE
+  stream; the UI reads the stream with `fetch()` + a stream reader instead of `EventSource`. Removes the
+  last path by which the operator token could land in an access log.
+- **Failed-auth damper + audit** (2026-07-25): per-address failure counter, `429` past 10 failures in 10
+  minutes, every burst recorded in the audit log as `kind: "auth"` / `actionType: "auth_failed"`.
+- **Role introspection** (2026-07-25): `GET /api/whoami` returns the caller's role so the UI can label
+  itself read-only and explain a refusal, making the read-only token a usable everyday mode.
+
 ### Residual (accepted)
 
-- **`?token=` in the SSE URL** can appear in local server logs. Accepted for a localhost operator
-  token; revisit if Bureau ever moves off loopback.
 - **Single-host token store**: Bureau reuses Latch's `data/auth.json` tokens. Rotating there rotates
   both — intended (one operator identity for the control plane).
 
+## Reaching Bureau from another machine
+
+Bureau's threat model above assumes loopback. Reaching it from elsewhere changes one thing that matters
+more than the network: **the operator token is Latch's operator token, and it can approve hard-floor
+approvals** via `POST /api/approvals/:id/decide`. The hard floor stops a rogue *agent*; it does not stop
+a human holding the token. So a leaked operator token on a remote/untrusted machine is equivalent to
+code execution on the Bureau host. Rules that follow:
+
+1. **Never expose Bureau directly.** No port-forward, no public reverse proxy, no `0.0.0.0`. Bureau
+   speaks plain HTTP and has no TLS of its own — confidentiality must come from the transport.
+2. **Use an identity-gated overlay or tunnel**, so unauthenticated traffic never reaches Bureau at all:
+   a private mesh (Tailscale/WireGuard), or an outbound tunnel with an identity proxy in front
+   (Cloudflare Tunnel + Access). Both let Bureau stay bound to `127.0.0.1` — the tunnel daemon is the
+   only thing that connects to it, so the bind-guard warning never even applies.
+3. **Give a less-trusted browser the read-only token** (Latch's `agentToken` / `BUREAU_READ_TOKEN`), not
+   the operator token. You keep full visibility — runs, feed, deliverables, audit — and the UI badges
+   itself `👁 read-only` and explains refusals. A token sitting in a managed work browser's
+   `localStorage` is readable by that machine's management tooling; make it the harmless one.
+4. **Approve hard-floor actions from the trusted host.** If you do use the operator token remotely,
+   understand you have moved shell-approval authority to that browser.
+
 ## Operating guidance
 
-- Keep Bureau on **loopback**. Do not port-forward, reverse-proxy publicly, or bind `0.0.0.0`.
+- Keep Bureau on **loopback** (see above for the one safe way to reach it from elsewhere).
 - Treat the operator token like the Latch operator token — it *is* the same token. Anyone with it has
-  full control-plane authority (short of the hard-floored actions, which still need interactive Latch
-  approval).
+  full control-plane authority, and can approve the hard-floored actions interactively.
 - MCP clients must send `Authorization: Bearer <operator token>` to `http://127.0.0.1:4173/mcp`.

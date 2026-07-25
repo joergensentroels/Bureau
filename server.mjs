@@ -384,18 +384,50 @@ async function loadReadToken() {
   if (process.env.BUREAU_READ_TOKEN) return process.env.BUREAU_READ_TOKEN.trim();
   try { const parsed = JSON.parse(await readFile(path.join(DATA_DIR, "auth.json"), "utf8")); return String(parsed.agentToken || "").trim(); } catch { return ""; }
 }
-// Classify the request's credential. Token comes from Authorization: Bearer, x-command-token, or a
-// ?token= query param (the query form exists ONLY because EventSource can't set headers for the SSE
-// stream). Returns "operator" | "readonly" | null. Fails closed.
-function authRole(req, url) {
+// Classify the request's credential. Token comes from Authorization: Bearer or x-command-token —
+// HEADERS ONLY, never a query param. A token in a URL is copied into the access log of every proxy,
+// tunnel and CDN in the path, which is harmless on loopback and a credential leak the moment Bureau is
+// reached through anything else. The SSE run stream therefore reads its body with fetch() in the UI
+// rather than EventSource (which cannot set headers). Returns "operator" | "readonly" | null.
+// Fails closed.
+function authRole(req) {
   if (!TOKEN) return null;
   const h = String(req.headers["authorization"] || "");
-  const t = (h.startsWith("Bearer ") ? h.slice(7) : (req.headers["x-command-token"] || url.searchParams.get("token") || "")).trim();
+  const t = (h.startsWith("Bearer ") ? h.slice(7) : (req.headers["x-command-token"] || "")).trim();
   if (!t) return null;
   if (safeEqual(t, TOKEN)) return "operator";
   if (READ_TOKEN && safeEqual(t, READ_TOKEN)) return "readonly";
   return null;
 }
+
+// ---- Failed-auth damper + visibility ------------------------------------------------------------
+// On loopback a rejected token is a typo. Reached through a tunnel it is a probe, so failures are
+// counted per client address, refused with a 429 once they pile up inside the window, and written to
+// the audit log — a sustained attempt should be visible after the fact, not silent. The token is
+// high-entropy enough that guessing it is hopeless; the point here is the alarm, not the lock. A
+// success clears that address's counter.
+const AUTH_FAIL_MAX = 10;                      // failures inside the window before we start refusing
+const AUTH_FAIL_WINDOW_MS = 10 * 60 * 1000;
+const authFails = new Map();                   // ip -> { n, first, last }
+const clientIp = (req) => String(req.socket?.remoteAddress || "unknown");
+// Record one rejected credential. Returns true if this address should be throttled.
+function authFailure(req, p) {
+  const ip = clientIp(req), now = Date.now();
+  const prev = authFails.get(ip);
+  const e = prev && now - prev.first <= AUTH_FAIL_WINDOW_MS ? prev : { n: 0, first: now, last: now };
+  e.n++; e.last = now;
+  authFails.set(ip, e);
+  if (authFails.size > 1000) for (const [k, v] of authFails) if (now - v.last > AUTH_FAIL_WINDOW_MS) authFails.delete(k);   // bound the map
+  // Audit the first failure of a burst and then every AUTH_FAIL_MAX-th: enough to see a probe, not
+  // enough for the prober to flood the log.
+  if (e.n === 1 || e.n % AUTH_FAIL_MAX === 0) {
+    const mins = Math.round((now - e.first) / 60000);
+    logAudit({ kind: "auth", actionType: "auth_failed", agent: ip, ok: false, decision: "denied", summary: `Rejected credential from ${ip} — ${e.n} failure(s) in ${mins}m (latest: ${p})` });
+    console.warn(`⚠  auth: rejected credential from ${ip} — ${e.n} failure(s) in ${mins}m (latest ${p})`);
+  }
+  return e.n > AUTH_FAIL_MAX;
+}
+function authSuccess(req) { authFails.delete(clientIp(req)); }
 
 async function latch(method, route, body) {
   // Tag every approval this Bureau files with its workspace, so each company's Inbox only sees its own.
@@ -2404,11 +2436,22 @@ const server = createServer(async (req, res) => {
     const needsAuth = (p.startsWith("/api/") && !p.startsWith("/api/trigger/")) || p === "/mcp";
     let role = null;
     if (needsAuth) {
-      role = authRole(req, url);
-      if (!role) return send(res, 401, { error: "unauthorized", hint: "send the operator token as 'Authorization: Bearer <token>'" });
+      role = authRole(req);
+      if (!role) {
+        // Count it, log it, and start refusing outright once one address has piled up failures.
+        if (authFailure(req, p)) return send(res, 429, { error: "too_many_auth_failures", hint: `too many rejected credentials from this address; retry in ${Math.round(AUTH_FAIL_WINDOW_MS / 60000)} minutes` });
+        return send(res, 401, { error: "unauthorized", hint: "send the operator token as 'Authorization: Bearer <token>' (headers only — a ?token= query param is no longer accepted)" });
+      }
+      authSuccess(req);
       // A read-only token may only READ: GET on /api, and read-only MCP tools (enforced in handleMcp).
       // Everything else (mutations, run-starts, steer, config) needs the operator token.
       if (role === "readonly" && p !== "/mcp" && req.method !== "GET") return send(res, 403, { error: "operator_required" });
+    }
+    // Which role is this browser holding? The UI asks on boot so it can label itself read-only and
+    // explain a 403 instead of failing opaquely — useful when you deliberately hand a remote/untrusted
+    // browser the narrower agentToken. Reveals no secret: the caller already proved which token it has.
+    if (p === "/api/whoami" && req.method === "GET") {
+      return send(res, 200, { role, readonly: role === "readonly", readOnlyTokenConfigured: !!READ_TOKEN });
     }
     // MCP endpoint (JSON-RPC 2.0). GET has no server-initiated SSE stream → 405 (spec-compliant).
     if (p === "/mcp") {

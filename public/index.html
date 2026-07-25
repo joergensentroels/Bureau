@@ -332,6 +332,7 @@
   <div class="brand">BU<b>REAU</b></div>
   <span class="tag" id="tagline">agent orchestrator</span>
   <button class="wsswitch" id="wsBtn" title="Switch workspace / company"><span id="wsName">Default</span> <span style="opacity:.6">▾</span></button>
+  <span class="tag" id="roleBadge" style="display:none">👁 read-only</span>
   <div class="spacer"></div>
   <div class="toggle themeswitch"><button data-theme-btn="ops">Ops</button><button data-theme-btn="pixel">Tycoon</button></div>
   <button class="inboxbtn" id="inboxBtn" title="What needs you"><span class="ibell">🔔</span><span>Inbox</span><span class="nbadge" id="inboxBadge">0</span></button>
@@ -456,12 +457,61 @@ async function api(method, route, body){
   const go = () => fetch(route,{method,cache:"no-store",headers:{"content-type":"application/json","x-workspace":curWs(),...authHeaders()},body:body?JSON.stringify(body):undefined});
   let res = await go();
   if(res.status===401 && promptToken()) res = await go();   // unlock + retry once
+  if(res.status===403) noteReadOnly(method,route);          // read-only token tried to write — say so plainly
   const t = await res.text();                       // tolerate empty / non-JSON bodies instead of throwing
   try{ return t?JSON.parse(t):{}; }catch{ return {raw:t}; }
 }
-// EventSource can't set headers, so the SSE stream takes the token as a query param (localhost only).
-function streamUrl(runId){ const t=opToken(); return "/api/run/"+runId+"/stream"+(t?"?token="+encodeURIComponent(t):""); }
+// The run feed is SSE read through fetch(), NOT EventSource: EventSource can't set headers, which would
+// force the token into the query string, and a token in a URL is copied into the access log of every
+// proxy/tunnel in the path. Same contract as before — onEvent per event, onEnd once — and .close()
+// aborts. The server ending the stream (run finished) surfaces as onEnd, exactly like EventSource's
+// reconnect-attempt error did.
+function openRunStream(runId, onEvent, onEnd){
+  const ctl=new AbortController(); let ended=false;
+  const finish=()=>{ if(!ended){ ended=true; try{ onEnd(); }catch{} } };
+  (async()=>{
+    let res;
+    try{ res=await fetch("/api/run/"+runId+"/stream",{cache:"no-store",signal:ctl.signal,headers:{"x-workspace":curWs(),...authHeaders()}}); }
+    catch{ return finish(); }
+    if(!res.ok||!res.body) return finish();
+    const rd=res.body.getReader(), dec=new TextDecoder(); let buf="";
+    try{
+      for(;;){
+        const {value,done}=await rd.read(); if(done) break;
+        buf+=dec.decode(value,{stream:true});
+        let i;
+        while((i=buf.indexOf("\n\n"))>=0){
+          const frame=buf.slice(0,i); buf=buf.slice(i+2);
+          for(const line of frame.split("\n")){
+            if(!line.startsWith("data:")) continue;
+            try{ onEvent(JSON.parse(line.slice(5).trim())); }catch{}
+          }
+        }
+      }
+    }catch{}   // aborted, or the connection dropped — either way the stream is over
+    finish();
+  })();
+  return { close(){ try{ ctl.abort(); }catch{} } };
+}
 
+// Which token is this browser holding? Two roles exist: the operator token (full control) and Latch's
+// narrower agentToken, which can only read. Handing a less-trusted browser — a work machine reached
+// over a tunnel, say — the read-only token is a deliberate, supported setup, so the UI labels itself
+// and explains a refused write instead of just failing.
+let ROLE="operator", _roleToldYou=false;
+async function loadRole(){
+  try{ const w=await api("GET","/api/whoami"); ROLE=w.role||"operator"; }catch{ ROLE="operator"; }
+  const b=$("#roleBadge");
+  if(b){
+    b.style.display = ROLE==="readonly" ? "" : "none";
+    b.title = "This browser holds the read-only token: you can watch runs and read everything, but starting runs, approving, and editing config need the operator token.";
+  }
+}
+function noteReadOnly(method, route){
+  if(ROLE!=="readonly"||_roleToldYou) return;
+  _roleToldYou=true;   // once per page load; the badge is the standing reminder
+  alert("This browser is using the read-only token, so that action was refused.\n\nReading, watching runs, and browsing deliverables all work. Starting runs, approving actions, and changing config need the operator token — enter it from the machine you trust.");
+}
 function applyTheme(t){ document.documentElement.setAttribute("data-theme", t==="pixel"?"pixel":"ops"); localStorage.setItem("bureau_theme", curTheme()); paintThemeButtons(); }
 function paintThemeButtons(){ const t=curTheme(); document.querySelectorAll("[data-theme-btn]").forEach(b=>b.classList.toggle("on", b.dataset.themeBtn===t)); }
 
@@ -477,6 +527,7 @@ async function boot(){
   const hib=$("#historyBtn"); if(hib) hib.onclick=openHistory;
   const wb=$("#wsBtn"); if(wb) wb.onclick=openWorkspaces;
   try{ WORKSPACES=(await api("GET","/api/workspaces")).workspaces||WORKSPACES; }catch{}
+  await loadRole();
   paintWsLabel();
   refreshHealth();
   refreshInbox();
@@ -1490,9 +1541,7 @@ function onRunStart(runId){
   const ctl=$("#runControls"); if(ctl) ctl.style.display="flex";
   const pb=$("#pauseBtn"); if(pb) pb.textContent="⏸ Pause";
   if(ES) ES.close();
-  ES=new EventSource(streamUrl(runId));
-  ES.onmessage=(m)=>{ handleEvent(JSON.parse(m.data)); };
-  ES.onerror=()=>{ ES.close(); resetRun(); };
+  ES=openRunStream(runId, handleEvent, ()=>{ resetRun(); });
 }
 async function launchGoalRun(id){
   try{ const { runId } = await api("POST","/api/goals/"+id+"/run",{autoApprove:false}); streamRun(runId); }catch{}

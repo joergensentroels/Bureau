@@ -138,6 +138,34 @@ const ok = (c, m) => (c ? pass : fail).push(m);
       ok((await bare("POST", "/api/guardrails", { authorization: `Bearer ${RTOK}`, "content-type": "application/json" })).status === 403, "role: read token → POST 403 (operator_required)");
     } else { console.log("  (skipped read-token role checks — no agentToken in auth.json)"); }
 
+    // ---- tokens travel in HEADERS ONLY (a token in a URL leaks into proxy/tunnel access logs) ----
+    ok((await bare("GET", `/api/org?token=${encodeURIComponent(TOKEN)}`)).status === 401, "auth: ?token= query param does NOT authenticate");
+    // On the SSE stream specifically — the one place that used to accept it. 401 (not 404) proves the
+    // query token never reached the route: if it authenticated we'd get 404 for the unknown run id.
+    ok((await bare("GET", `/api/run/nope_run/stream?token=${encodeURIComponent(TOKEN)}`)).status === 401, "auth: ?token= rejected on the SSE stream too");
+    ok((await bare("GET", "/api/run/nope_run/stream", { authorization: `Bearer ${TOKEN}` })).status === 404, "auth: SSE stream authenticates via header (unknown run → 404)");
+    ok((await bare("GET", "/api/org", { "x-command-token": TOKEN })).status === 200, "auth: x-command-token header still accepted");
+
+    // ---- whoami: the UI asks which role it holds so it can label itself read-only ----
+    { const w = (await api("GET", "/api/whoami")).j; ok(w.role === "operator" && w.readonly === false, "whoami: operator token → role operator"); }
+    if (RTOK) {
+      const r = await bare("GET", "/api/whoami", { authorization: `Bearer ${RTOK}` });
+      const w = await r.json().catch(() => ({}));
+      ok(r.status === 200 && w.role === "readonly" && w.readonly === true, "whoami: read token → role readonly");
+    }
+
+    // ---- failed-auth damper: a burst of rejected credentials starts getting 429 ----
+    // Must be the LAST auth check: it deliberately trips the per-address counter. Any successful auth
+    // clears that counter, which the follow-up assertions then verify.
+    { let last = 0;
+      for (let i = 0; i < 12; i++) last = (await bare("GET", "/api/org", { authorization: `Bearer nope-${i}` })).status;
+      ok(last === 429, "auth: sustained rejected credentials → 429 (damper trips)");
+      ok((await bare("GET", "/api/org", { authorization: `Bearer ${TOKEN}` })).status === 200, "auth: a valid token still works while the damper is tripped");
+      ok((await bare("GET", "/api/org", { authorization: "Bearer nope-again" })).status === 401, "auth: success clears the counter (back to plain 401)");
+      const hits = (await api("GET", "/api/audit?kind=auth")).j.audit || [];
+      ok(hits.length >= 1 && hits.every((h) => h.actionType === "auth_failed" && h.ok === false), "auth: rejected credentials are written to the audit log");
+    }
+
     // ---- per-run paid cap round-trips ----
     await api("POST", "/api/guardrails", { maxPaidUsdPerRun: 3.5 });
     ok((await api("GET", "/api/guardrails")).j.maxPaidUsdPerRun === 3.5, "guardrail: maxPaidUsdPerRun persists");

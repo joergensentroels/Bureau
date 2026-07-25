@@ -113,13 +113,28 @@ for it once and remembers it. Bureau binds loopback only.
 | `BUREAU_HOST` | `127.0.0.1` | bind host (warns loudly if non-loopback) |
 | `LATCH_URL` | `http://127.0.0.1:8787` | Latch base URL |
 | `OPERATOR_TOKEN` | — | operator token (else read from Latch's `auth.json`) |
+| `BUREAU_READ_TOKEN` | Latch's `agentToken` | read-only token — reads only, no writes |
 | `LATCH_DATA` | `…/openclaw-command-center/data` | where Latch's `auth.json` lives |
 
 ## Security
 
-Bureau's API + `/mcp` are token-gated (the Latch operator token), localhost-only, with anti-clickjacking
-headers and SSRF-guarded outbound fetches. The credential boundary and the hard floor live in Latch.
-See **[SECURITY.md](SECURITY.md)** for the threat model, the review findings, and their status.
+Bureau's API + `/mcp` are token-gated (the Latch operator token, sent in a header — never a query
+param), loopback-only, with anti-clickjacking headers, SSRF-guarded outbound fetches, and a damper that
+starts refusing an address after repeated bad credentials and writes the attempt to the audit log. The
+credential boundary and the hard floor live in Latch. See **[SECURITY.md](SECURITY.md)** for the threat
+model, the review findings, and their status.
+
+**Two roles.** The operator token has full control. Latch's narrower `agentToken` grants read-only
+access — watch runs live, read deliverables, browse the audit log — and the UI badges itself
+`👁 read-only` and says so plainly when a write is refused. Give *that* one to any browser you trust
+less.
+
+**Reaching Bureau from another machine** works, but has a sharp edge worth knowing: the operator token
+can approve hard-floor approvals, which makes it equivalent to shell access on the Bureau host. So never
+expose Bureau directly. Put it behind a private mesh (Tailscale/WireGuard) or an identity-gated tunnel
+(Cloudflare Tunnel + Access) — both let Bureau stay bound to loopback — and use the read-only token in
+the remote browser. See
+**[SECURITY.md → Reaching Bureau from another machine](SECURITY.md#reaching-bureau-from-another-machine)**.
 
 ## Testing
 

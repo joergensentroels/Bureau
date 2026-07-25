@@ -40,6 +40,9 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
 | `mcp_call` hard-floor | decision |
 | MCP server (`/mcp` initialize/tools/list/tools/call/errors) | api |
 | Auth gate + role separation + security headers | api |
+| Header-only tokens — `?token=` rejected everywhere, incl. the SSE stream | api |
+| Failed-auth damper (429 past threshold, cleared by a success) + `kind:"auth"` audit rows | api |
+| Role introspection `/api/whoami` (operator + readonly) | api |
 | Per-run paid cap (`maxPaidUsdPerRun`) | api |
 | Steer endpoint routing+auth | api |
 | SSRF guard (`fetchUrl`, `apiCall`, incl. DNS-pin refusals) | net |

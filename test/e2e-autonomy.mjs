@@ -7,10 +7,17 @@
 //
 // The runs are real: they create deliverables in drafts/ and may file/resolve Latch approvals.
 // The test cleans up its own policies, agent tier, drafts, and any approval it files.
+import { readFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 const PORT = process.env.BUREAU_PORT || 4174;
 const B = `http://127.0.0.1:${PORT}`;
+// The API is token-gated. Load the operator token the same way the server does (env or Latch auth.json).
+const TOKEN = (() => { if (process.env.OPERATOR_TOKEN) return process.env.OPERATOR_TOKEN.trim();
+  try { const dir = process.env.LATCH_DATA || path.join(os.homedir(), "Documents", "LLM server", "openclaw-command-center", "data"); return JSON.parse(readFileSync(path.join(dir, "auth.json"), "utf8")).operatorToken || ""; } catch { return ""; } })();
+const AUTH = TOKEN ? { authorization: `Bearer ${TOKEN}` } : {};
 const api = async (m, p, body) => {
-  const r = await fetch(B + p, { method: m, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+  const r = await fetch(B + p, { method: m, headers: { "content-type": "application/json", ...AUTH }, body: body ? JSON.stringify(body) : undefined });
   const t = await r.text(); let j = {}; try { j = t ? JSON.parse(t) : {}; } catch { j = { raw: t }; }
   return { status: r.status, j };
 };
@@ -22,7 +29,7 @@ const evCounts = (evs) => { const c = {}; for (const e of evs) c[e.type] = (c[e.
 async function runAndStream(spec, onEvent, ms = 160000) {
   const { j } = await api("POST", "/api/run", spec);
   const runId = j.runId; if (!runId) throw new Error("no runId: " + JSON.stringify(j));
-  const res = await fetch(`${B}/api/run/${runId}/stream`);
+  const res = await fetch(`${B}/api/run/${runId}/stream`, { headers: { ...AUTH } });
   const dec = new TextDecoder(); let buf = ""; const events = []; const started = Date.now();
   for await (const chunk of res.body) {
     buf += dec.decode(chunk, { stream: true }); let i;
