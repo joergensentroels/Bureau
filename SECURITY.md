@@ -122,6 +122,18 @@ code execution on the Bureau host. Rules that follow:
 4. **Approve hard-floor actions from the trusted host.** If you do use the operator token remotely,
    understand you have moved shell-approval authority to that browser.
 
+**One consequence of proxying:** requests arriving through a tunnel reach Bureau from `127.0.0.1`, so
+the failed-auth damper cannot tell remote clients apart — every proxied caller shares one counter with
+the local machine. A remote probe therefore trips the damper for local unauthenticated requests too.
+This can't lock you out (a valid token is never throttled, and any success clears the counter), but it
+does mean a `429` where you'd expect a `401`; the UI explains that state and clears the stored token so
+the next load re-prompts. Keying on a proxy-supplied identity header would restore per-client
+granularity — deliberately not done, since a header is only as trustworthy as the proxy in front.
+
+_Verified end-to-end over `tailscale serve` (2026-07-25): HTTPS with a valid cert, the `Authorization`
+header survives the proxy, the read-only token reads but cannot write, and the SSE live feed streams
+incrementally rather than being buffered (a real run arrived in 7 chunks with gaps up to 22s)._
+
 ## Operating guidance
 
 - Keep Bureau on **loopback** (see above for the one safe way to reach it from elsewhere).

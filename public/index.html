@@ -457,6 +457,7 @@ async function api(method, route, body){
   const go = () => fetch(route,{method,cache:"no-store",headers:{"content-type":"application/json","x-workspace":curWs(),...authHeaders()},body:body?JSON.stringify(body):undefined});
   let res = await go();
   if(res.status===401 && promptToken()) res = await go();   // unlock + retry once
+  if(res.status===429) noteThrottled();                     // damper tripped — explain, don't die silently
   if(res.status===403) noteReadOnly(method,route);          // read-only token tried to write — say so plainly
   const t = await res.text();                       // tolerate empty / non-JSON bodies instead of throwing
   try{ return t?JSON.parse(t):{}; }catch{ return {raw:t}; }
@@ -506,6 +507,17 @@ async function loadRole(){
     b.style.display = ROLE==="readonly" ? "" : "none";
     b.title = "This browser holds the read-only token: you can watch runs and read everything, but starting runs, approving, and editing config need the operator token.";
   }
+}
+// The server refuses new credential attempts from an address after repeated rejections. Without this
+// the UI would just stop working silently — and the moment you hit it is the worst one: entering the
+// token for the first time on a new (often remote) machine, where a stale paste can burn attempts fast.
+// A wrong token is also cleared, so the next load re-prompts instead of burning more attempts.
+let _throttleToldYou=false;
+function noteThrottled(){
+  if(_throttleToldYou) return;
+  _throttleToldYou=true;
+  localStorage.removeItem("bureau_token");
+  alert("Bureau is refusing new credential attempts from this connection — too many rejected tokens.\n\nThis clears after about 10 minutes, or immediately once a correct token gets through from anywhere. Wait a moment, reload, and paste the token again carefully.\n\n(Note: everything arriving through a tunnel looks like one address to Bureau, so attempts are shared.)");
 }
 function noteReadOnly(method, route){
   if(ROLE!=="readonly"||_roleToldYou) return;
