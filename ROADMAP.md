@@ -41,6 +41,12 @@ The remaining backlog, roughly by value (competitive-gap analysis, 2026-07-22):
   notify-webhook at a Slack incoming webhook yourself.
 - **Office-view revamp** — the isometric office is functional (renders from `public/assets/iso/`),
   but its visual design was parked. Pure presentation, no behavior change.
+- **Remote access, last mile** — the prep shipped (see below); what's left is the transport, which is
+  operator setup rather than code: a Cloudflare Tunnel + Access hostname (or Tailscale) in front of a
+  loopback-bound Bureau. One code item is deliberately deferred: **`BUREAU_REMOTE=1`**, which would make
+  the in-app approval seam refuse *hard-floor* action types, so a stolen operator token can't be turned
+  into shell execution. Only needed if the operator token is ever used from a remote browser — the
+  recommended setup uses the read-only token there instead.
 
 ---
 
@@ -121,6 +127,18 @@ assertions + a live `--e2e`; see `test/README.md`).
   MCP sockets. Discovery via Latch's `/api/mcp/servers`; dormant when MCP is unconfigured. _Verified:
   hard-floor unit tests, graceful-when-off. Full E2E needs an MCP server in Latch's `data/mcp.json`
   (operator setup)._
+- **Remote-access hardening** (2026-07-25, `1fab9db`) — groundwork for reaching Bureau from another
+  machine. The insight driving it: the operator token can approve hard-floor approvals, so holding it is
+  equivalent to shell access on the host — the hard floor stops a rogue agent, never a human with the
+  token. So: **tokens are header-only** (`?token=` no longer authenticates anywhere, including the SSE
+  stream — a token in a URL lands in every proxy/tunnel access log), the UI reads the run stream with
+  `fetch()` + a stream reader instead of `EventSource`, a **failed-auth damper** returns 429 past 10
+  failures per address per 10 minutes and records each burst in the audit log, and **`GET /api/whoami`**
+  lets the UI badge itself `👁 read-only` and explain refusals — making the read-only token a practical
+  everyday mode for a less-trusted browser. _Live-verified 2026-07-25 against the real server in
+  throwaway workspaces: query tokens dead, roles correct, damper trips/clears, and the new stream reader
+  consumed a real 10-event run across 6 network chunks with zero unparseable frames. Also fixed
+  `test/e2e-autonomy.mjs`, unauthenticated since the auth gate landed._
 
 ---
 
