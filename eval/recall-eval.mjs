@@ -27,7 +27,7 @@ const B = `http://127.0.0.1:${PORT}`;
 const EMBED_URL = (process.env.BUREAU_EMBED_URL || "http://127.0.0.1:11434").replace(/\/+$/, "");
 const EMBED_MODEL = process.env.BUREAU_EMBED_MODEL || "nomic-embed-text";
 const HERE = path.dirname(fileURLToPath(import.meta.url));   // not URL.pathname: that is percent-encoded
-const { rankByRelevance, cosine, objectiveSignature, deliverableEmbedText, ragTerms } = await import(pathToFileURL(path.join(HERE, "..", "server.mjs")).href);
+const { rankByRelevance, cosine, objectiveSignature, deliverableChunks, ragTerms } = await import(pathToFileURL(path.join(HERE, "..", "server.mjs")).href);
 
 // The deliverable ranker Bureau shipped BEFORE 2026-07-30, kept here as the historical baseline so the
 // comparison stays reproducible. It lives in the eval rather than the server because it is retired: it
@@ -142,8 +142,19 @@ const VARIANTS = {
     const r = await (await fetch(`${B}/api/deliverables/${encodeURIComponent(name)}`, { headers: { authorization: `Bearer ${TOKEN}` } })).json();
     if (typeof r?.content === "string") docs2.push({ _key: name, name, content: r.content });
   }
-  const dvecs = new Map();
-  for (const d of docs2) dvecs.set(d.name, await embed(deliverableEmbedText(d.name, d.content)));
+  // Embed PER PASSAGE and score a document by its best passage — mirroring the server exactly. If this
+  // ever drifts back to one vector per document, the harness stops measuring what actually ships.
+  const dvecs = new Map();   // name -> Float32Array[]
+  for (const d of docs2) {
+    const vs = [];
+    for (const c of deliverableChunks(d.name, d.content)) vs.push(await embed(c.text));
+    dvecs.set(d.name, vs);
+  }
+  const bestPassage = (qv, name) => {
+    let best = 0;
+    for (const v of (dvecs.get(name) || [])) { const s = cosine(qv, v); if (s > best) best = s; }
+    return best;
+  };
 
   const DLABELS = [
     ["keeping servers healthy under heavy traffic", /production-readiness-plan|sre-tools-guide/i],
@@ -173,7 +184,7 @@ const VARIANTS = {
     const qv = await embed(q);
     const crude = retiredTermCounter(q, docs2, 10);
     const bm = rankByRelevance(q, docs2, (d) => `${d.name.replace(/[-_.]+/g, " ")} ${d.content}`, 10);
-    const sem = docs2.map((d) => ({ item: d, score: cosine(qv, dvecs.get(d.name)) })).filter((x) => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 10);
+    const sem = docs2.map((d) => ({ item: d, score: bestPassage(qv, d.name) })).filter((x) => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 10);
     for (const [name, fn] of Object.entries(DVARIANTS)) {
       const hit = fn(crude, bm, sem).some((r) => want.test(r.item.name));
       dscore[name] = (dscore[name] || 0) + (hit ? 1 : 0);

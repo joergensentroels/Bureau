@@ -49,6 +49,8 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
 | Hybrid recall — vector+BM25 fusion and every degrade-to-lexical path | units |
 | Recall de-dup: `objectiveSignature`, `dedupeMemories`, summary-over-recency, per-agent scope | units |
 | Deliverable ranking (BM25 over filename+content) + `deliverableEmbedText` | units |
+| `chunkDocument` / `deliverableChunks` — boundaries, overlap, size + count caps, title per passage | units |
+| `/api/rag` deliverable retrieval inspection | api |
 | `/api/embeddings` status + `/api/embeddings/backfill` + `/api/memory?lexical=` switch | api |
 | Approval seam validation (unknown id → 404, bad decision → 400) | api |
 | Role introspection `/api/whoami` (operator + readonly) | api |
@@ -63,6 +65,11 @@ recall@3 over 12 labelled queries against the live corpus. It exists because a s
 is a terrible reason to change a ranker — every "obvious" improvement to the fusion measured the same or
 worse. Re-run it before and after any change to `rankByRelevance`, the fusion weights, or the embedding
 model, in the same session, and compare the ordering rather than the absolute numbers.
+
+**Chunked retrieval end-to-end** (needs a live server + embedder; verified 2026-07-30): a synthetic
+12,165-char document with a distinctive fact at char 9296 is retrieved by paraphrase, and the excerpt
+returned is the buried passage rather than the document opening. Worth re-running as a script if chunking
+changes — the real corpus has no document long enough to exercise it (largest 1489 bytes).
 
 **Need a live embedding model (manually verified, scripted):**
 - `embedText` — the one network call in the vector path. Needs `ollama pull nomic-embed-text`; the

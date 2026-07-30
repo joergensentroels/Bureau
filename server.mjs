@@ -1318,15 +1318,81 @@ function pendingMemories(org, map) {
   }
   return todo;
 }
-// The text a deliverable is embedded as. The FILENAME carries real signal here
-// ("cloud-object-storage-benefit"), so it leads, humanised — an embedder reads "cloud object storage
-// benefit" better than a hyphenated slug. Content is capped because nomic-embed-text tops out around
-// 2048 tokens: a long document is represented by its opening rather than chunked. Fine while
-// deliverables are short; chunk-per-section is the upgrade if they grow.
+// A deliverable's humanised title. The FILENAME carries real signal
+// ("cloud-object-storage-benefit"), and an embedder reads "cloud object storage benefit" far better than
+// a hyphenated slug — so the title leads every chunk, giving each one document-level context.
+export const deliverableTitle = (name) => String(name || "").replace(/\.[a-z0-9]+$/i, "").replace(/[-_]+/g, " ").trim();
+// Retained for the single-vector path and for callers that just want "what this document is about".
 export function deliverableEmbedText(name, content) {
-  const title = String(name || "").replace(/\.[a-z0-9]+$/i, "").replace(/[-_]+/g, " ").trim();
-  return `${title}\n${String(content || "").slice(0, 4000)}`.trim();
+  return `${deliverableTitle(name)}\n${String(content || "").slice(0, 4000)}`.trim();
 }
+
+// ---- chunking ----------------------------------------------------------------------------------
+// One vector per document only represents the document's OPENING: nomic-embed-text stops around 2048
+// tokens, so a fact buried later in a long document is invisible to retrieval no matter how well it
+// matches. Chunking gives every passage its own vector, and the document scores as its best passage.
+const CHUNK_MAX = 1200;        // chars per chunk (~300 tokens) — comfortably inside the model's window
+const CHUNK_OVERLAP = 150;     // carried across a hard split so a sentence spanning the seam still matches
+const CHUNK_LIMIT = 24;        // bound the cost of one pathological document
+
+// Split a document into embeddable passages. Markdown-aware and boundary-preferring: split at headings
+// first, then at paragraph breaks, and only slice mid-paragraph when a single paragraph is itself
+// oversized. Each chunk is prefixed with the section heading it came from, so a chunk still carries its
+// context when read alone.
+export function chunkDocument(text, { max = CHUNK_MAX, overlap = CHUNK_OVERLAP, limit = CHUNK_LIMIT } = {}) {
+  const body = String(text || "").replace(/\r\n/g, "\n").trim();
+  if (!body) return [];
+  if (body.length <= max) return [body];
+
+  // Sections: a heading line and everything up to the next heading.
+  const lines = body.split("\n");
+  const sections = [];
+  let cur = { heading: "", lines: [] };
+  for (const line of lines) {
+    if (/^#{1,6}\s+\S/.test(line)) { if (cur.heading || cur.lines.length) sections.push(cur); cur = { heading: line.trim(), lines: [] }; }
+    else cur.lines.push(line);
+  }
+  if (cur.heading || cur.lines.length) sections.push(cur);
+
+  const out = [];
+  const push = (s) => { const t = s.trim(); if (t && out.length < limit) out.push(t); };
+  for (const sec of sections) {
+    const head = sec.heading;
+    const secBody = sec.lines.join("\n").trim();
+    const whole = [head, secBody].filter(Boolean).join("\n");
+    if (!whole) continue;
+    if (whole.length <= max) { push(whole); continue; }
+    // Too big: pack paragraphs into windows, repeating the heading so each window keeps its context.
+    const prefix = head ? `${head}\n` : "";
+    const room = Math.max(200, max - prefix.length);
+    let win = "";
+    for (const para of secBody.split(/\n\s*\n/)) {
+      const p = para.trim();
+      if (!p) continue;
+      if (p.length > room) {
+        if (win) { push(prefix + win); win = ""; }
+        // A single oversized paragraph: slice it with overlap so seams don't lose a sentence.
+        for (let i = 0; i < p.length && out.length < limit; i += Math.max(1, room - overlap)) push(prefix + p.slice(i, i + room));
+        continue;
+      }
+      if ((win ? win.length + 2 : 0) + p.length > room) { push(prefix + win); win = p; }
+      else win = win ? `${win}\n\n${p}` : p;
+    }
+    if (win) push(prefix + win);
+  }
+  return out.length ? out : [body.slice(0, max)];
+}
+// The passages a deliverable is embedded as, each carrying the document title. Index is the chunk's
+// position, and `${name}#${idx}` is its row key (filenames cannot contain "#", so that split is exact).
+export function deliverableChunks(name, content) {
+  const title = deliverableTitle(name);
+  const parts = chunkDocument(content);
+  if (!parts.length) return title ? [{ idx: 0, text: title }] : [];
+  return parts.map((text, idx) => ({ idx, text: `${title}\n${text}`.trim() }));
+}
+const chunkKey = (name, idx) => `${name}#${idx}`;
+const docNameFromKey = (key) => { const i = String(key).lastIndexOf("#"); return i > 0 ? String(key).slice(0, i) : String(key); };
+const chunkIdxFromKey = (key) => { const i = String(key).lastIndexOf("#"); return i > 0 ? Number(String(key).slice(i + 1)) || 0 : 0; };
 // Every deliverable in this workspace as {name, content}. Shared by retrieval AND by embedding, so the
 // two can never disagree about what the corpus is.
 async function readAllDeliverables() {
@@ -1338,17 +1404,27 @@ async function readAllDeliverables() {
   }
   return docs;
 }
-// Which deliverables still need a vector (never embedded, or the file changed since).
+// Which deliverables need (re)embedding. A document is stale unless EVERY expected chunk key is present
+// with the current document hash and no leftover keys remain — which also migrates the pre-chunking rows
+// (keyed by bare filename) automatically, since they neither match the new keys nor the new hash.
 function pendingDeliverables(docs, map) {
   const todo = [];
   for (const d of docs) {
-    const text = deliverableEmbedText(d.name, d.content);
-    if (!text) continue;
-    const hash = textHash(text);
-    const have = map.get(d.name);
-    if (!have || have.hash !== hash) todo.push({ key: d.name, text, hash });
+    const chunks = deliverableChunks(d.name, d.content);
+    if (!chunks.length) continue;
+    const hash = textHash(`${d.name}\n${d.content || ""}`);   // the DOCUMENT's hash, stamped on every chunk
+    const own = [...map.keys()].filter((k) => docNameFromKey(k) === d.name);
+    const fresh = own.length === chunks.length && chunks.every((c) => map.get(chunkKey(d.name, c.idx))?.hash === hash);
+    if (!fresh) todo.push({ name: d.name, hash, chunks, stale: own });
   }
   return todo;
+}
+// Remove specific rows (used to clear a document's old chunks before rewriting them). Exact keys, never
+// a LIKE pattern: filenames may contain "_", which LIKE would treat as a wildcard.
+function deleteEmbeddings(ws, kind, keys) {
+  if (!keys.length) return;
+  const stmt = db.prepare("DELETE FROM embeddings WHERE ws = ? AND kind = ? AND key = ?");
+  for (const k of keys) { try { stmt.run(ws, kind, k); } catch {} }
 }
 // Embed a list of {key, text, hash} into one kind. Bounded per call so a large backlog can't stall
 // anything, and it gives up early if the embedder is clearly down rather than grinding through the lot.
@@ -1366,9 +1442,28 @@ async function embedPendingMemories(ws = currentWs(), max = 200) {
   const org = await readOrg();
   return embedBatch(ws, "memory", pendingMemories(org, embeddingMap(ws, "memory")), max);
 }
+// Deliverables embed a document at a time (all its chunks, or none) so a partially-embedded document
+// can never be mistaken for a fresh one. Old chunks are cleared only once the new ones are in hand.
 async function embedPendingDeliverables(ws = currentWs(), max = 200) {
   const docs = await readAllDeliverables();
-  return embedBatch(ws, "deliverable", pendingDeliverables(docs, embeddingMap(ws, "deliverable")), max);
+  const todo = pendingDeliverables(docs, embeddingMap(ws, "deliverable"));
+  let embedded = 0, failed = 0, docsDone = 0;
+  for (const t of todo) {
+    if (embedded >= max) break;
+    const vecs = [];
+    for (const c of t.chunks) {
+      const v = await embedText(c.text);
+      if (!v) { failed++; break; }
+      vecs.push({ idx: c.idx, v });
+    }
+    if (vecs.length !== t.chunks.length) { if (failed >= 3 && embedded === 0) break; continue; }
+    deleteEmbeddings(ws, "deliverable", t.stale);
+    for (const { idx, v } of vecs) putEmbedding(ws, "deliverable", chunkKey(t.name, idx), t.hash, v);
+    embedded += vecs.length; docsDone++;
+  }
+  const chunksPending = todo.reduce((n, t) => n + t.chunks.length, 0);
+  return { pending: chunksPending, embedded, failed, remaining: Math.max(0, chunksPending - embedded),
+    documents: todo.length, documentsEmbedded: docsDone };
 }
 // Both corpora. Used by the backfill endpoint and fired after a run persists.
 async function embedPendingAll(ws = currentWs(), max = 200) {
@@ -1415,19 +1510,42 @@ async function retrieveRelevant(query, limit = 3, excludeName = "") {
   const deep = Math.max(limit, 10);
   const lex = rankByRelevance(q, docs, deliverableLexText, deep).map((r) => r.item);
   let sem = [];
+  const bestChunk = new Map();   // name -> chunk index that matched best, for the excerpt
   try {
     const map = embeddingMap(currentWs(), "deliverable");
     if (map.size) {
       const qv = await embedText(q);
       if (qv) {
         const v = new Float32Array(qv);
-        sem = docs.map((d) => ({ d, s: cosine(v, map.get(d.name)?.vec) })).filter((x) => x.s > 0)
-          .sort((a, b) => b.s - a.s).slice(0, deep).map((x) => x.d);
+        // Vectors are per PASSAGE, so a document scores as its best passage — a long document is not
+        // penalised for the parts that happen to be irrelevant.
+        const byDoc = new Map();
+        for (const [key, row] of map) {
+          const name = docNameFromKey(key);
+          if (!byDoc.has(name)) byDoc.set(name, []);
+          byDoc.get(name).push({ idx: chunkIdxFromKey(key), vec: row.vec });
+        }
+        sem = docs.map((d) => {
+          let best = 0, bestIdx = -1;
+          for (const c of (byDoc.get(d.name) || [])) { const s = cosine(v, c.vec); if (s > best) { best = s; bestIdx = c.idx; } }
+          if (bestIdx >= 0) bestChunk.set(d.name, bestIdx);
+          return { d, s: best };
+        }).filter((x) => x.s > 0).sort((a, b) => b.s - a.s).slice(0, deep).map((x) => x.d);
       }
     }
   } catch {}
   const ranked = sem.length ? rrfFuse([lex, sem], (d) => d.name, { limit }).map((r) => r.item) : lex.slice(0, limit);
-  return ranked.map((d) => ({ name: d.name, excerpt: String(d.content || "").slice(0, 600) }));
+  // Excerpt the passage that actually matched, not always the document's opening — for a long document
+  // that is the difference between showing the agent the relevant part and showing it the title page.
+  return ranked.map((d) => {
+    const idx = bestChunk.get(d.name);
+    let excerpt = String(d.content || "").slice(0, 600);
+    if (idx != null && idx > 0) {
+      const parts = chunkDocument(d.content);
+      if (parts[idx]) excerpt = parts[idx].slice(0, 600);
+    }
+    return { name: d.name, excerpt };
+  });
 }
 
 // Agent-to-agent consult: spin up `peer` for a BOUNDED, no-side-effects opinion on `question` from
@@ -3661,6 +3779,13 @@ const server = createServer(async (req, res) => {
       const results = lexicalOnly ? recallSharedMemory(org, q, limit) : await recallSharedMemoryHybrid(org, q, limit);
       return send(res, 200, { query: q, mode: lexicalOnly ? "lexical" : "hybrid", results });
     }
+    // Deliverable RAG, inspectable — the exact block agents get in their prompt. The memory side has had
+    // /api/memory since day one; this path had none, which is part of why it sat at 21% recall unnoticed.
+    if (p === "/api/rag" && req.method === "GET") {
+      const q = url.searchParams.get("q") || "";
+      const limit = Math.min(10, Math.max(1, Number(url.searchParams.get("limit")) || 3));
+      return send(res, 200, { query: q, results: await retrieveRelevant(q, limit) });
+    }
     // Vector-store status: is an embedder reachable, what's embedded, what's still pending.
     if (p === "/api/embeddings" && req.method === "GET") {
       const ws = currentWs();
@@ -3669,9 +3794,12 @@ const server = createServer(async (req, res) => {
       const probe = /^(1|true|yes)$/i.test(url.searchParams.get("probe") || "");
       const ready = probe ? !!(await embedText("ping", { timeoutMs: 20000 })) : null;
       const dims = [...new Set([...mem.values(), ...del.values()].map((v) => v.vec.length))];
+      // Counts are in ROWS (memory entries, deliverable passages) so embedded and pending are comparable;
+      // `documents` is the human-facing number for deliverables, which are chunked.
+      const dTodo = pendingDeliverables(await readAllDeliverables(), del);
       const kinds = {
         memory: { embedded: mem.size, pending: pendingMemories(org, mem).length },
-        deliverable: { embedded: del.size, pending: pendingDeliverables(await readAllDeliverables(), del).length },
+        deliverable: { embedded: del.size, pending: dTodo.reduce((n, t) => n + t.chunks.length, 0), documentsPending: dTodo.length },
       };
       return send(res, 200, { url: EMBED_URL, model: EMBED_MODEL, loopback: isLoopbackUrl(EMBED_URL), kinds, dims, ready,
         embedded: kinds.memory.embedded + kinds.deliverable.embedded,

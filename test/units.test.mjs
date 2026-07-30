@@ -8,7 +8,8 @@ import {
   rankByRelevance, recallSharedMemory, makeSemaphore,
   approvalActType, remoteBlocksApproval, REMOTE_MODE,
   packVec, unpackVec, cosine, rrfFuse, memoryKey, memoryText,
-  objectiveSignature, dedupeMemories, deliverableEmbedText,
+  objectiveSignature, dedupeMemories, deliverableEmbedText, deliverableTitle,
+  chunkDocument, deliverableChunks,
 } from "../server.mjs";
 
 let pass = 0, fail = 0;
@@ -317,6 +318,44 @@ chk("  includes the content", deliverableEmbedText("a.md", "hello world").includ
 chk("  caps long content", deliverableEmbedText("a.md", "x".repeat(9000)).length < 4200);
 eq("  no content → just the title", deliverableEmbedText("only-a-name.md", ""), "only a name");
 eq("  tolerates nulls", deliverableEmbedText(null, null), "");
+
+console.log("# chunkDocument — long documents split into embeddable passages");
+{
+  eq("  empty → no chunks", chunkDocument(""), []);
+  eq("  tolerates null", chunkDocument(null), []);
+  eq("  short text stays one chunk", chunkDocument("just a short note").length, 1);
+  // A document under the limit must be untouched — chunking may not alter the common case.
+  eq("  short text is returned verbatim", chunkDocument("just a short note")[0], "just a short note");
+
+  // Heading-boundary splitting, with each chunk carrying its heading for context.
+  const doc = ["# Alpha", "a".repeat(900), "", "# Beta", "b".repeat(900), "", "# Gamma", "c".repeat(900)].join("\n");
+  const parts = chunkDocument(doc);
+  chk("  splits a long doc at headings", parts.length >= 3);
+  chk("  every chunk carries its heading", parts.every((p) => /^#\s+(Alpha|Beta|Gamma)/.test(p)));
+  chk("  content is distributed, not duplicated wholesale", parts.some((p) => p.includes("aaa")) && parts.some((p) => p.includes("bbb")) && parts.some((p) => p.includes("ccc")));
+
+  // A single oversized paragraph must still be split, with overlap so a seam can't swallow a sentence.
+  const huge = chunkDocument("# Big\n" + "x".repeat(5000));
+  chk("  slices an oversized paragraph", huge.length > 1);
+  chk("  respects the size limit (heading allowance aside)", huge.every((p) => p.length <= 1400));
+  chk("  overlaps hard slices", huge.length > 1 && huge[0].slice(-50) && huge[1].includes(huge[0].slice(-50)));
+
+  // Cost bound: one pathological document cannot produce unbounded vectors.
+  chk("  caps the chunk count", chunkDocument("y".repeat(200000)).length <= 24);
+  // No chunk may be empty — an empty string embeds to nothing useful and would waste a row.
+  chk("  never emits an empty chunk", chunkDocument(doc).every((p) => p.trim().length > 0));
+}
+
+console.log("# deliverableChunks — title on every passage, index is the row key");
+{
+  eq("  short doc → single chunk at index 0", deliverableChunks("org-structure.md", "who reports to whom").length, 1);
+  chk("  title leads each chunk", deliverableChunks("org-structure.md", "who reports to whom")[0].text.startsWith("org structure"));
+  const many = deliverableChunks("guide.md", ["# One", "a".repeat(900), "# Two", "b".repeat(900)].join("\n"));
+  chk("  indexes are sequential from 0", many.every((c, i) => c.idx === i));
+  chk("  every chunk keeps the document title", many.every((c) => c.text.startsWith("guide")));
+  eq("  empty content still yields the title", deliverableChunks("only-name.md", "").length, 1);
+  eq("  deliverableTitle humanises the filename", deliverableTitle("ci-cd_workflows.md"), "ci cd workflows");
+}
 
 console.log("# memory keys — stable identity for embedding rows");
 eq("  uses agentId:at when a timestamp exists", memoryKey("ag1", { at: 1700000000000 }), "ag1:1700000000000");

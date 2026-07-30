@@ -43,9 +43,7 @@ The remaining backlog, roughly by value (competitive-gap analysis, 2026-07-22):
     actively hurts, and the lexical/hybrid gap (5/12 → 10/12) is the result that matters. The two
     remaining misses are the tail of a small corpus, not a bug — tuning them away would cost recall
     elsewhere, which is precisely the trap.
-  - Deliverable embedding: **done**, see Shipped. Next candidate if documents get longer: chunk a
-    deliverable per section instead of embedding its opening 4000 characters, since `nomic-embed-text`
-    tops out around 2048 tokens.
+  - Deliverable embedding and chunking: both **done**, see Shipped.
 - **Outbound integrations** — ◐ partial. **GitHub publish is done** (`github_file` / `github_repo`
   actions → Latch's native GitHub connector; Latch holds the token and commits on approval, Bureau
   stores nothing) with a **per-workspace target repo/owner** (setup: `GITHUB.md`). Still open only:
@@ -179,6 +177,22 @@ assertions + a live `--e2e`; see `test/README.md`).
   including two where BM25 returned nothing at all ("why lists help you not forget steps" → the
   checklist work; "picking what matters most next quarter" → the Q3 priority work, with no shared term
   since the corpus says "Q3"). One query surfaced no correct match in either mode; see **Next**._
+- **Per-passage chunking for long deliverables** (2026-07-30) — one vector per document only represents
+  its *opening*, since `nomic-embed-text` stops near 2048 tokens, so a fact buried later in a long
+  document was invisible to retrieval however well it matched. Documents are now split into ~1200-char
+  passages (heading boundaries first, then paragraph breaks, slicing mid-paragraph with overlap only when
+  a paragraph is itself oversized), each carrying the document title for context, each with its own
+  vector keyed `filename#idx`. A document scores as its **best** passage, so a long document isn't
+  penalised for its irrelevant parts — and the prompt excerpt is now the passage that actually matched
+  rather than always the opening. Embedding is per document (all passages or none), so a partially
+  embedded document can't be mistaken for a fresh one; the pre-chunking rows migrate automatically.
+  **Honest scope: zero measurable gain on the current corpus, whose largest document is 1489 bytes
+  against the old 4000-char cap.** This is forward-looking. _Verified on a synthetic 12,165-char runbook
+  with a distinctive fact at char 9296 — past where the old path could ever see: retrieved correctly by
+  paraphrase, excerpt contained the buried passage, and passage-vs-opening similarity was 0.677 vs 0.427.
+  Re-verified no regression on the real corpus (still 12/14), and the eval now embeds per passage so it
+  measures what actually ships._ Also adds `GET /api/rag?q=` — deliverable retrieval was the one
+  retrieval path with no inspection endpoint, which is part of how it sat at 21% unnoticed.
 - **Deliverable retrieval, semantic + BM25** (2026-07-30) — the "relevant existing company deliverables"
   block in every agent prompt was the weakest retrieval path in Bureau, and nobody had measured it. It
   used a term counter that required **2+ distinct query terms to match at all**, so any paraphrase

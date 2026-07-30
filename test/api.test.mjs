@@ -134,6 +134,15 @@ const ok = (c, m) => (c ? pass : fail).push(m);
     { const b = (await api("POST", "/api/embeddings/backfill", {})).j;
       ok(typeof b.embedded === "number" && typeof b.pending === "number" && typeof b.remaining === "number", "backfill: returns embedded/pending/remaining");
       ok(b.pending === 0 && b.embedded === 0, "backfill: nothing pending in a fresh workspace, so nothing embedded"); }
+    // Deliverable RAG is inspectable now (the memory side always was) — the same block agents get.
+    { const r = await api("GET", "/api/rag?q=anything&limit=2");
+      ok(r.status === 200 && Array.isArray(r.j.results), "rag: returns a results array");
+      ok(r.j.query === "anything", "rag: echoes the query");
+      ok(r.j.results.length === 0, "rag: empty in a fresh workspace with no deliverables"); }
+    ok((await api("GET", "/api/rag")).status === 200, "rag: tolerates a missing query");
+    { const e = (await api("GET", "/api/embeddings")).j;
+      ok(typeof e.kinds?.deliverable?.documentsPending === "number", "embeddings: reports deliverable documents pending (chunked corpus)"); }
+
     // The lexical/hybrid switch is what makes a semantic-vs-keyword A/B possible.
     ok((await api("GET", "/api/memory?q=anything&lexical=1")).j.mode === "lexical", "memory: ?lexical=1 forces BM25-only recall");
     ok((await api("GET", "/api/memory?q=anything")).j.mode === "hybrid", "memory: defaults to hybrid recall");
