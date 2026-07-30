@@ -62,6 +62,7 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
 | Deliverable ranking (BM25 over filename+content) + `deliverableEmbedText` | units |
 | `chunkDocument` / `deliverableChunks` — boundaries, overlap, size + count caps, title per passage | units |
 | `/api/rag` deliverable retrieval inspection | api |
+| `DELETE /api/deliverables/:name` — validation, not-found, traversal neutralised | api (happy path live) |
 | `/api/embeddings` status + `/api/embeddings/backfill` + `/api/memory?lexical=` switch | api |
 | Approval seam validation (unknown id → 404, bad decision → 400) | api |
 | Role introspection `/api/whoami` (operator + readonly) | api |
@@ -76,6 +77,12 @@ recall@3 over 12 labelled queries against the live corpus. It exists because a s
 is a terrible reason to change a ranker — every "obvious" improvement to the fusion measured the same or
 worse. Re-run it before and after any change to `rankByRelevance`, the fusion weights, or the embedding
 model, in the same session, and compare the ordering rather than the absolute numbers.
+
+**Deliverable deletion end-to-end** (needs a live server + embedder; verified 2026-07-31, 16 checks): the
+happy path needs a real file on disk, which only an agent run or a direct write produces, so the server
+suite covers validation/not-found/traversal and the round-trip is scripted against a throwaway workspace —
+archive is byte-identical and readable via the versions endpoint, retrieval stops citing the document,
+neighbours untouched, no orphaned pending vectors, exactly one audit row, and a second delete 404s.
 
 **Chunked retrieval end-to-end** (needs a live server + embedder; verified 2026-07-30): a synthetic
 12,165-char document with a distinctive fact at char 9296 is retrieved by paraphrase, and the excerpt

@@ -63,10 +63,9 @@ The remaining backlog, roughly by value (competitive-gap analysis, 2026-07-22):
   notify-webhook at a Slack incoming webhook yourself.
 - **Office-view revamp** — the isometric office is functional (renders from `public/assets/iso/`),
   but its visual design was parked. Pure presentation, no behavior change.
-- **No way to delete a deliverable.** There is no `DELETE /api/deliverables/:name`, so a document can be
-  written, versioned, signed off and delivered — but never removed, through the API or the UI. Surfaced by
-  the live e2e, which creates real drafts and cannot tidy them up. Wants care rather than speed: deliverables
-  carry version history, so deletion should probably archive rather than unlink, and it should be operator-only.
+- **Deliverable delete: API done (see Shipped), UI still missing.** The endpoint exists and archives
+  safely; the deliverables list in the browser has no remove control yet, so today deletion is
+  curl-or-nothing. Small, self-contained follow-up.
 - **Remote access, last mile** — code complete (see Shipped). What remains is operator setup only:
   Bureau is already served on the tailnet at `:8443` alongside Compass; a Cloudflare Tunnel + Access
   hostname is the alternative for machines that can't run a mesh client. Untested piece: whether a
@@ -192,6 +191,18 @@ assertions + a live `--e2e`; see `test/README.md`).
   including two where BM25 returned nothing at all ("why lists help you not forget steps" → the
   checklist work; "picking what matters most next quarter" → the Q3 priority work, with no shared term
   since the corpus says "Q3"). One query surfaced no correct match in either mode; see **Next**._
+- **Deliverable deletion, archiving rather than destroying** (2026-07-31) — closed a gap that had always
+  been there: a document could be written, versioned, QA'd, signed off and delivered but never removed.
+  `DELETE /api/deliverables/:name` moves the file into the existing `.versions` store as `name.<ts>` (the
+  same shape a normal overwrite leaves), so a mistake is recoverable and the content stays readable via
+  `GET /api/deliverables/:name/versions/:ts`. **It also drops the document's embedding rows** — without
+  that a deleted document keeps its vectors and goes on being recalled into agent prompts as "relevant
+  existing company work", citing a file that no longer exists. Operator-only via the existing auth gate,
+  and audited with the archive filename. The org entry is dropped rather than tombstoned on purpose:
+  `deleted` is not one of the four real statuses, and a fake one would leak into every dashboard that
+  walks `org.deliverables`. _Live-verified: archive byte-identical and readable back, retrieval stops
+  citing it, neighbouring documents untouched, no orphaned pending vectors, one audit row, second delete
+  404s. Traversal collapses to a basename inside drafts/ and leaves files outside it alone._
 - **Per-passage chunking for long deliverables** (2026-07-30) — one vector per document only represents
   its *opening*, since `nomic-embed-text` stops near 2048 tokens, so a fact buried later in a long
   document was invisible to retrieval however well it matched. Documents are now split into ~1200-char

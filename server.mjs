@@ -3119,6 +3119,46 @@ const server = createServer(async (req, res) => {
       logAudit({ kind: "deliverable", name, actionType: "status:" + st, decision: "you" });
       return send(res, 200, org.deliverables[name]);
     }
+    // Remove a deliverable. ARCHIVES rather than destroys: the file is moved into the existing .versions
+    // store as `name.<ts>` — the same shape a normal overwrite leaves behind — so a mistake is
+    // recoverable. Deliverables carry version history and sign-off state; unlinking one outright would
+    // throw that away.
+    //
+    // Precisely what survives: the archived FILE is readable via
+    // `GET /api/deliverables/:name/versions/:ts` (that endpoint reads the .versions directory directly,
+    // not org metadata), and the deletion is recorded in the audit log with the archive filename. What
+    // does NOT survive is the versions LIST, which is built from the org entry this removes — so keep the
+    // `archivedAs` value from the response, or find it later via `/api/audit?kind=deliverable`. The org
+    // entry is dropped rather than tombstoned on purpose: "deleted" is not one of the four real statuses,
+    // and a fake status would leak into the dashboards and counts that walk org.deliverables.
+    //
+    // Also drops the document's embedding rows. Without that, a deleted document keeps its vectors and
+    // goes on being recalled into agent prompts as "relevant existing company work" — retrieval would
+    // cheerfully cite a file that no longer exists.
+    //
+    // Operator-only, like every other non-GET: the auth gate rejects a read-only token before this runs.
+    if (p.startsWith("/api/deliverables/") && req.method === "DELETE") {
+      const name = path.basename(decodeURIComponent(p.slice("/api/deliverables/".length)));
+      if (!validDeliverableName(name)) return send(res, 400, { error: "bad name" });
+      const full = path.join(draftsDir(), name);
+      if (path.dirname(full) !== draftsDir()) return send(res, 403, { error: "forbidden" });
+      let bytes = 0;
+      try { bytes = (await stat(full)).size; } catch { return send(res, 404, { error: "no such deliverable" }); }
+      const at = Date.now();
+      try {
+        await mkdir(versionsDir(), { recursive: true });
+        await rename(full, path.join(versionsDir(), `${name}.${at}`));
+      } catch (e) { return send(res, 500, { error: "could not archive: " + e.message }); }
+      const removed = await updateOrg((o) => {
+        const prev = o.deliverables[name] || null;
+        delete o.deliverables[name];
+        return prev;
+      });
+      deleteEmbeddings(currentWs(), "deliverable", [...embeddingMap(currentWs(), "deliverable").keys()].filter((k) => docNameFromKey(k) === name));
+      logAudit({ kind: "deliverable", name, actionType: "deleted", decision: "you", bytes,
+        summary: `Archived ${name} (${bytes} bytes) to .versions/${name}.${at}; status was ${removed?.status || "unknown"}` });
+      return send(res, 200, { ok: true, name, archivedAs: `${name}.${at}`, bytes, previousStatus: removed?.status || "" });
+    }
     // Deliverable version history (list of prior versions, newest first).
     if (p.startsWith("/api/deliverables/") && p.endsWith("/versions") && req.method === "GET") {
       const name = path.basename(decodeURIComponent(p.slice("/api/deliverables/".length, -"/versions".length)));

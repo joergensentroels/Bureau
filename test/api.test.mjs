@@ -3,9 +3,11 @@
 // workspace that is created and deleted here, so your real (default) company is never touched.
 //   start:  BUREAU_PORT=4174 node server.mjs
 //   run:    BUREAU_PORT=4174 node test/api.test.mjs
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+const REPO_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));   // test/ -> repo root
 const PORT = process.env.BUREAU_PORT || 4174;
 const B = `http://127.0.0.1:${PORT}`;
 let WS = "default";
@@ -124,6 +126,17 @@ const ok = (c, m) => (c ? pass : fail).push(m);
     { const r = (await api("GET", "/api/runs")).j; ok(Array.isArray(r.runs) && r.trends && r.trends.total === 0, "runs history empty + trends on a fresh ws"); }
     { const pf = (await api("GET", "/api/performance")).j; ok(Array.isArray(pf.agents) && typeof pf.auditWindow === "number", "performance well-formed"); }
     { const au = (await api("GET", "/api/audit?kind=deliverable")).j; ok(Array.isArray(au.audit) && au.totals && au.audit.every((r) => r.kind === "deliverable"), "audit endpoint filters by kind"); }
+
+    // ---- deliverable delete: archives, drops vectors, audits, and validates ----
+    ok((await api("DELETE", "/api/deliverables/nope-not-here.md")).status === 404, "delete: unknown deliverable → 404");
+    // Traversal is neutralised by path.basename BEFORE validation, so "../../server.mjs" collapses to the
+    // plain name "server.mjs" and is looked for INSIDE drafts/, where it isn't — hence 404, not 400.
+    // The assertion that carries weight is the second one: the real file outside drafts/ is still there.
+    ok((await api("DELETE", "/api/deliverables/..%2F..%2Fserver.mjs")).status === 404, "delete: traversal collapses to a basename inside drafts/ (404)");
+    ok(existsSync(path.join(REPO_ROOT, "server.mjs")), "delete: a traversal attempt left the real server.mjs untouched");
+    ok((await api("DELETE", "/api/deliverables/no-extension")).status === 400, "delete: name without an extension → 400");
+    // A real round-trip needs a file on disk, which only an agent run creates — so the happy path is
+    // verified live (see TESTING.md); here we pin the validation and not-found behaviour.
 
     // ---- semantic memory: vector store status + backfill (no embedder needed for these paths) ----
     { const e = (await api("GET", "/api/embeddings")).j;
