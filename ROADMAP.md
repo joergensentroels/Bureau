@@ -27,12 +27,22 @@ concurrency gain (measured 4.6x, but confounded). **Outstanding:**
 
 The remaining backlog, roughly by value (competitive-gap analysis, 2026-07-22):
 
-- **Semantic memory — follow-up from the live A/B.** (Duplicate collapsing: **fixed**, see Shipped.)
-  - **Neither ranker is reliable on ops-flavoured paraphrases.** "keeping servers healthy under heavy
-    traffic" failed to surface the obvious match (Ava's monitoring / auto-scaling / load-testing entry)
-    in either mode — BM25 matched the stopword-ish "under", and the vector ranking preferred unrelated
-    entries. Worth investigating whether embedding `objective + summary` alone is too thin, since the
-    QA-criteria boilerplate in many entries likely dominates the vector.
+- **Semantic memory — the paraphrase miss was investigated and CLOSED as "no change".** Both hypotheses
+  were wrong, and every proposed fix measured the same or worse. Written up here so nobody re-opens it on
+  a hunch; re-runnable via `node eval/recall-eval.mjs`.
+  - Not the QA-criteria boilerplate: embedding only the objective's first line moved the target entry
+    from rank #7 to #8 of 39 — no better.
+  - Not the missing `nomic-embed-text` task prefixes (`search_query:` / `search_document:`): adding them
+    moved the target from #7 to **#10**, i.e. worse for this query, though it does tighten scores
+    slightly elsewhere.
+  - Real mechanism: the target ranks #7 semantically, so it *does* reach fusion, but loses to keyword
+    hits sitting at lexical ranks 1–2. Yet **suppressing those keyword hits does not help overall** —
+    measured recall@3 across 12 labelled queries: shipped equal-weight RRF **10/12**, weak-lexical-hits
+    dropped 10/12, semantic weighted 2× or 3× **9/12**, semantic alone 9/12, lexical alone **5/12**.
+  - Conclusion: the shipped configuration is the best of everything tried, weighting the vectors higher
+    actively hurts, and the lexical/hybrid gap (5/12 → 10/12) is the result that matters. The two
+    remaining misses are the tail of a small corpus, not a bug — tuning them away would cost recall
+    elsewhere, which is precisely the trap.
   - Still open: extend embedding from memory entries to **deliverables**. The table is already keyed by
     `kind`, so that's a new kind plus a backfill, not a redesign.
 - **Outbound integrations** — ◐ partial. **GitHub publish is done** (`github_file` / `github_repo`

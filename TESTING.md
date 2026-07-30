@@ -7,6 +7,7 @@ node test/run-all.mjs --serve     # pure + server suites; boots a throwaway serv
 node test/run-all.mjs             # pure suites; server suites only if a server is already up on :4174
 node test/run-all.mjs --e2e       # also the live autonomy e2e (needs Latch + a local model)
 node test/coverage-audit.mjs      # soft audit: exported fns / routes not tested AND not listed below
+node eval/recall-eval.mjs         # recall@3 of memory retrieval, shipped ranker vs alternatives (live)
 ```
 
 `--serve` self-hosts a Bureau on :4174 (generating its own `OPERATOR_TOKEN`, so no Latch/auth.json
@@ -55,6 +56,12 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
 | SSRF guard (`fetchUrl`, `apiCall`, incl. DNS-pin refusals) | net |
 
 ## Intentionally not auto-tested (accounted for — audit allowlist)
+
+**Retrieval quality is measured, not asserted** (`eval/recall-eval.mjs`, needs a live server + embedder):
+recall@3 over 12 labelled queries against the live corpus. It exists because a single bad-looking query
+is a terrible reason to change a ranker — every "obvious" improvement to the fusion measured the same or
+worse. Re-run it before and after any change to `rankByRelevance`, the fusion weights, or the embedding
+model, in the same session, and compare the ordering rather than the absolute numbers.
 
 **Need a live embedding model (manually verified, scripted):**
 - `embedText` — the one network call in the vector path. Needs `ollama pull nomic-embed-text`; the
