@@ -36,6 +36,22 @@ cross-sibling handoff, so siblings can duplicate reasoning the sequential path w
     the case parallel was built for, and it is untested because it spends real money. Needs an explicit
     go-ahead; `eval/parallel-eval.mjs` is ready to run against it.
 
+**The eval gate is currently RED, and deliberately left that way.** `node eval/run-eval.mjs --baseline`
+(8 reps, 2026-07-31) reports `criteria.singleShotRate: 100% → 78%`, past the 15% tolerance. Decompose
+(50%/75%) and verify (100%) match the baseline exactly.
+  - **Not user-visible.** Criteria's *effective* rate is still 100% — the retry ladder absorbs every
+    first-shot miss. The cost is latency and tokens (p95 18.8s), not failed runs.
+  - **Bureau's code is not the cause, on evidence.** The last change to the criteria prompt (`67f7e6e`)
+    landed at 09:18Z, *before* the 10:40Z baseline, and `git log -S` finds no commit after the baseline
+    touching `buildCriteriaMsgs`, `validateCriteria` or `deriveCriteria`. The eval cases and harness are
+    unchanged too. Same code, different score.
+  - **The model server changed underneath it.** In July, port 11434 answered with llama.cpp's
+    "Start it with --embeddings"; today it is genuinely Ollama 0.32.1. So the baseline is not
+    apples-to-apples, and a swapped inference backend is the most likely explanation.
+  - **Re-baselining is left to the operator on purpose.** Running `--save-baseline` would turn the gate
+    green in one command and erase the only signal that anything moved. If the new backend is the intended
+    one, re-baseline deliberately and say so in the commit — don't let a red gate get quietly normalised.
+
 The remaining backlog, roughly by value (competitive-gap analysis, 2026-07-22):
 
 - **Semantic memory — the paraphrase miss was investigated and CLOSED as "no change".** Both hypotheses
