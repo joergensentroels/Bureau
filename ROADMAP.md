@@ -28,11 +28,12 @@ concurrency gain (measured 4.6x, but confounded). **Outstanding:**
 The remaining backlog, roughly by value (competitive-gap analysis, 2026-07-22):
 
 - **Semantic memory — TRUE vector embeddings** (the "semantic" half; the "shared" half shipped, see
-  below). Blocked on infra: the local model server (llama.cpp-backed, port 11434) does NOT serve
-  embeddings, so this needs a dedicated embedding model pulled (~270MB) or the server relaunched with
-  embeddings enabled. Once available: embed memory/deliverables, store vectors in SQLite, cosine
-  similarity in JS — dropping in behind the existing `rankByRelevance` interface. BM25 recall is the
-  stand-in until then.
+  below). **No longer infra-blocked** — that earlier note was wrong. Re-probed 2026-07-30: port 11434 is
+  real Ollama (`ollama.exe serve`, v0.32.1), and `/api/embed` answers **501, not 404** — the route is
+  there, `qwen3:8b` just isn't an embedding model. All this needs is an embedding model pulled
+  (`ollama pull nomic-embed-text`, ~274MB); no server relaunch, no flags. Then: embed memory +
+  deliverables, store vectors in SQLite, cosine similarity in JS, dropped in behind the existing
+  `rankByRelevance` interface with BM25 as the fallback when a vector is missing.
 - **Outbound integrations** — ◐ partial. **GitHub publish is done** (`github_file` / `github_repo`
   actions → Latch's native GitHub connector; Latch holds the token and commits on approval, Bureau
   stores nothing) with a **per-workspace target repo/owner** (setup: `GITHUB.md`). Still open only:
