@@ -8,6 +8,7 @@ node test/run-all.mjs             # pure suites; server suites only if a server 
 node test/run-all.mjs --e2e       # also the live autonomy e2e (needs Latch + a local model)
 node test/coverage-audit.mjs      # soft audit: exported fns / routes not tested AND not listed below
 node eval/recall-eval.mjs         # recall@3 of memory retrieval, shipped ranker vs alternatives (live)
+node eval/parallel-eval.mjs       # sequential-vs-parallel delegation A/B, repeated runs (live, ~4min/pair)
 ```
 
 `--serve` self-hosts a Bureau on :4174 (generating its own `OPERATOR_TOKEN`, so no Latch/auth.json
@@ -35,7 +36,7 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
 
 | Area | Where tested |
 |---|---|
-| Parallel primitive `makeSemaphore` | units |
+| Parallel primitive `makeSemaphore` — reaches the cap, not merely stays under it | units |
 | Shared memory `rankByRelevance` / `recallSharedMemory` / `/api/memory` | units + api |
 | SOPs `normSop` / `sopObjective` / CRUD | units + api |
 | `mcp_call` hard-floor | decision |

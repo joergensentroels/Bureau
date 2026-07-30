@@ -221,12 +221,20 @@ await (async () => {
   console.log("# makeSemaphore — bounded async concurrency (parallel delegation primitive)");
   const sem = makeSemaphore(3);
   let active = 0, peak = 0, done = 0;
+  const started = Date.now();
   const results = await Promise.all(Array.from({ length: 12 }, (_, i) => sem(async () => {
     active++; peak = Math.max(peak, active);
     await new Promise((r) => setTimeout(r, 15));
     active--; done++; return i * 2;
   })));
-  chk("  caps concurrency at max (1 <= peak <= 3)", peak >= 1 && peak <= 3);
+  const elapsed = Date.now() - started;
+  // This must assert peak REACHES the cap, not merely that it doesn't exceed it. The original version
+  // checked `1 <= peak <= 3`, which a semaphore that serialised everything would also satisfy — a test
+  // that cannot fail on the bug it exists to catch, which is worse than no test because it reassures.
+  eq("  actually reaches the concurrency cap", peak, 3);
+  chk("  never exceeds the cap", peak <= 3);
+  // Wall-clock corroborates independently: 12 tasks x 15ms is ~180ms serial, ~60ms at a cap of 3.
+  chk(`  finishes far faster than serial (${elapsed}ms vs ~180ms serial)`, elapsed < 140);
   chk("  runs every task", done === 12);
   eq("  preserves result order", results, Array.from({ length: 12 }, (_, i) => i * 2));
 })();

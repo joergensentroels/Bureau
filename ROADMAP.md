@@ -15,15 +15,26 @@ _Forward-looking only — the detail of what's shipped lives in the code, the te
 a bounded semaphore (`ORCH_MAX_PARALLEL`, default 3), with no cross-sibling handoff — the manager's
 synthesis step integrates their work. Sequential stays the default. Live-verified 2026-07-23: a
 company run completed with siblings dispatched concurrently (3 sub-tasks at the same timestamp) and a
-deliverable produced. A clean wall-clock speedup number is NOT yet established — local qwen3's
-non-deterministic decompose gives the two runs unequal work, so a single A/B can't isolate the
-concurrency gain (measured 4.6x, but confounded). **Outstanding:**
-  - **Clean speedup measurement** — needs repeated runs or the more-deterministic paid tier to control
-    for decompose variance.
-  - **Stage 2 — dependency-aware decompose** — let the manager emit `dependsOn` per task and run
-    independent tasks concurrently / dependent ones in topological levels. Gated on data: measure with
-    the eval harness whether adding the field regresses decompose reliability (already the flakiest
-    JSON call) before committing to it.
+deliverable produced.
+
+**Speedup measured 2026-07-31 (`node eval/parallel-eval.mjs`) — the July "4.6x" was a confound, and the
+honest answer on the local model is that parallel buys nothing.** Across 4 sequential/parallel pairs where
+decompose happened to produce the SAME 4 sub-tasks in every run (so no confound at all): sequential
+median ~118s, parallel median ~128s — **about 0.92x, i.e. slightly slower.** The concurrency itself is
+confirmed working: sub-tasks dispatched within the first second are **1 for sequential vs 3 for parallel**
+(= `ORCH_MAX_PARALLEL`). So the dispatch layer does exactly what it claims, and the gain is eaten because
+one ollama instance serialises the inference behind it — while parallel additionally gives up
+cross-sibling handoff, so siblings can duplicate reasoning the sequential path would have reused.
+
+  - **Keep parallel opt-in and off by default.** That was already the case; this is now a measured
+    position rather than a guess.
+  - **Stage 2 — dependency-aware decompose** — the case for it is now *weaker*, not stronger: if blanket
+    concurrency yields 0.92x locally, ordering it more cleverly cannot help locally either. Stage 2 only
+    pays off where the underlying calls actually overlap, i.e. the paid tier. Still gated on measuring
+    whether a `dependsOn` field regresses decompose reliability (already the flakiest JSON call).
+  - **The paid-tier measurement is the one real unknown** — overlapping slow Kimi calls (~120s each) is
+    the case parallel was built for, and it is untested because it spends real money. Needs an explicit
+    go-ahead; `eval/parallel-eval.mjs` is ready to run against it.
 
 The remaining backlog, roughly by value (competitive-gap analysis, 2026-07-22):
 
