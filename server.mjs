@@ -1146,14 +1146,48 @@ export function rankByRelevance(query, items, getText, limit = 5) {
 // to `query` (BM25). This is the "shared" half of semantic/shared memory — an agent can build on what
 // the whole company has already done, not just its own last few runs. `excludeAgentId` drops the
 // asking agent (it already gets its own recent-work block).
+// The first line of an objective IS the objective; everything after a blank line is appended context —
+// the acceptance criteria, a QA verifier's remediation notes, or a trigger payload. So the first line,
+// normalised, is what identifies "the same piece of work" across re-runs.
+export function objectiveSignature(s) {
+  const first = String(s || "").split("\n")[0];
+  return first.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim().slice(0, 160);
+}
+// A run that bailed leaves a memory entry with no knowledge in it ("(stopped without a summary)").
+const hasSummary = (m) => { const s = String(m?.summary || "").trim(); return !!s && !/^\(stopped/i.test(s); };
+// Collapse repeats of the same objective. Re-running a task — or a QA remediation pass — appends
+// another entry whose first line is identical and whose tail differs only in criteria/verifier text, so
+// three attempts at one task used to consume all three recall slots with the same knowledge.
+//
+// Which copy survives is NOT simply the newest: real data had a stopped, summary-less re-run sitting
+// ABOVE the attempt that actually produced the work, so recency alone would keep the useless one.
+// Prefer a copy that carries a summary, then the more recent. Entries with no signature at all are
+// never merged — better to show a duplicate than to silently fuse two unrelated things.
+export function dedupeMemories(list, keyOf = (m) => objectiveSignature(m?.objective)) {
+  const seen = new Map();
+  let anon = 0;
+  for (const m of (list || [])) {
+    const k = keyOf(m);
+    if (!k) { seen.set(` anon${anon++}`, m); continue; }
+    const prev = seen.get(k);
+    if (!prev) { seen.set(k, m); continue; }
+    const better = hasSummary(m) !== hasSummary(prev) ? hasSummary(m) : (Number(m?.at) || 0) > (Number(prev?.at) || 0);
+    if (better) seen.set(k, m);   // Map keeps the ORIGINAL position, so ranking order stays stable
+  }
+  return [...seen.values()];
+}
+
 // `hybrid` (optional) adds the SEMANTIC half: { queryVec, vecOf(item) }. Omit it — as every caller did
-// before embeddings existed — and this is byte-for-byte the old BM25 behaviour.
+// before embeddings existed — and this is the old BM25 behaviour (now over de-duplicated entries).
 export function recallSharedMemory(org, query, limit = 4, excludeAgentId = "", hybrid = null) {
-  const items = [];
+  const all = [];
   for (const a of (org?.agents || [])) {
     if (a.id === excludeAgentId) continue;
-    for (const m of (a.memory || [])) items.push({ agentId: a.id, agentName: a.name, role: a.role, objective: m.objective || "", summary: m.summary || "", files: m.files || [], at: m.at, _key: memoryKey(a.id, m) });
+    for (const m of (a.memory || [])) all.push({ agentId: a.id, agentName: a.name, role: a.role, objective: m.objective || "", summary: m.summary || "", files: m.files || [], at: m.at, _key: memoryKey(a.id, m) });
   }
+  // Per AGENT, not globally: two different people having done the same work is a real signal worth a
+  // slot; one person having done it three times is not.
+  const items = dedupeMemories(all, (it) => { const s = objectiveSignature(it.objective); return s ? `${it.agentId}|${s}` : ""; });
   // Pull deeper than `limit` from each ranker so fusion has something to actually fuse.
   const deep = Math.max(limit, 10);
   const lex = rankByRelevance(query, items, (it) => `${it.objective} ${it.summary}`, deep).map((r) => r.item);
@@ -1368,9 +1402,12 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
   if ((agent.lessons || []).length) history.push({ role: "user", content:
     "Coaching from the CEO's past feedback on your work — APPLY these; do not repeat the mistakes they point at:\n" +
     agent.lessons.slice(0, 8).map((l) => `- ${l.text}`).join("\n") });
-  if ((agent.memory || []).length) history.push({ role: "user", content:
+  // De-duplicated for the same reason shared recall is: re-runs and QA remediation passes of one task
+  // would otherwise fill all five slots with the same objective.
+  const ownWork = dedupeMemories(agent.memory || []).slice(0, 5);
+  if (ownWork.length) history.push({ role: "user", content:
     "Your own recent work — build on it, don't repeat it. To revise a document you wrote before, use read_file with its filename to get the current content, then file_write the SAME title to overwrite it:\n" +
-    agent.memory.slice(0, 5).map((m) => `- "${m.objective}" → ${m.summary}${(m.files || []).length ? ` [files: ${m.files.join(", ")}]` : ""}`).join("\n") });
+    ownWork.map((m) => `- "${m.objective}" → ${m.summary}${(m.files || []).length ? ` [files: ${m.files.join(", ")}]` : ""}`).join("\n") });
   // Shared company memory: the most RELEVANT prior work from ACROSS the team — semantic (vector) and
   // lexical (BM25) recall fused, not just this agent's own recency — so work compounds company-wide
   // instead of siloing per agent. Degrades to BM25 alone when no embedder is available.

@@ -27,12 +27,7 @@ concurrency gain (measured 4.6x, but confounded). **Outstanding:**
 
 The remaining backlog, roughly by value (competitive-gap analysis, 2026-07-22):
 
-- **Semantic memory — follow-ups from the live A/B.** The feature is shipped and verified (see Shipped),
-  but measuring it surfaced two real quality problems worth fixing:
-  - **Near-duplicate memory entries eat the result slots.** Repeated test runs left the same objective
-    in memory 3×, and a `limit=3` recall came back as the same entry three times. Recall should collapse
-    near-identical entries (same agent + near-identical text) before applying `limit`, so the slots go
-    to distinct knowledge. This affects BM25 recall too — it predates embeddings.
+- **Semantic memory — follow-up from the live A/B.** (Duplicate collapsing: **fixed**, see Shipped.)
   - **Neither ranker is reliable on ops-flavoured paraphrases.** "keeping servers healthy under heavy
     traffic" failed to surface the obvious match (Ava's monitoring / auto-scaling / load-testing entry)
     in either mode — BM25 matched the stopword-ish "under", and the vector ranking preferred unrelated
@@ -173,6 +168,17 @@ assertions + a live `--e2e`; see `test/README.md`).
   including two where BM25 returned nothing at all ("why lists help you not forget steps" → the
   checklist work; "picking what matters most next quarter" → the Q3 priority work, with no shared term
   since the corpus says "Q3"). One query surfaced no correct match in either mode; see **Next**._
+- **Recall de-duplication** (2026-07-30) — re-running a task, or a QA remediation pass, appends another
+  memory entry whose first line is identical and whose tail differs only in appended criteria/verifier
+  text. A `limit=3` recall could therefore return the same knowledge three times. Recall now collapses
+  repeats before applying the limit, keyed on the **first line** of the objective (everything after a
+  blank line is appended context, not the task). Two judgement calls, both driven by real data rather
+  than assumption: the surviving copy is the one that **has a summary** — not simply the newest, because
+  the corpus had a stopped, summary-less re-run sitting above the attempt that actually produced the work
+  — and collapsing is **per agent**, since two different people doing the same task is a real signal
+  worth a slot while one person doing it three times is not. Applies to the agent's own-work block too,
+  and helps BM25 exactly as much as vector recall: this bug predated embeddings. _Verified on the real
+  corpus: "why lists help you not forget steps" went from the same entry ×3 to three distinct entries._
 
 ---
 

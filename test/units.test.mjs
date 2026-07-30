@@ -8,6 +8,7 @@ import {
   rankByRelevance, recallSharedMemory, makeSemaphore,
   approvalActType, remoteBlocksApproval, REMOTE_MODE,
   packVec, unpackVec, cosine, rrfFuse, memoryKey, memoryText,
+  objectiveSignature, dedupeMemories,
 } from "../server.mjs";
 
 let pass = 0, fail = 0;
@@ -305,6 +306,57 @@ eq("  same content → same fallback key", memoryKey("ag1", { objective: "o", su
 chk("  different content → different fallback key", memoryKey("ag1", { objective: "o", summary: "s" }) !== memoryKey("ag1", { objective: "o", summary: "t" }));
 eq("  memoryText joins objective and summary", memoryText({ objective: "Write docs", summary: "Did it" }), "Write docs\nDid it");
 eq("  memoryText of an empty entry is empty", memoryText({}), "");
+
+console.log("# duplicate collapsing — one task re-run must not eat every recall slot");
+// Shapes taken from the real corpus: identical first line, divergent appended criteria / QA text.
+const CRIT = "\n\nAcceptance criteria (the definition of done) — aim to satisfy all of these:\n1. Th";
+const QA = "\n\nA QA verifier reviewed the work and these acceptance criteria are NOT yet met";
+eq("  signature is the first line only", objectiveSignature("Write a note." + CRIT), "write a note");
+eq("  same first line, different tail → same signature", objectiveSignature("Write a note." + CRIT), objectiveSignature("Write a note." + QA));
+eq("  normalises case and punctuation", objectiveSignature("Write A Note!!"), "write a note");
+eq("  collapses whitespace", objectiveSignature("Write   a    note"), "write a note");
+eq("  empty in, empty out", objectiveSignature(""), "");
+eq("  tolerates null", objectiveSignature(null), "");
+chk("  different objectives keep different signatures", objectiveSignature("Write a note") !== objectiveSignature("Delete a note"));
+{
+  const runs = [
+    { at: 3, objective: "Write a note." + CRIT, summary: "(stopped without a summary)" },
+    { at: 2, objective: "Write a note." + QA, summary: "Saved drafts/note.md" },
+    { at: 1, objective: "Write a note." + CRIT, summary: "(stopped without a summary)" },
+    { at: 9, objective: "Ship the release." + CRIT, summary: "Shipped v2" },
+  ];
+  const out = dedupeMemories(runs);
+  eq("  three attempts at one task collapse to one", out.length, 2);
+  // The real-data trap: the NEWEST copy was a stopped re-run, so recency alone keeps the useless one.
+  eq("  keeps the copy that actually has a summary, not just the newest", out.find((m) => /Write a note/.test(m.objective)).summary, "Saved drafts/note.md");
+  chk("  keeps the genuinely distinct entry", out.some((m) => m.summary === "Shipped v2"));
+  // Among equals, recency decides.
+  const both = dedupeMemories([{ at: 1, objective: "X", summary: "older" }, { at: 5, objective: "X", summary: "newer" }]);
+  eq("  with summaries on both, the newer wins", both[0].summary, "newer");
+  // Never fuse things we can't identify.
+  eq("  entries with no signature are never merged", dedupeMemories([{ objective: "" }, { objective: "" }]).length, 2);
+  eq("  tolerates null and empty input", dedupeMemories(null).length, 0);
+}
+{
+  // The actual reported bug, end to end: limit=2 used to come back as the same entry twice.
+  const org = { agents: [{ id: "a1", name: "Ada", role: "Analyst", memory: [
+    { at: 3, objective: "why checklists are useful" + CRIT, summary: "(stopped without a summary)" },
+    { at: 2, objective: "why checklists are useful" + QA, summary: "wrote why-checklists.md" },
+    { at: 1, objective: "why checklists are useful" + CRIT, summary: "(stopped without a summary)" },
+    { at: 4, objective: "checklists in aviation safety", summary: "wrote aviation.md" },
+  ] }] };
+  const got = recallSharedMemory(org, "checklists", 2);
+  eq("  recall returns two DISTINCT entries, not one repeated", new Set(got.map((r) => objectiveSignature(r.objective))).size, 2);
+  chk("  and the surviving copy is the one with real content", got.some((r) => r.summary === "wrote why-checklists.md"));
+}
+{
+  // Cross-agent identical work is two data points, not a duplicate — attribution is information.
+  const org = { agents: [
+    { id: "a1", name: "Ada", role: "Analyst", memory: [{ at: 1, objective: "audit the logs", summary: "found nothing" }] },
+    { id: "a2", name: "Bo", role: "SRE", memory: [{ at: 2, objective: "audit the logs", summary: "found a leak" }] },
+  ] };
+  eq("  two agents doing the same task both keep a slot", recallSharedMemory(org, "audit logs", 4).length, 2);
+}
 
 console.log("# hybrid recall — vectors fused with BM25, degrading safely");
 {
