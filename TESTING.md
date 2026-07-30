@@ -30,7 +30,17 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
 - **Server** (`api`, `workspaces`, `robustness`) — hit a running server (no model). CRUD + validation,
   auth gate + role separation, security headers, MCP JSON-RPC, steer routing, SOP CRUD, spend cap,
   workspace isolation, hardening/malformed-input.
-- **Live e2e** (`e2e-autonomy`, `--e2e` only) — needs Latch + a local LLM.
+- **Live e2e** (`e2e-autonomy`, `--e2e` only) — needs Latch + a local LLM. Proves the safe-autonomy stack
+  composes: trusted-tier auto-approve → policy `require` overriding the tier → the in-app approval seam →
+  DoD verdict → policy `block` refusing a write before any approval is filed. _9/9 passing as of
+  2026-07-31; before that it had never been run since the auth gate landed in July._
+  - Scenarios that need the model to propose a specific action **retry up to 3×** and report
+    **INCONCLUSIVE**, not failed, if it never does — exit code stays 0. A live suite that goes red
+    because a nondeterministic model picked a different tool teaches people to ignore it.
+  - Teardown restores the policies and tier it changed, and denies **only** approvals that appeared
+    during the run (diffed against a startup baseline, so it can never resolve one it didn't cause).
+    It **cannot** remove the deliverables its runs write — there is no delete endpoint — so it prints
+    them by name instead of claiming to have cleaned up.
 
 ## Coverage of the 2026-07 feature + security work
 

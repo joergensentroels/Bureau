@@ -63,6 +63,10 @@ The remaining backlog, roughly by value (competitive-gap analysis, 2026-07-22):
   notify-webhook at a Slack incoming webhook yourself.
 - **Office-view revamp** — the isometric office is functional (renders from `public/assets/iso/`),
   but its visual design was parked. Pure presentation, no behavior change.
+- **No way to delete a deliverable.** There is no `DELETE /api/deliverables/:name`, so a document can be
+  written, versioned, signed off and delivered — but never removed, through the API or the UI. Surfaced by
+  the live e2e, which creates real drafts and cannot tidy them up. Wants care rather than speed: deliverables
+  carry version history, so deletion should probably archive rather than unlink, and it should be operator-only.
 - **Remote access, last mile** — code complete (see Shipped). What remains is operator setup only:
   Bureau is already served on the tailnet at `:8443` alongside Compass; a Cloudflare Tunnel + Access
   hostname is the alternative for machines that can't run a mesh client. Untested piece: whether a
