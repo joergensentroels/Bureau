@@ -148,6 +148,11 @@ const ok = (c, m) => (c ? pass : fail).push(m);
 
     // ---- whoami: the UI asks which role it holds so it can label itself read-only ----
     { const w = (await api("GET", "/api/whoami")).j; ok(w.role === "operator" && w.readonly === false, "whoami: operator token → role operator"); }
+    { const w = (await api("GET", "/api/whoami")).j; ok(w.remote === false, "whoami: reports remote mode off (BUREAU_REMOTE unset)"); }
+    // Remote mode's own refusal path needs a pending Latch approval, so it is exercised live rather
+    // than here (see TESTING.md); the decision-logic allowlist is unit-tested in units.test.mjs.
+    ok((await api("POST", "/api/approvals/nope_id/decide", { decision: "approved" })).status === 404, "approval seam: unknown id → 404");
+    ok((await api("POST", "/api/approvals/nope_id/decide", { decision: "sideways" })).status === 400, "approval seam: bad decision → 400");
     if (RTOK) {
       const r = await bare("GET", "/api/whoami", { authorization: `Bearer ${RTOK}` });
       const w = await r.json().catch(() => ({}));

@@ -43,12 +43,20 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
 | Header-only tokens — `?token=` rejected everywhere, incl. the SSE stream | api |
 | Failed-auth damper (429 past threshold, cleared by a success) + `kind:"auth"` audit rows | api |
 | Damper log-flood bound — 31 failures log ≤3 audit rows | api |
+| Remote mode (`BUREAU_REMOTE`) allowlist + fail-closed (`remoteBlocksApproval`, `approvalActType`) | units |
+| Approval seam validation (unknown id → 404, bad decision → 400) | api |
 | Role introspection `/api/whoami` (operator + readonly) | api |
 | Per-run paid cap (`maxPaidUsdPerRun`) | api |
 | Steer endpoint routing+auth | api |
 | SSRF guard (`fetchUrl`, `apiCall`, incl. DNS-pin refusals) | net |
 
 ## Intentionally not auto-tested (accounted for — audit allowlist)
+
+**Need a live Latch (manually verified, scripted):**
+- `BUREAU_REMOTE` refusing a real pending approval — needs a pending Latch approval, so the endpoint
+  path is verified live (403 + audit row on `act-shell`, deny still 200, `act-note` still approves,
+  untagged fails closed). The decision logic itself is unit-tested.
+- Per-workspace Inbox filtering via the `ws-` tag (verified live 2026-07-30 after the colon fix).
 
 **Need a live model / Latch (covered by `--e2e`, or manually verified):**
 - Parallel `delegate` end-to-end, `ask_peer` / `consultPeer`, `mcp_call` end-to-end (needs a real MCP

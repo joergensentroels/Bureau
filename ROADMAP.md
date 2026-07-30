@@ -41,12 +41,10 @@ The remaining backlog, roughly by value (competitive-gap analysis, 2026-07-22):
   notify-webhook at a Slack incoming webhook yourself.
 - **Office-view revamp** — the isometric office is functional (renders from `public/assets/iso/`),
   but its visual design was parked. Pure presentation, no behavior change.
-- **Remote access, last mile** — the prep shipped (see below); what's left is the transport, which is
-  operator setup rather than code: a Cloudflare Tunnel + Access hostname (or Tailscale) in front of a
-  loopback-bound Bureau. One code item is deliberately deferred: **`BUREAU_REMOTE=1`**, which would make
-  the in-app approval seam refuse *hard-floor* action types, so a stolen operator token can't be turned
-  into shell execution. Only needed if the operator token is ever used from a remote browser — the
-  recommended setup uses the read-only token there instead.
+- **Remote access, last mile** — code complete (see Shipped). What remains is operator setup only:
+  Bureau is already served on the tailnet at `:8443` alongside Compass; a Cloudflare Tunnel + Access
+  hostname is the alternative for machines that can't run a mesh client. Untested piece: whether a
+  managed work laptop's network cooperates.
 
 ---
 
@@ -139,6 +137,18 @@ assertions + a live `--e2e`; see `test/README.md`).
   throwaway workspaces: query tokens dead, roles correct, damper trips/clears, and the new stream reader
   consumed a real 10-event run across 6 network chunks with zero unparseable frames. Also fixed
   `test/e2e-autonomy.mjs`, unauthenticated since the auth gate landed._
+- **Remote mode `BUREAU_REMOTE=1`** (2026-07-30) — closes the last remote-access gap: Bureau's in-app
+  approval seam will still **deny** anything but only **approves** an allowlist (`SAFE_TIER_ACTIONS`
+  plus an under-ceiling purchase), so a browser holding the operator token can't turn state-reading into
+  shell execution. Deliberately an allowlist rather than a hard-floor lookup — "is it hard-floored?"
+  answers "no" for anything unrecognised, so unknown action types default to *safe* instead of
+  approvable — and it fails closed on any approval whose origin can't be established. Provenance comes
+  from an `act-<type>` tag stamped at filing time, because Latch's own `type` is too coarse
+  (`web_search`, `shell`, `api_call` all arrive as `"command"`). _Live-verified against real Latch._
+  **Found and fixed alongside it:** Latch strips colons from `contextTags`, so `ws:default` was stored
+  as `wsdefault` — the Inbox's per-workspace filter had never matched (default workspace saw every
+  workspace's approvals; others saw none), and agent attribution was silently blank. All Bureau tags now
+  go through `mkTag`/`readTag` with a hyphen separator. _Isolation verified live._
 
 ---
 

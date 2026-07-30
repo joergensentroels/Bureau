@@ -125,7 +125,41 @@ code execution on the Bureau host. Rules that follow:
    itself `👁 read-only` and explains refusals. A token sitting in a managed work browser's
    `localStorage` is readable by that machine's management tooling; make it the harmless one.
 4. **Approve hard-floor actions from the trusted host.** If you do use the operator token remotely,
-   understand you have moved shell-approval authority to that browser.
+   understand you have moved shell-approval authority to that browser. **Set `BUREAU_REMOTE=1`** (below)
+   so Bureau refuses to be the instrument.
+
+### `BUREAU_REMOTE=1`
+
+Bureau's in-app approval seam (`POST /api/approvals/:id/decide`) performs the same Latch `PATCH` as an
+auto-approval. That means a browser holding the operator token can turn "read my company's state" into
+"run a shell command on the host" — the sharpest edge in the system once Bureau is reachable from
+somewhere you trust less. With `BUREAU_REMOTE` set, the seam may still **deny** anything (de-escalation
+is always safe) but may only **approve** actions on an allowlist; everything else is decided in
+Latch/Compass on the trusted host.
+
+- The allowlist is `SAFE_TIER_ACTIONS` — `web_search`, `web_research`, `read_file`, `file_write`,
+  `note`, `ask_peer` — plus a `purchase` under the configured ceiling. This is **stricter than the hard
+  floor**: `github_file` is not hard-floored (a commit is reversible via git history) but is excluded
+  anyway, because it writes outward with Latch's credential.
+- **It is an allowlist, not a hard-floor lookup, on purpose.** Asking "is this hard-floored?" answers
+  "no" for anything it doesn't recognise, so a newly added action type would be remotely approvable
+  until someone remembered to classify it. Inverting it makes the default safe.
+- **Fails closed.** An approval whose originating action can't be established is refused. Provenance
+  comes from the `act-<type>` tag `fileApproval` stamps on every approval, because Latch's own `type` is
+  too coarse to use — `web_search`, `shell` and `api_call` all arrive as `type: "command"`.
+- **Honest scope: defence in depth, not a boundary.** The operator token is Latch's own token, so
+  whoever holds it can approve directly in Latch wherever Latch is reachable. What this buys is that
+  Bureau stops being an amplifier, and the recommended posture (read-only token on the remote browser)
+  becomes enforced rather than merely advised.
+
+_Live-verified against a real Latch (2026-07-30): an `act-shell` approval is refused with `403
+remote_mode_hard_floor` and recorded in the audit log, denying it still returns 200, an `act-note`
+approval still approves, and an untagged approval is refused rather than allowed._
+
+> **Latch sanitises `contextTags`**: colons are stripped, tags are lowercased, tags containing spaces
+> are dropped. Bureau therefore uses a hyphen separator (`ws-`, `agent-`, `act-`) via the `mkTag` /
+> `readTag` helpers. This was found while building the above — the previous colon form meant
+> `ws:default` was stored as `wsdefault`, so the Inbox's per-workspace filter had never matched.
 
 **One consequence of proxying:** requests arriving through a tunnel reach Bureau from `127.0.0.1`, so
 the failed-auth damper cannot tell remote clients apart — every proxied caller shares one counter with

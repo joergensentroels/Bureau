@@ -334,6 +334,7 @@
   <button class="wsswitch" id="wsBtn" title="Switch workspace / company"><span id="wsName">Default</span> <span style="opacity:.6">▾</span></button>
   <span class="tag" id="roleBadge" style="display:none">👁 read-only</span>
   <span class="tag" id="authWarn" style="display:none" title="Bureau is not accepting this browser's token, so live polling has paused to avoid hammering the server. Reload and enter the operator token.">⚠ not signed in</span>
+  <span class="tag" id="remoteBadge" style="display:none" title="BUREAU_REMOTE is set: actions that always need a human (shell, api_call, email, repo creation, external MCP calls, over-ceiling purchases) cannot be approved from here. Decide those in Latch/Compass on the trusted host. Rejecting anything still works.">🔒 remote mode</span>
   <div class="spacer"></div>
   <div class="toggle themeswitch"><button data-theme-btn="ops">Ops</button><button data-theme-btn="pixel">Tycoon</button></div>
   <button class="inboxbtn" id="inboxBtn" title="What needs you"><span class="ibell">🔔</span><span>Inbox</span><span class="nbadge" id="inboxBadge">0</span></button>
@@ -503,7 +504,8 @@ function openRunStream(runId, onEvent, onEnd){
 // and explains a refused write instead of just failing.
 let ROLE="operator", _roleToldYou=false;
 async function loadRole(){
-  try{ const w=await api("GET","/api/whoami"); ROLE=w.role||"operator"; }catch{ ROLE="operator"; }
+  let w={}; try{ w=await api("GET","/api/whoami")||{}; ROLE=w.role||"operator"; }catch{ ROLE="operator"; }
+  const rb=$("#remoteBadge"); if(rb) rb.style.display=w.remote?"":"none";
   const b=$("#roleBadge");
   if(b){
     b.style.display = ROLE==="readonly" ? "" : "none";
@@ -931,8 +933,11 @@ function wireApprovalRows(wrap){
       const r=await api("POST",`/api/approvals/${id}/decide`,{decision,note:reason()});
       if(r&&r.ok){ row.remove(); await refreshInbox();
         if(!wrap.querySelectorAll(".approw").length){ const h=[...wrap.querySelectorAll(".ibsec h3")].find(x=>/Needs your decision/.test(x.textContent)); if(h) h.closest(".ibsec").remove(); }
+      } else if(r&&r.error==="remote_mode_hard_floor"){
+        // Remote mode: this class of action can only be approved on the trusted host.
+        alert("Remote mode is on, so Bureau won't approve this action"+(r.actionType?` (${r.actionType})`:"")+".\n\n"+(r.hint||"Decide it in Latch/Compass on the trusted host.")+"\n\nRejecting it from here still works.");
       } else if(r&&r.status){ alert(`This request was already ${r.status} (in Latch or by a rule). Refreshing.`); wrap.remove(); openInbox(); }
-      else { alert("Couldn't record the decision: "+((r&&r.error)||"unknown error")+". Nothing was changed."); }
+      else { alert("Couldn't record the decision: "+((r&&(r.hint||r.error))||"unknown error")+". Nothing was changed."); }
     };
     const rej=row.querySelector(".ap-reject");
     rej.onclick=()=>decide("denied");

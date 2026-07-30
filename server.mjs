@@ -182,6 +182,45 @@ function requiresCeoAlways(actType, next, gr) {
   }
   return false;
 }
+// ---- Remote mode (BUREAU_REMOTE=1) -------------------------------------------------------------
+// Bureau's in-app approval seam performs the same Latch PATCH as an auto-approval, which means a
+// browser holding the operator token can turn "read my company's state" into "run a shell command on
+// the host". That is fine on loopback and is the sharpest edge in the whole system once Bureau is
+// reachable from a machine you trust less. With BUREAU_REMOTE set, the seam may still DENY anything
+// (de-escalation is always safe) but may not APPROVE a hard-floor action — those get decided in
+// Latch/Compass on the trusted host.
+//
+// Honest scope: this is defence in depth, NOT a boundary. The operator token is Latch's own token, so
+// whoever holds it can approve directly in Latch wherever Latch is reachable. What this buys is that
+// Bureau stops being an amplifier, and the recommended posture (read-only token on the remote browser)
+// becomes enforced rather than merely advised.
+export const REMOTE_MODE = /^(1|true|yes|on)$/i.test(String(process.env.BUREAU_REMOTE || "").trim());
+// The Bureau action type an approval originated from, read back from the `act:` tag fileApproval sets.
+// "" when absent (an approval filed by an older build, or from outside Bureau).
+export function approvalActType(cur) {
+  const tags = Array.isArray(cur?.contextTags) ? cur.contextTags : [];
+  return readTag(tags, "act");
+}
+// Should remote mode refuse to approve this pending approval?
+//
+// This is an ALLOWLIST, not a hard-floor lookup, and that is deliberate. Asking "is it hard-floored?"
+// answers "no" for anything it doesn't recognise, so a newly added action type would be remotely
+// approvable until someone remembered to classify it. Inverting it makes the default safe: an unknown
+// or untagged approval is simply decided in Compass. The failure mode becomes mild inconvenience
+// instead of silent escalation.
+//
+// The allowlist is SAFE_TIER_ACTIONS — the set this codebase already defines as safe, reversible and
+// in-sandbox — plus a purchase under the configured ceiling. Note this is STRICTER than the hard floor:
+// `github_file` is not hard-floored (a commit is reversible via git history) but is excluded here,
+// because it writes to a real repo with Latch's credential and remote mode exists precisely for
+// browsers you trust less.
+export function remoteBlocksApproval(cur, gr = {}) {
+  const actType = approvalActType(cur);
+  if (!actType) return true;                                   // unknown provenance → Compass decides
+  // Purchases defer to the same ceiling arithmetic the hard floor uses, so there's one rule for spend.
+  if (actType === "purchase") return requiresCeoAlways("purchase", { command: cur?.command || "", details: cur?.details || "" }, gr || {});
+  return !SAFE_TIER_ACTIONS.has(actType);
+}
 const POLICY_ACTIONS = ["web_search", "web_research", "read_file", "file_write", "note", "purchase", "api_call", "shell", "email_draft", "ask_peer"];
 // Sanitize a rule's condition clause: keep only recognized, well-typed conditions.
 export function cleanPolicyWhen(w) {
@@ -438,11 +477,26 @@ function authFailure(req, p) {
 }
 function authSuccess(req) { authFails.delete(clientIp(req)); }
 
+// ---- Latch contextTags: hyphen-separated, never colon-separated --------------------------------
+// Latch SANITISES contextTags on the way in: colons are stripped, tags are lowercased, and a tag
+// containing a space is dropped entirely. So "ws:default" is stored as "wsdefault" — which silently
+// broke every colon-prefixed tag Bureau used to write, including the workspace tag the Inbox filters on
+// (verified against a live Latch, 2026-07-30). Hyphens, underscores and dots survive, so every Bureau
+// tag is built and read through these two helpers and nothing hand-rolls the format again.
+// Values may contain hyphens themselves (workspace ids do), so reading slices the prefix rather than
+// splitting on the separator.
+const mkTag = (kind, value) => `${kind}-${String(value || "").toLowerCase()}`;
+const readTag = (tags, kind) => {
+  const pre = `${kind}-`;
+  const t = (Array.isArray(tags) ? tags : []).map(String).find((x) => x.startsWith(pre));
+  return t ? t.slice(pre.length) : "";
+};
+
 async function latch(method, route, body) {
   // Tag every approval this Bureau files with its workspace, so each company's Inbox only sees its own.
   if (method === "POST" && route === "/api/approvals" && body) {
-    const tags = Array.isArray(body.contextTags) ? body.contextTags.filter((t) => !String(t).startsWith("ws:")) : [];
-    body = { ...body, contextTags: [...tags, `ws:${currentWs()}`] };
+    const tags = Array.isArray(body.contextTags) ? body.contextTags.filter((t) => !String(t).startsWith("ws-")) : [];
+    body = { ...body, contextTags: [...tags, mkTag("ws", currentWs())] };
   }
   const res = await fetch(`${LATCH_URL}${route}`, {
     method,
@@ -497,6 +551,12 @@ export async function askLlm(messages, opts = {}) {
 }
 
 async function fileApproval(agent, action) {
+  // Stamp the ORIGINATING Bureau action type onto every approval. Latch's own `type` is deliberately
+  // coarse — web_search, shell and api_call all arrive as "command" — so anything that later needs to
+  // know what an approval really was (the remote-mode hard-floor guard below, for one) must not have to
+  // guess from riskLevel or executionMode. One tag, set at the single place approvals are created.
+  const actType = String(action.actionType || "other");
+  const tags = (...extra) => ["bureau", mkTag("act", actType), mkTag("agent", agent.seed), ...extra];
   // web_search is filed as a read-only Latch "command" approval with a browser executionPlan
   // (a single search_web action). Once approved, the OpenClaw worker runs the search and returns
   // real public results. No shell, no writes.
@@ -510,7 +570,7 @@ async function fileApproval(agent, action) {
       riskLevel: "low",
       sensitive: false,
       executionPlan: { mode: "browser", summary: query.slice(0, 200), riskLevel: "low", timeoutSeconds: 90, actions: [{ type: "search_web", text: query, maxResults: 3 }] },
-      contextTags: ["bureau", `agent:${agent.seed}`],
+      contextTags: tags(),
     });
     return json;
   }
@@ -521,7 +581,7 @@ async function fileApproval(agent, action) {
     const { json } = await latch("POST", "/api/approvals", {
       type: "purchase", title: action.title || "Purchase request", details: action.details || "",
       command: `Amount: $${cost.toFixed(2)}`, riskLevel: "high",
-      contextTags: ["bureau", "purchase", `agent:${agent.seed}`],
+      contextTags: tags("purchase"),
     });
     return json;
   }
@@ -535,7 +595,7 @@ async function fileApproval(agent, action) {
       title: action.title || `Shell: ${cmd.slice(0, 50)}`,
       details: action.details || cmd, command: cmd, riskLevel: "high", sensitive: true,
       executionPlan: { mode: "shell", summary: cmd.slice(0, 200), riskLevel: "high", timeoutSeconds: 120, cwd: "bureau-work", actions: [{ type: "run_command", command: cmd }] },
-      contextTags: ["bureau", "shell", `agent:${agent.seed}`],
+      contextTags: tags("shell"),
     });
     return json;
   }
@@ -545,7 +605,7 @@ async function fileApproval(agent, action) {
     const cmd = String(action.command || action.details || "").trim().slice(0, 1200);
     const { json } = await latch("POST", "/api/approvals", {
       type: "command", title: action.title || `API call`, details: action.details || cmd,
-      command: cmd, riskLevel: "high", contextTags: ["bureau", "api", `agent:${agent.seed}`],
+      command: cmd, riskLevel: "high", contextTags: tags("api"),
     });
     return json;
   }
@@ -567,7 +627,7 @@ async function fileApproval(agent, action) {
       githubRepoName: String(action.repo || tgt.repo || "").slice(0, 120),   // blank → Latch uses its configured default repo
       githubOwner: String(action.owner || tgt.owner || "").slice(0, 120),    // blank → Latch's default owner (org or authed user)
       riskLevel: "medium",   // a file commit is reversible (git history); repo CREATION (below) stays high
-      contextTags: ["bureau", "github", `agent:${agent.seed}`],
+      contextTags: tags("github"),
     });
     return json;
   }
@@ -581,7 +641,7 @@ async function fileApproval(agent, action) {
       githubOwner: String(action.owner || tgt.owner || "").slice(0, 120),    // create under this workspace's org/owner
       githubDescription: String(action.details || "").slice(0, 500),
       githubVisibility: "private",
-      contextTags: ["bureau", "github", `agent:${agent.seed}`],
+      contextTags: tags("github"),
     });
     return json;
   }
@@ -600,7 +660,7 @@ async function fileApproval(agent, action) {
       details: action.details || `MCP tool call: ${server}/${tool}`,
       mcpServer: server, mcpTool: tool, mcpArgs: args,
       riskLevel: "medium",
-      contextTags: ["bureau", "mcp", `agent:${agent.seed}`],
+      contextTags: tags("mcp"),
     });
     return json;
   }
@@ -611,7 +671,7 @@ async function fileApproval(agent, action) {
     details: action.details || "",
     command: action.command || "",
     riskLevel: action.actionType === "shell" ? "high" : "medium",
-    contextTags: ["bureau", `agent:${agent.seed}`],
+    contextTags: tags(),
   });
   return json;
 }
@@ -1265,7 +1325,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
       }
       const { json: q } = await latch("POST", "/api/approvals", {
         type: "human_verification", title: `Question from ${who}`, details: question,
-        expectedResponse: question, contextTags: ["bureau", "question", `agent:${agent.seed}`],
+        expectedResponse: question, contextTags: ["bureau", "question", mkTag("agent", agent.seed)],
       });
       emit(run, "escalate", { agent: who, depth, question, approvalId: q.id });
       setAgentState(agent.id, "waiting", "waiting for the CEO to answer in Latch");
@@ -2460,7 +2520,7 @@ const server = createServer(async (req, res) => {
     // explain a 403 instead of failing opaquely — useful when you deliberately hand a remote/untrusted
     // browser the narrower agentToken. Reveals no secret: the caller already proved which token it has.
     if (p === "/api/whoami" && req.method === "GET") {
-      return send(res, 200, { role, readonly: role === "readonly", readOnlyTokenConfigured: !!READ_TOKEN });
+      return send(res, 200, { role, readonly: role === "readonly", readOnlyTokenConfigured: !!READ_TOKEN, remote: REMOTE_MODE });
     }
     // MCP endpoint (JSON-RPC 2.0). GET has no server-initiated SSE stream → 405 (spec-compliant).
     if (p === "/mcp") {
@@ -2720,12 +2780,10 @@ const server = createServer(async (req, res) => {
         approvals = list.filter((a) => a.status === "pending").filter((a) => {
           // Show only this workspace's approvals. The default workspace also adopts legacy approvals
           // that predate workspace tagging (no ws: tag at all), so nothing is orphaned by the upgrade.
-          const wsTag = (a.contextTags || []).find((t) => String(t).startsWith("ws:"));
-          const owner = wsTag ? wsTag.slice(3) : "";
+          const owner = readTag(a.contextTags, "ws");
           return owner ? owner === thisWs : thisWs === "default";
         }).map((a) => {
-          const tag = (a.contextTags || []).find((t) => String(t).startsWith("agent:"));
-          const seed = tag ? tag.slice(6) : "";
+          const seed = readTag(a.contextTags, "agent");
           return {
             id: a.id, type: a.type || "", title: a.title || "(untitled request)",
             details: String(a.details || "").slice(0, 240), riskLevel: a.riskLevel || "",
@@ -2778,6 +2836,14 @@ const server = createServer(async (req, res) => {
       let cur; try { cur = await latchApproval(id); } catch { cur = null; }
       if (!cur) return send(res, 404, { error: "approval not found" });
       if (cur.status !== "pending") return send(res, 409, { error: `already ${cur.status}`, status: cur.status });
+      // Remote mode: approving a hard-floor action here would let a browser holding the operator token
+      // escalate to real-world reach on the host. Denying stays available — that only ever de-escalates.
+      if (REMOTE_MODE && decision === "approved" && remoteBlocksApproval(cur, (await readOrg()).guardrails || {})) {
+        const actType = approvalActType(cur);
+        logAudit({ kind: "approval", actionType: cur.type || "", name: cur.title || "", decision: "blocked", error: `BUREAU_REMOTE: ${actType || "unknown-origin"} approval must be decided in Latch/Compass` });
+        return send(res, 403, { error: "remote_mode_hard_floor", actionType: actType,
+          hint: "BUREAU_REMOTE is set: this action always needs a human, and approving it from Bureau is disabled. Decide it in Latch/Compass on the trusted host. Denying it here still works." });
+      }
       const note = `${decision === "approved" ? "Approved" : "Rejected"} in Bureau by the CEO${body.note ? `: ${String(body.note).slice(0, 200)}` : ""}`;
       try {
         await latch("PATCH", `/api/approvals/${id}`, { status: decision, note, responseNote: body.note ? String(body.note).slice(0, 200) : undefined });
@@ -2930,7 +2996,7 @@ const server = createServer(async (req, res) => {
       let question = `What should ${agent.name} help ${mate0 ? mate0 + " / " : ""}${toDept} with?`;
       try { const raw = await askLlm(msgs, { maxTokens: 600 }); const q = raw.replace(/<think>[\s\S]*?<\/think>/gi, "").trim(); if (q) question = q.slice(0, 300); } catch {}
       try {
-        await latch("POST", "/api/approvals", { type: "human_verification", title: `${agent.name} joined ${toDept}`, details: question, expectedResponse: question, contextTags: ["bureau", "relocate", `agent:${agent.seed}`] });
+        await latch("POST", "/api/approvals", { type: "human_verification", title: `${agent.name} joined ${toDept}`, details: question, expectedResponse: question, contextTags: ["bureau", "relocate", mkTag("agent", agent.seed)] });
       } catch {}
       return send(res, 200, { ok: true, question, mates, from: fromDept, to: toDept });
     }
@@ -3399,6 +3465,7 @@ if (isMain) {
         console.warn(`   this exposes the control plane on the network — only do this on a trusted private overlay`);
         console.warn(`   (e.g. Tailscale), never a public interface. Unset BUREAU_HOST to bind loopback only.\n`);
       }
+      if (REMOTE_MODE) console.log("🔒 BUREAU_REMOTE is set — hard-floor actions cannot be APPROVED from Bureau's UI; decide those in Latch/Compass. Denying still works.");
       server.listen(PORT, HOST, () => console.log(`Bureau on http://${HOST}:${PORT} (${WORKSPACES.length} workspace${WORKSPACES.length === 1 ? "" : "s"}, SQLite) — API + /mcp require the operator token (Authorization: Bearer <token>)`));
       setInterval(() => { tickSchedules().catch((e) => console.error("scheduler tick:", e.message)); }, 60000); // check due schedules every minute
     })

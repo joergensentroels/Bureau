@@ -6,6 +6,7 @@ import {
   ensureBudget, renderChecklist, validDeliverableName, rankDeliverables, workProduct,
   planObjective, normPlanItem, normSop, normSopSteps, sopObjective,
   rankByRelevance, recallSharedMemory, makeSemaphore,
+  approvalActType, remoteBlocksApproval, REMOTE_MODE,
 } from "../server.mjs";
 
 let pass = 0, fail = 0;
@@ -219,6 +220,36 @@ await (async () => {
   chk("  runs every task", done === 12);
   eq("  preserves result order", results, Array.from({ length: 12 }, (_, i) => i * 2));
 })();
+
+console.log("# remote mode — which pending approvals Bureau refuses to APPROVE (BUREAU_REMOTE=1)");
+chk("  REMOTE_MODE is off by default in tests", REMOTE_MODE === false);
+// The act- tag is what fileApproval stamps on; Latch's own `type` is too coarse to use (web_search,
+// shell and api_call all arrive as "command"), which is the whole reason the tag exists. The separator
+// is a HYPHEN, not a colon: Latch strips colons from contextTags, so "act:shell" arrives as "actshell".
+eq("  approvalActType reads the act- tag", approvalActType({ contextTags: ["bureau", "act-shell", "agent-x"] }), "shell");
+eq("  approvalActType keeps underscores in the type", approvalActType({ contextTags: ["act-email_draft"] }), "email_draft");
+eq("  approvalActType ignores a colon-mangled legacy tag", approvalActType({ contextTags: ["bureau", "actshell"] }), "");
+eq("  approvalActType tolerates no tags", approvalActType({}), "");
+eq("  approvalActType tolerates junk", approvalActType({ contextTags: ["bureau", 7, null] }), "");
+const tagged = (act, extra = {}) => ({ contextTags: ["bureau", `act-${act}`, "agent-x"], ...extra });
+// Hard floor: always a human, so never approvable from a remote Bureau.
+for (const act of ["shell", "api_call", "email_draft", "github_repo", "mcp_call"])
+  chk(`  blocks ${act}`, remoteBlocksApproval(tagged(act), { autoApproveUnderUsd: 100 }) === true);
+// Safe, reversible, in-sandbox: still approvable remotely (only pending because of the agent's tier).
+for (const act of ["web_search", "web_research", "read_file", "file_write", "note", "ask_peer"])
+  chk(`  allows ${act}`, remoteBlocksApproval(tagged(act), { autoApproveUnderUsd: 100 }) === false);
+// Stricter than the hard floor on purpose: a repo commit is reversible, but it writes outward with
+// Latch's credential, and remote mode is for browsers trusted less than the host.
+chk("  blocks github_file (stricter than the hard floor, deliberately)", remoteBlocksApproval(tagged("github_file"), {}) === true);
+// Purchases follow the same ceiling rule the hard floor uses.
+chk("  blocks a purchase over the ceiling", remoteBlocksApproval(tagged("purchase", { command: "Amount: $250.00" }), { autoApproveUnderUsd: 100 }) === true);
+chk("  allows a purchase under the ceiling", remoteBlocksApproval(tagged("purchase", { command: "Amount: $12.00" }), { autoApproveUnderUsd: 100 }) === false);
+chk("  blocks any purchase when no ceiling is set", remoteBlocksApproval(tagged("purchase", { command: "Amount: $1.00" }), {}) === true);
+// FAIL CLOSED — an approval whose origin can't be established must not be approvable remotely.
+chk("  fails closed on an untagged approval", remoteBlocksApproval({ contextTags: ["bureau", "agent:x"] }, {}) === true);
+chk("  fails closed on a missing contextTags", remoteBlocksApproval({}, {}) === true);
+chk("  fails closed on null", remoteBlocksApproval(null, {}) === true);
+chk("  fails closed on an unrecognised act type", remoteBlocksApproval(tagged("something_new"), {}) === true);
 
 console.log(`\n${fail === 0 ? "ALL PASS ✓" : "FAILURES ✗"} — ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

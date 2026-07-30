@@ -114,6 +114,7 @@ for it once and remembers it. Bureau binds loopback only.
 | `LATCH_URL` | `http://127.0.0.1:8787` | Latch base URL |
 | `OPERATOR_TOKEN` | — | operator token (else read from Latch's `auth.json`) |
 | `BUREAU_READ_TOKEN` | Latch's `agentToken` | read-only token — reads only, no writes |
+| `BUREAU_REMOTE` | unset | `1` → Bureau won't **approve** hard-floor actions (deny still works); set it when reachable from a machine you trust less |
 | `LATCH_DATA` | `…/openclaw-command-center/data` | where Latch's `auth.json` lives |
 
 ## Security
@@ -132,8 +133,9 @@ less.
 **Reaching Bureau from another machine** works, but has a sharp edge worth knowing: the operator token
 can approve hard-floor approvals, which makes it equivalent to shell access on the Bureau host. So never
 expose Bureau directly. Put it behind a private mesh (Tailscale/WireGuard) or an identity-gated tunnel
-(Cloudflare Tunnel + Access) — both let Bureau stay bound to loopback — and use the read-only token in
-the remote browser. See
+(Cloudflare Tunnel + Access) — both let Bureau stay bound to loopback — use the read-only token in the
+remote browser, and set **`BUREAU_REMOTE=1`** so Bureau refuses to approve anything that always needs a
+human (denying still works; you approve those in Compass). See
 **[SECURITY.md → Reaching Bureau from another machine](SECURITY.md#reaching-bureau-from-another-machine)**.
 
 ## Testing
