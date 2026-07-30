@@ -1168,7 +1168,9 @@ export function dedupeMemories(list, keyOf = (m) => objectiveSignature(m?.object
   let anon = 0;
   for (const m of (list || [])) {
     const k = keyOf(m);
-    if (!k) { seen.set(` anon${anon++}`, m); continue; }
+    // "#" can never collide with a real signature: objectiveSignature strips everything outside
+    // [a-z0-9 ], so no signature can start with it. Each such entry gets its own key and survives.
+    if (!k) { seen.set(`#anon${anon++}`, m); continue; }
     const prev = seen.get(k);
     if (!prev) { seen.set(k, m); continue; }
     const better = hasSummary(m) !== hasSummary(prev) ? hasSummary(m) : (Number(m?.at) || 0) > (Number(prev?.at) || 0);

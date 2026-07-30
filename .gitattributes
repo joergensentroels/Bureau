@@ -1,0 +1,36 @@
+# Line endings, pinned.
+#
+# Why this file exists: with core.autocrlf=true and no attributes, git had guessed `server.mjs` as
+# `-text` (see `git ls-files --eol`) and stored it with CRLF verbatim instead of normalising. Editing it
+# with an LF-writing tool then flipped every line, so a ~60-line change committed as a 7367-line diff
+# and the history stopped being reviewable. Pinning text files to LF in the repo fixes that for good.
+#
+# LF everywhere in the repo, regardless of what the working tree looks like on Windows.
+* text=auto eol=lf
+
+# Be explicit for what's actually tracked, so nothing is left to git's content guessing again.
+*.mjs   text eol=lf
+*.js    text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.html  text eol=lf
+*.css   text eol=lf
+*.svg   text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+
+# Shell scripts MUST be LF or the shell refuses them. The pre-push hook is the gate that runs the whole
+# test suite, so a CRLF here would silently disable it.
+.githooks/*  text eol=lf
+*.sh         text eol=lf
+
+# Binary assets: never inspected, never converted. (The isometric office art is ~480 PNGs.)
+*.png   binary
+*.webp  binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.woff  binary
+*.woff2 binary
+*.db    binary
