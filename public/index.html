@@ -1668,6 +1668,9 @@ async function openDeliverable(name){
   if(status==="draft"||status==="qa") btns.push(`<button class="primary" data-st="approved">✓ Sign off</button>`);
   if(status==="approved") btns.push(`<button class="primary" data-st="delivered">📦 Mark delivered</button>`);
   if(status!=="draft") btns.push(`<button data-st="draft">Reopen</button>`);
+  // Removal lives in the detail view, not the list: you have to open a document and look at it before
+  // you can remove it. Hidden entirely for a read-only token rather than shown and then refused.
+  if(ROLE!=="readonly") btns.push(`<button id="delDeliv" style="color:var(--bad,#c0392b)" title="Archive this document and take it off the list">🗑 Remove</button>`);
   const wrap=el("div","modalwrap");
   wrap.innerHTML=`<div class="modal" style="max-width:660px">
     <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:6px">
@@ -1687,6 +1690,15 @@ async function openDeliverable(name){
     dlFile(doc,name.replace(/\.[a-z0-9]+$/i,"")+".html","text/html");
   };
   wrap.querySelectorAll("[data-st]").forEach(b=>b.onclick=async()=>{ await api("POST","/api/deliverables/"+encodeURIComponent(name)+"/status",{status:b.dataset.st}); wrap.remove(); loadDeliverables(); loadDashboard(); refreshInbox(); });
+  const delBtn=wrap.querySelector("#delDeliv");
+  if(delBtn) delBtn.onclick=async()=>{
+    // Deliberately does NOT say "cannot be undone" — it can. The server archives into version history,
+    // so promising permanence would be a lie, and overstating danger makes people distrust the wording.
+    if(!confirm(`Remove "${name}"?\n\nIt is ARCHIVED, not destroyed: the content is kept in version history and the removal is recorded in the audit log (🧾 Log), so it can be recovered.\n\nIt stops appearing in the deliverables list and agents stop citing it in their work.`)) return;
+    const r=await api("DELETE","/api/deliverables/"+encodeURIComponent(name));
+    if(r&&r.ok){ wrap.remove(); loadDeliverables(); loadDashboard(); refreshInbox(); }
+    else alert("Couldn't remove it: "+((r&&(r.hint||r.error))||"unknown error")+". Nothing was changed.");
+  };
   const vt=wrap.querySelector("#vtoggle");
   if(vt) vt.onclick=async()=>{
     const vp=wrap.querySelector("#vpanel");

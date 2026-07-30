@@ -63,9 +63,7 @@ The remaining backlog, roughly by value (competitive-gap analysis, 2026-07-22):
   notify-webhook at a Slack incoming webhook yourself.
 - **Office-view revamp** — the isometric office is functional (renders from `public/assets/iso/`),
   but its visual design was parked. Pure presentation, no behavior change.
-- **Deliverable delete: API done (see Shipped), UI still missing.** The endpoint exists and archives
-  safely; the deliverables list in the browser has no remove control yet, so today deletion is
-  curl-or-nothing. Small, self-contained follow-up.
+_(Deliverable delete is complete — API and UI both shipped, see below.)_
 - **Remote access, last mile** — code complete (see Shipped). What remains is operator setup only:
   Bureau is already served on the tailnet at `:8443` alongside Compass; a Cloudflare Tunnel + Access
   hostname is the alternative for machines that can't run a mesh client. Untested piece: whether a
@@ -203,6 +201,11 @@ assertions + a live `--e2e`; see `test/README.md`).
   walks `org.deliverables`. _Live-verified: archive byte-identical and readable back, retrieval stops
   citing it, neighbouring documents untouched, no orphaned pending vectors, one audit row, second delete
   404s. Traversal collapses to a basename inside drafts/ and leaves files outside it alone._
+  **UI:** a `🗑 Remove` control in the document's detail view — not the list, so you have to open a
+  document and look at it first — hidden outright for a read-only token rather than shown then refused.
+  The confirm text deliberately does **not** say "cannot be undone", because it can be: it explains that
+  the content is archived into version history and the removal is in the audit log. Overstating danger
+  teaches people to distrust the wording.
 - **Per-passage chunking for long deliverables** (2026-07-30) — one vector per document only represents
   its *opening*, since `nomic-embed-text` stops near 2048 tokens, so a fact buried later in a long
   document was invisible to retrieval however well it matched. Documents are now split into ~1200-char

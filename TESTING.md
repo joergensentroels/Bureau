@@ -78,6 +78,14 @@ is a terrible reason to change a ranker — every "obvious" improvement to the f
 worse. Re-run it before and after any change to `rankByRelevance`, the fusion weights, or the embedding
 model, in the same session, and compare the ordering rather than the absolute numbers.
 
+**The browser UI has no automated coverage.** It is syntax-checked by extracting the inline `<script>`
+and running `node --check` on it, which catches parse errors but not runtime ones. Anything behavioural
+there is verified by loading `http://127.0.0.1:4173/` in a browser and reading the console + network log.
+_Done 2026-07-31: the page boots with no JS errors; unauthenticated, it correctly shows `⚠ not signed in`
+while keeping `👁 read-only` and `🔒 remote mode` hidden; and the **poller gate holds** — six boot requests
+and then silence, where the 2s/7s/12s pollers would otherwise have kept firing (they were measured at
+~83 requests/minute before that fix)._
+
 **Deliverable deletion end-to-end** (needs a live server + embedder; verified 2026-07-31, 16 checks): the
 happy path needs a real file on disk, which only an agent run or a direct write produces, so the server
 suite covers validation/not-found/traversal and the round-trip is scripted against a throwaway workspace —
