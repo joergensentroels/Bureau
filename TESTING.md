@@ -42,6 +42,7 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
 | Auth gate + role separation + security headers | api |
 | Header-only tokens — `?token=` rejected everywhere, incl. the SSE stream | api |
 | Failed-auth damper (429 past threshold, cleared by a success) + `kind:"auth"` audit rows | api |
+| Damper log-flood bound — 31 failures log ≤3 audit rows | api |
 | Role introspection `/api/whoami` (operator + readonly) | api |
 | Per-run paid cap (`maxPaidUsdPerRun`) | api |
 | Steer endpoint routing+auth | api |

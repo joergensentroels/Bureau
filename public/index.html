@@ -333,6 +333,7 @@
   <span class="tag" id="tagline">agent orchestrator</span>
   <button class="wsswitch" id="wsBtn" title="Switch workspace / company"><span id="wsName">Default</span> <span style="opacity:.6">▾</span></button>
   <span class="tag" id="roleBadge" style="display:none">👁 read-only</span>
+  <span class="tag" id="authWarn" style="display:none" title="Bureau is not accepting this browser's token, so live polling has paused to avoid hammering the server. Reload and enter the operator token.">⚠ not signed in</span>
   <div class="spacer"></div>
   <div class="toggle themeswitch"><button data-theme-btn="ops">Ops</button><button data-theme-btn="pixel">Tycoon</button></div>
   <button class="inboxbtn" id="inboxBtn" title="What needs you"><span class="ibell">🔔</span><span>Inbox</span><span class="nbadge" id="inboxBadge">0</span></button>
@@ -459,6 +460,7 @@ async function api(method, route, body){
   if(res.status===401 && promptToken()) res = await go();   // unlock + retry once
   if(res.status===429) noteThrottled();                     // damper tripped — explain, don't die silently
   if(res.status===403) noteReadOnly(method,route);          // read-only token tried to write — say so plainly
+  authStalled(res.status===401 || res.status===429);        // gate the background pollers (see below)
   const t = await res.text();                       // tolerate empty / non-JSON bodies instead of throwing
   try{ return t?JSON.parse(t):{}; }catch{ return {raw:t}; }
 }
@@ -507,6 +509,29 @@ async function loadRole(){
     b.style.display = ROLE==="readonly" ? "" : "none";
     b.title = "This browser holds the read-only token: you can watch runs and read everything, but starting runs, approving, and editing config need the operator token.";
   }
+}
+// Background pollers must NOT keep hammering once auth is broken. A tab left open with a missing or
+// stale token fires health+inbox+status on 7s/12s/2s timers forever — roughly 80 rejected requests a
+// minute, which keeps the server's damper permanently tripped and buries its audit trail in noise.
+// While stalled we let a single slow probe through instead, so recovery is still automatic the moment
+// the token works again.
+let AUTH_STALLED=false, _stallProbeAt=0;
+const STALL_PROBE_MS=60000;
+function authStalled(v){
+  if(v===AUTH_STALLED) return;
+  AUTH_STALLED=v;
+  if(v) _stallProbeAt=Date.now();
+  const b=$("#authWarn"); if(b) b.style.display=v?"":"none";
+}
+// Wrap a poller so it goes quiet while stalled, apart from one probe per STALL_PROBE_MS (shared across
+// all pollers, so it really is one request a minute, not one per poller).
+function pollGate(fn){
+  return ()=>{
+    if(!AUTH_STALLED) return fn();
+    if(Date.now()-_stallProbeAt < STALL_PROBE_MS) return;
+    _stallProbeAt=Date.now();
+    return fn();
+  };
 }
 // The server refuses new credential attempts from an address after repeated rejections. Without this
 // the UI would just stop working silently — and the moment you hit it is the worst one: entering the
@@ -2302,9 +2327,9 @@ function openAgentModal(mode, agent, opts){
 }
 
 boot();
-setInterval(refreshHealth, 7000);
-setInterval(refreshInbox, 12000);
-setInterval(pollStatus, 2000);
+setInterval(pollGate(refreshHealth), 7000);
+setInterval(pollGate(refreshInbox), 12000);
+setInterval(pollGate(pollStatus), 2000);
 </script>
 </body>
 </html>

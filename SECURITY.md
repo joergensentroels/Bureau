@@ -29,6 +29,11 @@ operator credential for the whole control plane; Bureau already refuses to boot 
   inside a 10-minute window, and written to the audit log (`kind: "auth"`) plus the console. The token
   is far too large to guess — this exists for the *alarm*, so a sustained probe is visible rather than
   silent. Any success clears that address's counter.
+- **The alarm is rate-limited too**, at most two rows per address per window (burst opening, and the
+  moment refusal starts), with one closing summary carrying the true total when the window ends. This is
+  not cosmetic: logging every Nth failure let a single browser tab polling with a stale token generate
+  ~4000 failures and 400 audit rows in 48 minutes, which would hide exactly the probe the log exists to
+  reveal. The UI cooperates by pausing its background pollers while auth is refused.
 - **Exempt from the token gate:** the static UI shell (HTML/CSS/JS — no secrets) and
   `POST /api/trigger/:token` (external webhooks that carry their own 122-bit unguessable per-trigger
   token as their auth).

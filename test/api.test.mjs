@@ -157,12 +157,23 @@ const ok = (c, m) => (c ? pass : fail).push(m);
     // ---- failed-auth damper: a burst of rejected credentials starts getting 429 ----
     // Must be the LAST auth check: it deliberately trips the per-address counter. Any successful auth
     // clears that counter, which the follow-up assertions then verify.
-    { let last = 0;
-      for (let i = 0; i < 12; i++) last = (await bare("GET", "/api/org", { authorization: `Bearer nope-${i}` })).status;
+    // Ordering matters: reading the audit log is itself an authenticated call, which CLEARS the
+    // counter. Count rows first, run the whole burst sequence, then count again — read it in the middle
+    // and the "works while tripped" assertion silently stops testing anything.
+    { const authRows = async () => ((await api("GET", "/api/audit?kind=auth&limit=500")).j.audit || []);
+      const before = (await authRows()).length;
+      let last = 0;
+      for (let i = 0; i < 30; i++) last = (await bare("GET", "/api/org", { authorization: `Bearer nope-${i}` })).status;
       ok(last === 429, "auth: sustained rejected credentials → 429 (damper trips)");
       ok((await bare("GET", "/api/org", { authorization: `Bearer ${TOKEN}` })).status === 200, "auth: a valid token still works while the damper is tripped");
       ok((await bare("GET", "/api/org", { authorization: "Bearer nope-again" })).status === 401, "auth: success clears the counter (back to plain 401)");
-      const hits = (await api("GET", "/api/audit?kind=auth")).j.audit || [];
+      const hits = await authRows();
+      const added = hits.length - before;
+      // 30 failures, then one more after the reset, must log at most 3 rows: burst opening, refusal
+      // onset, post-reset opening. Logging every Nth failure (the bug this replaced) emits 5+ here, and
+      // a stuck client polling with no token turned that into 400 rows in 48 minutes — enough to bury
+      // the real probe this log exists to reveal.
+      ok(added >= 2 && added <= 3, `auth: 31 failures log at most 3 audit rows (logged ${added}) — a stuck client cannot flood the log`);
       ok(hits.length >= 1 && hits.every((h) => h.actionType === "auth_failed" && h.ok === false), "auth: rejected credentials are written to the audit log");
     }
 

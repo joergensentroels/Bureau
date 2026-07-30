@@ -414,16 +414,25 @@ const clientIp = (req) => String(req.socket?.remoteAddress || "unknown");
 function authFailure(req, p) {
   const ip = clientIp(req), now = Date.now();
   const prev = authFails.get(ip);
-  const e = prev && now - prev.first <= AUTH_FAIL_WINDOW_MS ? prev : { n: 0, first: now, last: now };
+  const rolled = prev && now - prev.first > AUTH_FAIL_WINDOW_MS;
+  // A window that ends after piling up gets one closing summary, so the true volume stays visible even
+  // though the individual failures were logged sparsely.
+  if (rolled && prev.n > AUTH_FAIL_MAX) {
+    logAudit({ kind: "auth", actionType: "auth_failed", agent: ip, ok: false, decision: "denied", summary: `Rejected credentials from ${ip} — burst ended: ${prev.n} failure(s) over ${Math.round((prev.last - prev.first) / 60000)}m` });
+  }
+  const e = prev && !rolled ? prev : { n: 0, first: now, last: now };
   e.n++; e.last = now;
   authFails.set(ip, e);
   if (authFails.size > 1000) for (const [k, v] of authFails) if (now - v.last > AUTH_FAIL_WINDOW_MS) authFails.delete(k);   // bound the map
-  // Audit the first failure of a burst and then every AUTH_FAIL_MAX-th: enough to see a probe, not
-  // enough for the prober to flood the log.
-  if (e.n === 1 || e.n % AUTH_FAIL_MAX === 0) {
+  // At most TWO rows per address per window: the burst opening, and the moment we start refusing.
+  // Logging every Nth failure instead floods the log — a browser tab polling with no token produced
+  // ~4000 failures and 400 audit rows in 48 minutes, burying the very signal this exists to provide.
+  // The window rollover above reports the total, so nothing is lost by staying quiet in between.
+  if (e.n === 1 || e.n === AUTH_FAIL_MAX + 1) {
     const mins = Math.round((now - e.first) / 60000);
-    logAudit({ kind: "auth", actionType: "auth_failed", agent: ip, ok: false, decision: "denied", summary: `Rejected credential from ${ip} — ${e.n} failure(s) in ${mins}m (latest: ${p})` });
-    console.warn(`⚠  auth: rejected credential from ${ip} — ${e.n} failure(s) in ${mins}m (latest ${p})`);
+    const tail = e.n > AUTH_FAIL_MAX ? " — now refusing this address; further failures summarised when the burst ends" : "";
+    logAudit({ kind: "auth", actionType: "auth_failed", agent: ip, ok: false, decision: "denied", summary: `Rejected credential from ${ip} — ${e.n} failure(s) in ${mins}m (latest: ${p})${tail}` });
+    console.warn(`⚠  auth: rejected credential from ${ip} — ${e.n} failure(s) in ${mins}m (latest ${p})${tail}`);
   }
   return e.n > AUTH_FAIL_MAX;
 }
