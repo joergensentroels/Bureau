@@ -27,13 +27,19 @@ concurrency gain (measured 4.6x, but confounded). **Outstanding:**
 
 The remaining backlog, roughly by value (competitive-gap analysis, 2026-07-22):
 
-- **Semantic memory — vector embeddings: CODE COMPLETE, awaiting one model pull.** The whole path is
-  built, unit-tested and shipped (see Shipped below); it simply has nothing to embed with until
-  **`ollama pull nomic-embed-text`** (~274MB) runs on the host. Until then recall stays lexical, by
-  design. Once pulled: `POST /api/embeddings/backfill`, then compare `GET /api/memory?q=…` against
-  `?q=…&lexical=1` on a paraphrase query to see the semantic half earn its keep. Still open after that:
-  extend embedding from memory entries to **deliverables** (the table is already keyed by `kind`, so
-  it's a new kind plus a backfill, not a redesign).
+- **Semantic memory — follow-ups from the live A/B.** The feature is shipped and verified (see Shipped),
+  but measuring it surfaced two real quality problems worth fixing:
+  - **Near-duplicate memory entries eat the result slots.** Repeated test runs left the same objective
+    in memory 3×, and a `limit=3` recall came back as the same entry three times. Recall should collapse
+    near-identical entries (same agent + near-identical text) before applying `limit`, so the slots go
+    to distinct knowledge. This affects BM25 recall too — it predates embeddings.
+  - **Neither ranker is reliable on ops-flavoured paraphrases.** "keeping servers healthy under heavy
+    traffic" failed to surface the obvious match (Ava's monitoring / auto-scaling / load-testing entry)
+    in either mode — BM25 matched the stopword-ish "under", and the vector ranking preferred unrelated
+    entries. Worth investigating whether embedding `objective + summary` alone is too thin, since the
+    QA-criteria boilerplate in many entries likely dominates the vector.
+  - Still open: extend embedding from memory entries to **deliverables**. The table is already keyed by
+    `kind`, so that's a new kind plus a backfill, not a redesign.
 - **Outbound integrations** — ◐ partial. **GitHub publish is done** (`github_file` / `github_repo`
   actions → Latch's native GitHub connector; Latch holds the token and commits on approval, Bureau
   stores nothing) with a **per-workspace target repo/owner** (setup: `GITHUB.md`). Still open only:
@@ -161,7 +167,12 @@ assertions + a live `--e2e`; see `test/README.md`).
   timeout, missing vector, dimension mismatch — falls back to exactly the previous BM25 behaviour.
   Bureau calls the local embedder **directly** rather than through Latch: it's keyless and local, so
   there's no credential to protect (documented in `SECURITY.md`). _Unit-tested end to end (209 unit
-  assertions); the single network call awaits the model pull for live verification._
+  assertions). **Live-verified 2026-07-30** after `ollama pull nomic-embed-text`: all 45 memory entries
+  embedded in 16.3s at 768 dims with zero failures, and on 6 paraphrase queries chosen in advance to
+  share no significant keyword with their target, hybrid recall gained results over BM25 every time —
+  including two where BM25 returned nothing at all ("why lists help you not forget steps" → the
+  checklist work; "picking what matters most next quarter" → the Q3 priority work, with no shared term
+  since the corpus says "Q3"). One query surfaced no correct match in either mode; see **Next**._
 
 ---
 

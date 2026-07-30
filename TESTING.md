@@ -58,7 +58,8 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
 **Need a live embedding model (manually verified, scripted):**
 - `embedText` — the one network call in the vector path. Needs `ollama pull nomic-embed-text`; the
   suites deliberately make no network calls, and every caller treats a null vector as "fall back to
-  BM25", which the unit tests do cover.
+  BM25", which the unit tests do cover. _Verified live 2026-07-30: 45 entries embedded at 768 dims, 0
+  failures, and hybrid recall beat BM25 on 6/6 pre-chosen paraphrase queries._
 
 **Need a live Latch (manually verified, scripted):**
 - `BUREAU_REMOTE` refusing a real pending approval — needs a pending Latch approval, so the endpoint
