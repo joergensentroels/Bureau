@@ -81,9 +81,10 @@ SSRF-guarded web fetches — while everything credentialed or high-reach goes th
 - **Agent-to-agent comms** — an agent can consult a named teammate (`ask_peer`).
 - **Process templates (SOPs)** — reusable, ordered step-lists that run deterministically (skipping the
   LLM planning step).
-- **Shared company memory** — recall of prior work across the whole team, ranked by **semantic**
-  similarity (local embeddings) fused with **keyword** relevance (BM25) via Reciprocal Rank Fusion.
-  Needs `ollama pull nomic-embed-text`; without it, recall degrades cleanly to BM25 alone.
+- **Shared company memory + deliverable RAG** — recall of prior work and past documents across the whole
+  team, ranked by **semantic** similarity (local embeddings) fused with **keyword** relevance (BM25) via
+  Reciprocal Rank Fusion. Needs `ollama pull nomic-embed-text`; without it, recall degrades cleanly to
+  BM25 alone. Retrieval quality is measured, not assumed — `node eval/recall-eval.mjs`.
 - **MCP interop** — Bureau speaks the Model Context Protocol both ways: expose it at `POST /mcp` for
   external clients (Claude Desktop, etc.), and let agents call external MCP tools (brokered through Latch).
 - **Paid/local model economy** — funded agents use a paid provider (Moonshot/Kimi) with per-agent tiers;

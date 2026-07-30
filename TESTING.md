@@ -48,6 +48,7 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
 | Vectors: `packVec`/`unpackVec` round-trip, `cosine`, `rrfFuse`, `memoryKey`/`memoryText` | units |
 | Hybrid recall — vector+BM25 fusion and every degrade-to-lexical path | units |
 | Recall de-dup: `objectiveSignature`, `dedupeMemories`, summary-over-recency, per-agent scope | units |
+| Deliverable ranking (BM25 over filename+content) + `deliverableEmbedText` | units |
 | `/api/embeddings` status + `/api/embeddings/backfill` + `/api/memory?lexical=` switch | api |
 | Approval seam validation (unknown id → 404, bad decision → 400) | api |
 | Role introspection `/api/whoami` (operator + readonly) | api |

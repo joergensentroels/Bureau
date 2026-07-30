@@ -3,12 +3,12 @@
 import {
   ipv4Blocked, ipBlocked, normalizeAction, safeParse, ragTerms, expectsDeliverable,
   resolveReport, goalObjective, normKRs, cadenceMs, cleanPolicyWhen, htmlToText,
-  ensureBudget, renderChecklist, validDeliverableName, rankDeliverables, workProduct,
+  ensureBudget, renderChecklist, validDeliverableName, workProduct,
   planObjective, normPlanItem, normSop, normSopSteps, sopObjective,
   rankByRelevance, recallSharedMemory, makeSemaphore,
   approvalActType, remoteBlocksApproval, REMOTE_MODE,
   packVec, unpackVec, cosine, rrfFuse, memoryKey, memoryText,
-  objectiveSignature, dedupeMemories,
+  objectiveSignature, dedupeMemories, deliverableEmbedText,
 } from "../server.mjs";
 
 let pass = 0, fail = 0;
@@ -155,17 +155,24 @@ eq("  nested objects", safeParse('{"a":{"b":2}}'), { a: { b: 2 } });
 eq("  brace inside a string doesn't end the object", safeParse('{"a":"has } and { braces"}'), { a: "has } and { braces" });
 eq("  a top-level array is not an object → null", safeParse("[1,2,3]"), null);
 
-console.log("# rankDeliverables — pure RAG keyword ranker (score >= 2, best first)");
+// Deliverable retrieval used to have its own term-counting ranker (rankDeliverables, removed
+// 2026-07-30). It required >= 2 distinct query terms to match at all and measured 3/14 recall@3 against
+// BM25's 6/14 and 12/14 fused with vectors — see eval/recall-eval.mjs. Deliverables are now ranked with
+// the same BM25 + vector fusion as memory, so the ranker below is what covers that path.
+console.log("# deliverable lexical ranking — BM25 over filename + content");
 { const docs = [
-    { name: "pricing.md", content: "our pricing tiers and competitor pricing comparison" },
+    { name: "pricing-tiers.md", content: "our pricing tiers and competitor pricing comparison" },
     { name: "hello.md", content: "hi there, welcome" },
-    { name: "market.md", content: "competitor pricing analysis of the market" } ];
-  const r = rankDeliverables("competitor pricing analysis", docs, 3);
-  chk("  only docs matching >=2 terms are returned", r.length === 2 && r.every((x) => x.name !== "hello.md"));
-  chk("  best score first", r[0].name === "market.md");
-  eq("  no query terms → []", rankDeliverables("the a of to", docs), []);
-  eq("  excludeName is skipped", rankDeliverables("competitor pricing analysis", docs, 3, "market.md").map((x) => x.name), ["pricing.md"]);
-  chk("  limit respected", rankDeliverables("competitor pricing analysis", docs, 1).length === 1); }
+    { name: "market-analysis.md", content: "competitor pricing analysis of the market" } ];
+  const lex = (q, limit = 3) => rankByRelevance(q, docs, (d) => `${d.name.replace(/[-_.]+/g, " ")} ${d.content}`, limit).map((r) => r.item.name);
+  const r = lex("competitor pricing analysis");
+  chk("  ranks the matching docs, not the unrelated one", r.length >= 2 && !r.includes("hello.md"));
+  chk("  the best match leads", r[0] === "market-analysis.md" || r[0] === "pricing-tiers.md");
+  // The old ranker needed TWO matching terms; one is now enough, which is what fixed paraphrases.
+  chk("  a single matching term still retrieves", lex("pricing").length >= 1);
+  // The filename is part of the indexed text, so its words are searchable even if the body omits them.
+  chk("  filename words are searchable", lex("tiers").includes("pricing-tiers.md"));
+  eq("  limit respected", lex("competitor pricing analysis", 1).length, 1); }
 
 console.log("# rankByRelevance — pure-JS BM25 relevance ranker");
 { const items = [
@@ -298,6 +305,18 @@ console.log("# vectors — Reciprocal Rank Fusion");
   eq("  tolerates empty and missing lists", rrfFuse([[], null], id, { limit: 3 }), []);
   eq("  skips items with no key", rrfFuse([[{ k: null }, { k: "a" }]], id, { limit: 3 }).map((r) => r.item.k), ["a"]);
 }
+
+console.log("# deliverableEmbedText — what a document is embedded as");
+// The filename is real signal, so it leads — humanised, because an embedder reads "ci cd workflows"
+// better than the raw slug.
+chk("  filename leads, humanised and de-extensioned", deliverableEmbedText("ci-cd-workflows.md", "body").startsWith("ci cd workflows\n"));
+chk("  underscores become spaces too", deliverableEmbedText("org_structure.md", "x").startsWith("org structure"));
+chk("  includes the content", deliverableEmbedText("a.md", "hello world").includes("hello world"));
+// nomic-embed-text tops out ~2048 tokens; a long doc is represented by its opening, not silently
+// truncated mid-embedding by the server.
+chk("  caps long content", deliverableEmbedText("a.md", "x".repeat(9000)).length < 4200);
+eq("  no content → just the title", deliverableEmbedText("only-a-name.md", ""), "only a name");
+eq("  tolerates nulls", deliverableEmbedText(null, null), "");
 
 console.log("# memory keys — stable identity for embedding rows");
 eq("  uses agentId:at when a timestamp exists", memoryKey("ag1", { at: 1700000000000 }), "ag1:1700000000000");

@@ -27,7 +27,21 @@ const B = `http://127.0.0.1:${PORT}`;
 const EMBED_URL = (process.env.BUREAU_EMBED_URL || "http://127.0.0.1:11434").replace(/\/+$/, "");
 const EMBED_MODEL = process.env.BUREAU_EMBED_MODEL || "nomic-embed-text";
 const HERE = path.dirname(fileURLToPath(import.meta.url));   // not URL.pathname: that is percent-encoded
-const { rankByRelevance, cosine, objectiveSignature } = await import(pathToFileURL(path.join(HERE, "..", "server.mjs")).href);
+const { rankByRelevance, cosine, objectiveSignature, deliverableEmbedText, ragTerms } = await import(pathToFileURL(path.join(HERE, "..", "server.mjs")).href);
+
+// The deliverable ranker Bureau shipped BEFORE 2026-07-30, kept here as the historical baseline so the
+// comparison stays reproducible. It lives in the eval rather than the server because it is retired: it
+// counted distinct query terms and required >= 2 hits, so any paraphrase sharing one term scored nothing.
+function retiredTermCounter(query, docs, limit = 3) {
+  const q = ragTerms(query); if (!q.length) return [];
+  const scored = [];
+  for (const doc of docs || []) {
+    const hay = (doc.name + " " + String(doc.content || "").slice(0, 3000)).toLowerCase();
+    let score = 0; for (const w of q) if (hay.includes(w)) score++;
+    if (score >= 2) scored.push({ item: doc, score });
+  }
+  return scored.sort((a, b) => b.score - a.score).slice(0, limit);
+}
 
 const TOKEN = (() => { if (process.env.OPERATOR_TOKEN) return process.env.OPERATOR_TOKEN.trim();
   try { const dir = process.env.LATCH_DATA || path.join(os.homedir(), "Documents", "LLM server", "openclaw-command-center", "data"); return JSON.parse(readFileSync(path.join(dir, "auth.json"), "utf8")).operatorToken || ""; } catch { return ""; } })();
@@ -115,4 +129,62 @@ const VARIANTS = {
   const shipped = Object.keys(VARIANTS).find((k) => k.includes("SHIPPED"));
   console.log(`\n${shipped} misses: ${(misses[shipped] || []).map((q) => `"${q}"`).join(", ") || "none"}`);
   console.log("\nReminder: one-query differences are noise at this sample size. Act on gaps of several.");
+
+  // ---------------- deliverable retrieval ----------------
+  // The prompt block "Relevant existing company deliverables" uses a DIFFERENT and much cruder ranker
+  // than memory recall did. Two independent upgrades were possible (BM25 instead of the term counter,
+  // and vectors), so this measured before choosing. Keep the retired baseline in the table: it is how
+  // you can tell whether a future "improvement" is actually an improvement.
+  const dl = await (await fetch(`${B}/api/deliverables`, { headers: { authorization: `Bearer ${TOKEN}` } })).json();
+  const names = (dl.files || []).map((f) => f.name || f);
+  const docs2 = [];
+  for (const name of names) {
+    const r = await (await fetch(`${B}/api/deliverables/${encodeURIComponent(name)}`, { headers: { authorization: `Bearer ${TOKEN}` } })).json();
+    if (typeof r?.content === "string") docs2.push({ _key: name, name, content: r.content });
+  }
+  const dvecs = new Map();
+  for (const d of docs2) dvecs.set(d.name, await embed(deliverableEmbedText(d.name, d.content)));
+
+  const DLABELS = [
+    ["keeping servers healthy under heavy traffic", /production-readiness-plan|sre-tools-guide/i],
+    ["storing files in the cloud cheaply", /cloud-object-storage-benefit/i],
+    ["greeting a brand new client", /welcome-email-draft|sam-welcome-note|sam\.txt/i],
+    ["what to do when we get hacked", /security-incident-response-policy/i],
+    ["how new people learn the ropes", /onboarding/i],
+    ["automating builds and releases", /ci-cd-workflows|devops-infrastructure-guide/i],
+    ["who reports to whom", /org-structure/i],
+    ["how much we charge", /pricing-section/i],
+    ["grouping customers by value", /customer-tiering/i],
+    ["ways to reach new audiences", /marketing-channels-plan|q3-marketing-themes/i],
+    ["why lists help you not forget steps", /why-checklists-are-useful|to-do-list-definition/i],
+    ["house style for writing docs", /style-guide-template/i],
+    ["tools engineers should install", /dev-tools-guide|sre-tools-guide/i],
+    ["saying thanks to a buyer", /welcome-alex/i],
+  ];
+  const dscore = {}, dmiss = {};
+  const DVARIANTS = {
+    "retired term-counter (pre-2026-07-30)": (crude, bm, sem) => fuse([crude], [1]),
+    "BM25 only — the no-embedder fallback": (crude, bm, sem) => fuse([bm], [1]),
+    "semantic only": (crude, bm, sem) => fuse([sem], [1]),
+    "RRF(term-counter, semantic)": (crude, bm, sem) => fuse([crude, sem], [1, 1]),
+    "RRF(BM25, semantic)  <-- SHIPPED": (crude, bm, sem) => fuse([bm, sem], [1, 1]),
+  };
+  for (const [q, want] of DLABELS) {
+    const qv = await embed(q);
+    const crude = retiredTermCounter(q, docs2, 10);
+    const bm = rankByRelevance(q, docs2, (d) => `${d.name.replace(/[-_.]+/g, " ")} ${d.content}`, 10);
+    const sem = docs2.map((d) => ({ item: d, score: cosine(qv, dvecs.get(d.name)) })).filter((x) => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 10);
+    for (const [name, fn] of Object.entries(DVARIANTS)) {
+      const hit = fn(crude, bm, sem).some((r) => want.test(r.item.name));
+      dscore[name] = (dscore[name] || 0) + (hit ? 1 : 0);
+      if (!hit) (dmiss[name] = dmiss[name] || []).push(q);
+    }
+  }
+  console.log(`\n\nDELIVERABLE retrieval — recall@3 over ${DLABELS.length} labelled queries (${docs2.length} documents)\n`);
+  for (const [name, n] of Object.entries(dscore).sort((a, b) => b[1] - a[1]))
+    console.log(`  ${String(n).padStart(2)}/${DLABELS.length}  ${String(Math.round(100 * n / DLABELS.length)).padStart(3)}%   ${name}`);
+  const dshipped = Object.keys(DVARIANTS).find((k) => k.includes("SHIPPED"));
+  console.log(`\n${dshipped} misses: ${(dmiss[dshipped] || []).map((q) => `"${q}"`).join(", ") || "none"}`);
+  const best = Object.entries(dscore).sort((a, b) => b[1] - a[1])[0];
+  console.log(`best: ${best[0]} — misses: ${(dmiss[best[0]] || []).map((q) => `"${q}"`).join(", ") || "none"}`);
 })();

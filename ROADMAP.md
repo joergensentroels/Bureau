@@ -43,8 +43,9 @@ The remaining backlog, roughly by value (competitive-gap analysis, 2026-07-22):
     actively hurts, and the lexical/hybrid gap (5/12 → 10/12) is the result that matters. The two
     remaining misses are the tail of a small corpus, not a bug — tuning them away would cost recall
     elsewhere, which is precisely the trap.
-  - Still open: extend embedding from memory entries to **deliverables**. The table is already keyed by
-    `kind`, so that's a new kind plus a backfill, not a redesign.
+  - Deliverable embedding: **done**, see Shipped. Next candidate if documents get longer: chunk a
+    deliverable per section instead of embedding its opening 4000 characters, since `nomic-embed-text`
+    tops out around 2048 tokens.
 - **Outbound integrations** — ◐ partial. **GitHub publish is done** (`github_file` / `github_repo`
   actions → Latch's native GitHub connector; Latch holds the token and commits on approval, Bureau
   stores nothing) with a **per-workspace target repo/owner** (setup: `GITHUB.md`). Still open only:
@@ -178,6 +179,17 @@ assertions + a live `--e2e`; see `test/README.md`).
   including two where BM25 returned nothing at all ("why lists help you not forget steps" → the
   checklist work; "picking what matters most next quarter" → the Q3 priority work, with no shared term
   since the corpus says "Q3"). One query surfaced no correct match in either mode; see **Next**._
+- **Deliverable retrieval, semantic + BM25** (2026-07-30) — the "relevant existing company deliverables"
+  block in every agent prompt was the weakest retrieval path in Bureau, and nobody had measured it. It
+  used a term counter that required **2+ distinct query terms to match at all**, so any paraphrase
+  returned nothing. Measured recall@3 over 14 labelled queries (`node eval/recall-eval.mjs`): retired
+  term-counter **3/14**, BM25 6/14, semantic alone 12/14, **BM25+semantic fused 12/14**. Now ranked with
+  the same RRF fusion memory uses — a **4× improvement**, and the biggest single retrieval win so far.
+  Three variants tied at 12/14; the tie was broken on the **failure mode**, not the headline: fused still
+  returns BM25's 6/14 when no embedder is present, where semantic-alone would return nothing. Deliverables
+  are embedded as humanised-filename + opening content (the filename carries real signal), keyed by
+  filename with a content hash so an edited document re-embeds. The retired ranker lives on inside the
+  eval as the historical baseline rather than as dead code in the server.
 - **Recall de-duplication** (2026-07-30) — re-running a task, or a QA remediation pass, appends another
   memory entry whose first line is identical and whose tail differs only in appended criteria/verifier
   text. A `limit=3` recall could therefore return the same knowledge three times. Recall now collapses

@@ -1318,20 +1318,67 @@ function pendingMemories(org, map) {
   }
   return todo;
 }
-// Embed what's pending, newest work first. Bounded per call so a large backlog can't stall anything,
-// and it gives up early if the embedder is clearly down rather than grinding through every item.
-async function embedPendingMemories(ws = currentWs(), max = 200) {
-  const org = await readOrg();
-  const map = embeddingMap(ws, "memory");
-  const todo = pendingMemories(org, map);
+// The text a deliverable is embedded as. The FILENAME carries real signal here
+// ("cloud-object-storage-benefit"), so it leads, humanised — an embedder reads "cloud object storage
+// benefit" better than a hyphenated slug. Content is capped because nomic-embed-text tops out around
+// 2048 tokens: a long document is represented by its opening rather than chunked. Fine while
+// deliverables are short; chunk-per-section is the upgrade if they grow.
+export function deliverableEmbedText(name, content) {
+  const title = String(name || "").replace(/\.[a-z0-9]+$/i, "").replace(/[-_]+/g, " ").trim();
+  return `${title}\n${String(content || "").slice(0, 4000)}`.trim();
+}
+// Every deliverable in this workspace as {name, content}. Shared by retrieval AND by embedding, so the
+// two can never disagree about what the corpus is.
+async function readAllDeliverables() {
+  let names = [];
+  try { names = (await readdir(draftsDir())).filter(isDeliverableFile); } catch { return []; }
+  const docs = [];
+  for (const name of names) {
+    try { docs.push({ name, content: await readFile(path.join(draftsDir(), name), "utf8") }); } catch { continue; }
+  }
+  return docs;
+}
+// Which deliverables still need a vector (never embedded, or the file changed since).
+function pendingDeliverables(docs, map) {
+  const todo = [];
+  for (const d of docs) {
+    const text = deliverableEmbedText(d.name, d.content);
+    if (!text) continue;
+    const hash = textHash(text);
+    const have = map.get(d.name);
+    if (!have || have.hash !== hash) todo.push({ key: d.name, text, hash });
+  }
+  return todo;
+}
+// Embed a list of {key, text, hash} into one kind. Bounded per call so a large backlog can't stall
+// anything, and it gives up early if the embedder is clearly down rather than grinding through the lot.
+async function embedBatch(ws, kind, todo, max) {
   let embedded = 0, failed = 0;
   for (const t of todo.slice(0, max)) {
     const v = await embedText(t.text);
     if (!v) { failed++; if (failed >= 3 && embedded === 0) break; continue; }
-    putEmbedding(ws, "memory", t.key, t.hash, v);
+    putEmbedding(ws, kind, t.key, t.hash, v);
     embedded++;
   }
   return { pending: todo.length, embedded, failed, remaining: Math.max(0, todo.length - embedded) };
+}
+async function embedPendingMemories(ws = currentWs(), max = 200) {
+  const org = await readOrg();
+  return embedBatch(ws, "memory", pendingMemories(org, embeddingMap(ws, "memory")), max);
+}
+async function embedPendingDeliverables(ws = currentWs(), max = 200) {
+  const docs = await readAllDeliverables();
+  return embedBatch(ws, "deliverable", pendingDeliverables(docs, embeddingMap(ws, "deliverable")), max);
+}
+// Both corpora. Used by the backfill endpoint and fired after a run persists.
+async function embedPendingAll(ws = currentWs(), max = 200) {
+  const memory = await embedPendingMemories(ws, max);
+  const deliverable = await embedPendingDeliverables(ws, max);
+  return { memory, deliverable,
+    pending: memory.pending + deliverable.pending,
+    embedded: memory.embedded + deliverable.embedded,
+    failed: memory.failed + deliverable.failed,
+    remaining: memory.remaining + deliverable.remaining };
 }
 // Recall with the semantic half wired in. Embeds the query only when there is actually a corpus to
 // compare against, and falls back to plain BM25 on any failure — so this is always safe to call.
@@ -1346,29 +1393,41 @@ async function recallSharedMemoryHybrid(org, query, limit = 4, excludeAgentId = 
   } catch {}
   return recallSharedMemory(org, query, limit, excludeAgentId, hybrid);
 }
-// Pure keyword ranker (no disk): score each doc by how many significant query terms appear in its
-// name+content, keep those scoring >= 2, best first. Split out so it can be unit-tested directly.
-export function rankDeliverables(query, docs, limit = 3, excludeName = "") {
-  const q = ragTerms(query); if (!q.length) return [];
-  const scored = [];
-  for (const doc of docs || []) {
-    if (!doc || doc.name === excludeName) continue;
-    const content = String(doc.content || "");
-    const hay = (doc.name + " " + content.slice(0, 3000)).toLowerCase();
-    let score = 0; for (const w of q) if (hay.includes(w)) score++;
-    if (score >= 2) scored.push({ name: doc.name, score, excerpt: content.slice(0, 600) });
-  }
-  scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, limit);
-}
+// Text used to rank a deliverable lexically. The filename is a real signal, so it's included with its
+// separators split into words — "ci-cd-workflows.md" should match a query about workflows.
+const deliverableLexText = (d) => `${String(d.name || "").replace(/[-_.]+/g, " ")} ${d.content || ""}`;
+
+// RAG over past company deliverables, so work compounds instead of being redone. Ranked by BM25 and by
+// vector similarity, fused with RRF — the same approach shared-memory recall uses, for the same reason.
+//
+// This replaced a term-counting ranker that required >= 2 distinct query terms to match AT ALL, so any
+// paraphrase returned nothing. Measured over 14 labelled queries (`node eval/recall-eval.mjs`), recall@3
+// was: old term-counter 3/14, BM25 6/14, semantic alone 12/14, BM25+semantic fused 12/14.
+//
+// Fused ties semantic-alone on accuracy, and it is the one to ship because of what happens when the
+// embedder ISN'T there: fused still delivers BM25's 6/14, where semantic-alone would return nothing at
+// all. Tie-broken on the failure mode, not the headline number.
 async function retrieveRelevant(query, limit = 3, excludeName = "") {
-  if (!ragTerms(query).length) return [];
-  let names = []; try { names = (await readdir(draftsDir())).filter(isDeliverableFile); } catch { return []; }
-  const docs = [];
-  for (const name of names) {
-    try { docs.push({ name, content: await readFile(path.join(draftsDir(), name), "utf8") }); } catch { continue; }
-  }
-  return rankDeliverables(query, docs, limit, excludeName);
+  const q = String(query || "").trim();
+  if (!q) return [];
+  const docs = (await readAllDeliverables()).filter((d) => d.name !== excludeName);
+  if (!docs.length) return [];
+  const deep = Math.max(limit, 10);
+  const lex = rankByRelevance(q, docs, deliverableLexText, deep).map((r) => r.item);
+  let sem = [];
+  try {
+    const map = embeddingMap(currentWs(), "deliverable");
+    if (map.size) {
+      const qv = await embedText(q);
+      if (qv) {
+        const v = new Float32Array(qv);
+        sem = docs.map((d) => ({ d, s: cosine(v, map.get(d.name)?.vec) })).filter((x) => x.s > 0)
+          .sort((a, b) => b.s - a.s).slice(0, deep).map((x) => x.d);
+      }
+    }
+  } catch {}
+  const ranked = sem.length ? rrfFuse([lex, sem], (d) => d.name, { limit }).map((r) => r.item) : lex.slice(0, limit);
+  return ranked.map((d) => ({ name: d.name, excerpt: String(d.content || "").slice(0, 600) }));
 }
 
 // Agent-to-agent consult: spin up `peer` for a BOUNDED, no-side-effects opinion on `question` from
@@ -1847,7 +1906,7 @@ async function persistRun(objective, tokens, extra, perAgent, memoryEntries, pai
   // is unavailable this is a no-op and recall quietly stays lexical. ws is captured now, since this
   // outlives the request that set it.
   const ws = currentWs();
-  embedPendingMemories(ws).catch(() => {});
+  embedPendingAll(ws).catch(() => {});   // memory entries AND any deliverables the run produced
   return { tokens: org.budget.tokens };
 }
 function addTally(tally, id, n) { if (tally && id && n) tally[id] = (tally[id] || 0) + n; }
@@ -3606,18 +3665,23 @@ const server = createServer(async (req, res) => {
     if (p === "/api/embeddings" && req.method === "GET") {
       const ws = currentWs();
       const org = await readOrg();
-      const map = embeddingMap(ws, "memory");
+      const mem = embeddingMap(ws, "memory"), del = embeddingMap(ws, "deliverable");
       const probe = /^(1|true|yes)$/i.test(url.searchParams.get("probe") || "");
       const ready = probe ? !!(await embedText("ping", { timeoutMs: 20000 })) : null;
-      const dims = [...new Set([...map.values()].map((v) => v.vec.length))];
-      return send(res, 200, { url: EMBED_URL, model: EMBED_MODEL, loopback: isLoopbackUrl(EMBED_URL),
-        embedded: map.size, pending: pendingMemories(org, map).length, dims, ready });
+      const dims = [...new Set([...mem.values(), ...del.values()].map((v) => v.vec.length))];
+      const kinds = {
+        memory: { embedded: mem.size, pending: pendingMemories(org, mem).length },
+        deliverable: { embedded: del.size, pending: pendingDeliverables(await readAllDeliverables(), del).length },
+      };
+      return send(res, 200, { url: EMBED_URL, model: EMBED_MODEL, loopback: isLoopbackUrl(EMBED_URL), kinds, dims, ready,
+        embedded: kinds.memory.embedded + kinds.deliverable.embedded,
+        pending: kinds.memory.pending + kinds.deliverable.pending });
     }
-    // Embed whatever is pending. Bounded per call; run it again to continue a large backfill.
+    // Embed whatever is pending, both corpora. Bounded per call; run it again to continue a big backfill.
     if (p === "/api/embeddings/backfill" && req.method === "POST") {
       const body = await readBody(req).catch(() => ({}));
       const max = Math.min(500, Math.max(1, Number(body?.max) || 200));
-      const r = await embedPendingMemories(currentWs(), max);
+      const r = await embedPendingAll(currentWs(), max);
       return send(res, 200, { ...r, model: EMBED_MODEL,
         hint: r.embedded === 0 && r.pending > 0 ? `nothing embedded — is '${EMBED_MODEL}' pulled? try: ollama pull ${EMBED_MODEL}` : undefined });
     }
