@@ -7,6 +7,7 @@ import {
   planObjective, normPlanItem, normSop, normSopSteps, sopObjective,
   rankByRelevance, recallSharedMemory, makeSemaphore,
   approvalActType, remoteBlocksApproval, REMOTE_MODE,
+  packVec, unpackVec, cosine, rrfFuse, memoryKey, memoryText,
 } from "../server.mjs";
 
 let pass = 0, fail = 0;
@@ -250,6 +251,80 @@ chk("  fails closed on an untagged approval", remoteBlocksApproval({ contextTags
 chk("  fails closed on a missing contextTags", remoteBlocksApproval({}, {}) === true);
 chk("  fails closed on null", remoteBlocksApproval(null, {}) === true);
 chk("  fails closed on an unrecognised act type", remoteBlocksApproval(tagged("something_new"), {}) === true);
+
+console.log("# vectors — Float32 <-> BLOB round-trip");
+{
+  const v = [0.5, -0.25, 0, 1, -1, 0.123456];
+  const back = [...unpackVec(packVec(v))];
+  chk("  round-trips within float32 precision", back.every((x, i) => Math.abs(x - v[i]) < 1e-6));
+  eq("  preserves length", back.length, v.length);
+  eq("  packs 4 bytes per value", packVec(v).byteLength, v.length * 4);
+  eq("  empty in, empty out", [...unpackVec(packVec([]))], []);
+  // A truncated/garbled BLOB must not throw or produce a half-value.
+  eq("  rejects a non-multiple-of-4 blob", [...unpackVec(Buffer.from([1, 2, 3]))], []);
+  eq("  tolerates null", [...unpackVec(null)], []);
+  // SQLite may hand back a bare Uint8Array rather than a Buffer, and BLOBs carry no alignment promise.
+  const packed = packVec([1, 2, 3]);
+  eq("  accepts a bare Uint8Array", [...unpackVec(new Uint8Array(packed))], [1, 2, 3]);
+}
+
+console.log("# vectors — cosine similarity");
+chk("  identical vectors → 1", Math.abs(cosine(new Float32Array([1, 2, 3]), new Float32Array([1, 2, 3])) - 1) < 1e-6);
+chk("  opposite vectors → -1", Math.abs(cosine(new Float32Array([1, 0]), new Float32Array([-1, 0])) + 1) < 1e-6);
+chk("  orthogonal vectors → 0", Math.abs(cosine(new Float32Array([1, 0]), new Float32Array([0, 1]))) < 1e-6);
+chk("  magnitude-invariant", Math.abs(cosine(new Float32Array([1, 1]), new Float32Array([9, 9])) - 1) < 1e-6);
+// These all guard the same thing: a junk row must never be able to outrank a real match.
+eq("  length mismatch → 0", cosine(new Float32Array([1, 2]), new Float32Array([1, 2, 3])), 0);
+eq("  zero vector → 0", cosine(new Float32Array([0, 0]), new Float32Array([1, 2])), 0);
+eq("  empty → 0", cosine(new Float32Array([]), new Float32Array([])), 0);
+eq("  null → 0", cosine(null, new Float32Array([1])), 0);
+
+console.log("# vectors — Reciprocal Rank Fusion");
+{
+  const id = (x) => x.k;
+  const A = [{ k: "a" }, { k: "b" }, { k: "c" }];
+  const B = [{ k: "c" }, { k: "b" }, { k: "a" }];
+  const fused = rrfFuse([A, B], id, { limit: 3 });
+  // With perfectly reversed rankings, the items that took a FIRST place edge out the one that was
+  // middling in both: 1/(k+1) + 1/(k+3) > 2/(k+2), by convexity. So b — 2nd in both — comes last.
+  eq("  one first place outweighs being middling twice", fused[2].item.k, "b");
+  eq("  returns every distinct item", fused.length, 3);
+  // Appearing in BOTH lists must beat appearing 1st in only one.
+  const only = rrfFuse([[{ k: "x" }], [{ k: "y" }, { k: "x" }]], id, { limit: 2 });
+  eq("  two appearances beat one", only[0].item.k, "x");
+  eq("  honours limit", rrfFuse([A, B], id, { limit: 1 }).length, 1);
+  eq("  a single list is just that list", rrfFuse([A], id, { limit: 3 }).map((r) => r.item.k), ["a", "b", "c"]);
+  eq("  tolerates empty and missing lists", rrfFuse([[], null], id, { limit: 3 }), []);
+  eq("  skips items with no key", rrfFuse([[{ k: null }, { k: "a" }]], id, { limit: 3 }).map((r) => r.item.k), ["a"]);
+}
+
+console.log("# memory keys — stable identity for embedding rows");
+eq("  uses agentId:at when a timestamp exists", memoryKey("ag1", { at: 1700000000000 }), "ag1:1700000000000");
+chk("  falls back to a content hash with no timestamp", /^ag1:h[0-9a-f]{16}$/.test(memoryKey("ag1", { objective: "o", summary: "s" })));
+eq("  same content → same fallback key", memoryKey("ag1", { objective: "o", summary: "s" }), memoryKey("ag1", { objective: "o", summary: "s" }));
+chk("  different content → different fallback key", memoryKey("ag1", { objective: "o", summary: "s" }) !== memoryKey("ag1", { objective: "o", summary: "t" }));
+eq("  memoryText joins objective and summary", memoryText({ objective: "Write docs", summary: "Did it" }), "Write docs\nDid it");
+eq("  memoryText of an empty entry is empty", memoryText({}), "");
+
+console.log("# hybrid recall — vectors fused with BM25, degrading safely");
+{
+  const org = { agents: [
+    { id: "a1", name: "Ada", role: "Analyst", memory: [{ at: 1, objective: "quarterly revenue analysis", summary: "built the revenue model" }] },
+    { id: "a2", name: "Bo", role: "Writer", memory: [{ at: 2, objective: "customer onboarding email", summary: "drafted welcome copy" }] },
+  ] };
+  const lexOnly = recallSharedMemory(org, "revenue analysis", 2);
+  eq("  BM25 path unchanged when no hybrid arg is passed", lexOnly[0].agentName, "Ada");
+  // A query vector that points at Bo's entry should be able to surface it even though the QUERY
+  // shares no keywords with it — this is the whole point of the semantic half.
+  const vecs = new Map([["a1:1", new Float32Array([1, 0])], ["a2:2", new Float32Array([0, 1])]]);
+  const semantic = recallSharedMemory(org, "revenue analysis", 2, "", { queryVec: [0, 1], vecOf: (it) => vecs.get(it._key) });
+  chk("  a query vector pulls in a lexically-unrelated entry", semantic.some((r) => r.agentName === "Bo"));
+  // Every degradation path must land back on pure BM25 rather than returning nothing.
+  eq("  empty query vector → lexical", recallSharedMemory(org, "revenue analysis", 2, "", { queryVec: [], vecOf: () => null })[0].agentName, "Ada");
+  eq("  no vecOf → lexical", recallSharedMemory(org, "revenue analysis", 2, "", { queryVec: [0, 1] })[0].agentName, "Ada");
+  eq("  vectors all missing → lexical", recallSharedMemory(org, "revenue analysis", 2, "", { queryVec: [0, 1], vecOf: () => undefined })[0].agentName, "Ada");
+  eq("  excludeAgentId still drops the asker", recallSharedMemory(org, "revenue analysis", 2, "a1").filter((r) => r.agentName === "Ada").length, 0);
+}
 
 console.log(`\n${fail === 0 ? "ALL PASS ✓" : "FAILURES ✗"} — ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

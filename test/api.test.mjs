@@ -125,6 +125,19 @@ const ok = (c, m) => (c ? pass : fail).push(m);
     { const pf = (await api("GET", "/api/performance")).j; ok(Array.isArray(pf.agents) && typeof pf.auditWindow === "number", "performance well-formed"); }
     { const au = (await api("GET", "/api/audit?kind=deliverable")).j; ok(Array.isArray(au.audit) && au.totals && au.audit.every((r) => r.kind === "deliverable"), "audit endpoint filters by kind"); }
 
+    // ---- semantic memory: vector store status + backfill (no embedder needed for these paths) ----
+    { const e = (await api("GET", "/api/embeddings")).j;
+      ok(typeof e.url === "string" && typeof e.model === "string", "embeddings: reports the embedder url + model");
+      ok(e.loopback === true, "embeddings: default embedder url is loopback");
+      ok(typeof e.embedded === "number" && typeof e.pending === "number", "embeddings: reports embedded + pending counts");
+      ok(e.ready === null, "embeddings: skips the live probe unless ?probe=1 (no network in this suite)"); }
+    { const b = (await api("POST", "/api/embeddings/backfill", {})).j;
+      ok(typeof b.embedded === "number" && typeof b.pending === "number" && typeof b.remaining === "number", "backfill: returns embedded/pending/remaining");
+      ok(b.pending === 0 && b.embedded === 0, "backfill: nothing pending in a fresh workspace, so nothing embedded"); }
+    // The lexical/hybrid switch is what makes a semantic-vs-keyword A/B possible.
+    ok((await api("GET", "/api/memory?q=anything&lexical=1")).j.mode === "lexical", "memory: ?lexical=1 forces BM25-only recall");
+    ok((await api("GET", "/api/memory?q=anything")).j.mode === "hybrid", "memory: defaults to hybrid recall");
+
     // ---- auth gate + role separation ----
     const RTOK = (() => { try { const dir = process.env.LATCH_DATA || path.join(os.homedir(), "Documents", "LLM server", "openclaw-command-center", "data"); return JSON.parse(readFileSync(path.join(dir, "auth.json"), "utf8")).agentToken || ""; } catch { return ""; } })();
     const bare = (m, p, hdr = {}) => fetch(B + p, { method: m, headers: { "x-workspace": WS, ...hdr } });

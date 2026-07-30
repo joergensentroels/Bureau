@@ -81,7 +81,9 @@ SSRF-guarded web fetches — while everything credentialed or high-reach goes th
 - **Agent-to-agent comms** — an agent can consult a named teammate (`ask_peer`).
 - **Process templates (SOPs)** — reusable, ordered step-lists that run deterministically (skipping the
   LLM planning step).
-- **Shared company memory** — relevance-ranked recall of prior work across the whole team.
+- **Shared company memory** — recall of prior work across the whole team, ranked by **semantic**
+  similarity (local embeddings) fused with **keyword** relevance (BM25) via Reciprocal Rank Fusion.
+  Needs `ollama pull nomic-embed-text`; without it, recall degrades cleanly to BM25 alone.
 - **MCP interop** — Bureau speaks the Model Context Protocol both ways: expose it at `POST /mcp` for
   external clients (Claude Desktop, etc.), and let agents call external MCP tools (brokered through Latch).
 - **Paid/local model economy** — funded agents use a paid provider (Moonshot/Kimi) with per-agent tiers;
@@ -115,6 +117,8 @@ for it once and remembers it. Bureau binds loopback only.
 | `OPERATOR_TOKEN` | — | operator token (else read from Latch's `auth.json`) |
 | `BUREAU_READ_TOKEN` | Latch's `agentToken` | read-only token — reads only, no writes |
 | `BUREAU_REMOTE` | unset | `1` → Bureau won't **approve** hard-floor actions (deny still works); set it when reachable from a machine you trust less |
+| `BUREAU_EMBED_URL` | `http://127.0.0.1:11434` | local embedder for semantic memory (warns if non-loopback) |
+| `BUREAU_EMBED_MODEL` | `nomic-embed-text` | embedding model; recall falls back to BM25 if it's missing |
 | `LATCH_DATA` | `…/openclaw-command-center/data` | where Latch's `auth.json` lives |
 
 ## Security

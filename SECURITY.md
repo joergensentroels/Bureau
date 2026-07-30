@@ -53,6 +53,18 @@ credentials (Bureau never sees them) and returns only the result, which the agen
 untrusted external data**. Bureau opens no outbound MCP connections. When MCP is unconfigured on the
 host, the capability is dormant (never advertised to agents).
 
+## One deliberate exception to "all model access goes through Latch"
+
+Chat completions go through Latch because Latch holds the provider keys. **Embeddings do not**: the
+embedder is a local, keyless model, so there is no credential for Latch to protect and nothing leaves
+the machine. Bureau calls it directly at `BUREAU_EMBED_URL` (default `http://127.0.0.1:11434`), and
+warns on startup use if that URL is not loopback.
+
+This deliberately does **not** use `pinnedRequest`. That SSRF guard refuses private IPs and exists for
+URLs an *agent* supplies; this URL is operator configuration and is never model-controlled. Anything
+credentialed or outward-facing still goes through Latch. If you ever point `BUREAU_EMBED_URL` at a
+remote embedder, note that memory text then leaves the host — which is why the warning exists.
+
 ## The approval boundary (what protects real-world actions)
 
 Bureau proposes actions → **Latch approves (human) → Latch executes with its credentials**. The

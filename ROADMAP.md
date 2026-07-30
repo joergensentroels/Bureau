@@ -27,13 +27,13 @@ concurrency gain (measured 4.6x, but confounded). **Outstanding:**
 
 The remaining backlog, roughly by value (competitive-gap analysis, 2026-07-22):
 
-- **Semantic memory — TRUE vector embeddings** (the "semantic" half; the "shared" half shipped, see
-  below). **No longer infra-blocked** — that earlier note was wrong. Re-probed 2026-07-30: port 11434 is
-  real Ollama (`ollama.exe serve`, v0.32.1), and `/api/embed` answers **501, not 404** — the route is
-  there, `qwen3:8b` just isn't an embedding model. All this needs is an embedding model pulled
-  (`ollama pull nomic-embed-text`, ~274MB); no server relaunch, no flags. Then: embed memory +
-  deliverables, store vectors in SQLite, cosine similarity in JS, dropped in behind the existing
-  `rankByRelevance` interface with BM25 as the fallback when a vector is missing.
+- **Semantic memory — vector embeddings: CODE COMPLETE, awaiting one model pull.** The whole path is
+  built, unit-tested and shipped (see Shipped below); it simply has nothing to embed with until
+  **`ollama pull nomic-embed-text`** (~274MB) runs on the host. Until then recall stays lexical, by
+  design. Once pulled: `POST /api/embeddings/backfill`, then compare `GET /api/memory?q=…` against
+  `?q=…&lexical=1` on a paraphrase query to see the semantic half earn its keep. Still open after that:
+  extend embedding from memory entries to **deliverables** (the table is already keyed by `kind`, so
+  it's a new kind plus a backfill, not a redesign).
 - **Outbound integrations** — ◐ partial. **GitHub publish is done** (`github_file` / `github_repo`
   actions → Latch's native GitHub connector; Latch holds the token and commits on approval, Bureau
   stores nothing) with a **per-workspace target repo/owner** (setup: `GITHUB.md`). Still open only:
@@ -150,6 +150,18 @@ assertions + a live `--e2e`; see `test/README.md`).
   as `wsdefault` — the Inbox's per-workspace filter had never matched (default workspace saw every
   workspace's approvals; others saw none), and agent attribution was silently blank. All Bureau tags now
   go through `mkTag`/`readTag` with a hyphen separator. _Isolation verified live._
+- **Semantic memory — vectors fused with BM25** (2026-07-30) — the "semantic" half of shared memory.
+  Vectors live in a SQLite `embeddings` table keyed by (workspace, kind, item) and scoped to the
+  embedding model, so switching models can never mix two incompatible vector spaces; a `text_hash`
+  triggers re-embedding when an entry changes. Ranking uses **Reciprocal Rank Fusion** over the vector
+  and BM25 rankings rather than blending scores — BM25 scores and cosine similarities have no principled
+  common scale, and RRF needs none, which also means a partly-embedded corpus degrades smoothly instead
+  of skewing. Embedding happens fire-and-forget after each run, so no run waits on it, plus
+  `GET /api/embeddings` and `POST /api/embeddings/backfill`. Every failure path — no embedder, no model,
+  timeout, missing vector, dimension mismatch — falls back to exactly the previous BM25 behaviour.
+  Bureau calls the local embedder **directly** rather than through Latch: it's keyless and local, so
+  there's no credential to protect (documented in `SECURITY.md`). _Unit-tested end to end (209 unit
+  assertions); the single network call awaits the model pull for live verification._
 
 ---
 

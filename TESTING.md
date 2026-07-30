@@ -44,6 +44,9 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
 | Failed-auth damper (429 past threshold, cleared by a success) + `kind:"auth"` audit rows | api |
 | Damper log-flood bound — 31 failures log ≤3 audit rows | api |
 | Remote mode (`BUREAU_REMOTE`) allowlist + fail-closed (`remoteBlocksApproval`, `approvalActType`) | units |
+| Vectors: `packVec`/`unpackVec` round-trip, `cosine`, `rrfFuse`, `memoryKey`/`memoryText` | units |
+| Hybrid recall — vector+BM25 fusion and every degrade-to-lexical path | units |
+| `/api/embeddings` status + `/api/embeddings/backfill` + `/api/memory?lexical=` switch | api |
 | Approval seam validation (unknown id → 404, bad decision → 400) | api |
 | Role introspection `/api/whoami` (operator + readonly) | api |
 | Per-run paid cap (`maxPaidUsdPerRun`) | api |
@@ -51,6 +54,11 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
 | SSRF guard (`fetchUrl`, `apiCall`, incl. DNS-pin refusals) | net |
 
 ## Intentionally not auto-tested (accounted for — audit allowlist)
+
+**Need a live embedding model (manually verified, scripted):**
+- `embedText` — the one network call in the vector path. Needs `ollama pull nomic-embed-text`; the
+  suites deliberately make no network calls, and every caller treats a null vector as "fall back to
+  BM25", which the unit tests do cover.
 
 **Need a live Latch (manually verified, scripted):**
 - `BUREAU_REMOTE` refusing a real pending approval — needs a pending Latch approval, so the endpoint

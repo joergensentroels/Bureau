@@ -75,6 +75,14 @@ function initDb() {
     seq INTEGER PRIMARY KEY AUTOINCREMENT, ws TEXT NOT NULL, id TEXT, at INTEGER NOT NULL,
     kind TEXT, agent TEXT, agent_id TEXT, action_type TEXT, run_id TEXT, decision TEXT, ok INTEGER,
     json TEXT NOT NULL)`);
+  // Vector store for semantic recall. One row per embedded item, keyed by workspace + kind + a stable
+  // item key. `model` is part of what we read back on, so switching embedding models never mixes two
+  // incompatible vector spaces; `text_hash` is what tells us an item changed and needs re-embedding.
+  db.exec(`CREATE TABLE IF NOT EXISTS embeddings (
+    ws TEXT NOT NULL, kind TEXT NOT NULL, key TEXT NOT NULL, model TEXT NOT NULL,
+    dim INTEGER NOT NULL, vec BLOB NOT NULL, text_hash TEXT NOT NULL, at INTEGER NOT NULL,
+    PRIMARY KEY (ws, kind, key))`);
+  db.exec("CREATE INDEX IF NOT EXISTS idx_emb_ws_kind ON embeddings(ws, kind, model)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_audit_ws_seq ON audit(ws, seq DESC)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_audit_ws_kind ON audit(ws, kind)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_audit_ws_run ON audit(ws, run_id)");
@@ -1138,13 +1146,169 @@ export function rankByRelevance(query, items, getText, limit = 5) {
 // to `query` (BM25). This is the "shared" half of semantic/shared memory — an agent can build on what
 // the whole company has already done, not just its own last few runs. `excludeAgentId` drops the
 // asking agent (it already gets its own recent-work block).
-export function recallSharedMemory(org, query, limit = 4, excludeAgentId = "") {
+// `hybrid` (optional) adds the SEMANTIC half: { queryVec, vecOf(item) }. Omit it — as every caller did
+// before embeddings existed — and this is byte-for-byte the old BM25 behaviour.
+export function recallSharedMemory(org, query, limit = 4, excludeAgentId = "", hybrid = null) {
   const items = [];
   for (const a of (org?.agents || [])) {
     if (a.id === excludeAgentId) continue;
-    for (const m of (a.memory || [])) items.push({ agentName: a.name, role: a.role, objective: m.objective || "", summary: m.summary || "", files: m.files || [], at: m.at });
+    for (const m of (a.memory || [])) items.push({ agentId: a.id, agentName: a.name, role: a.role, objective: m.objective || "", summary: m.summary || "", files: m.files || [], at: m.at, _key: memoryKey(a.id, m) });
   }
-  return rankByRelevance(query, items, (it) => `${it.objective} ${it.summary}`, limit).map((r) => r.item);
+  // Pull deeper than `limit` from each ranker so fusion has something to actually fuse.
+  const deep = Math.max(limit, 10);
+  const lex = rankByRelevance(query, items, (it) => `${it.objective} ${it.summary}`, deep).map((r) => r.item);
+  if (!hybrid || typeof hybrid.vecOf !== "function" || !hybrid.queryVec?.length) return lex.slice(0, limit);
+  const qv = hybrid.queryVec instanceof Float32Array ? hybrid.queryVec : new Float32Array(hybrid.queryVec);
+  const sem = items
+    .map((it) => ({ it, s: cosine(qv, hybrid.vecOf(it)) }))
+    .filter((x) => x.s > 0)
+    .sort((a, b) => b.s - a.s)
+    .slice(0, deep)
+    .map((x) => x.it);
+  if (!sem.length) return lex.slice(0, limit);   // nothing embedded yet → lexical only
+  return rrfFuse([lex, sem], (it) => it._key, { limit }).map((r) => r.item);
+}
+
+// ---------- semantic memory: vectors alongside BM25 ----------------------------------------------
+// Why Bureau calls the embedder DIRECTLY, when every chat completion goes through Latch: the Latch
+// boundary exists to hold credentials and to gate real-world reach. A local embedding model has
+// neither — there is no key to protect and nothing leaves the machine. So embeddings use a plain
+// loopback call with the URL from operator config, while anything credentialed or outward-facing still
+// goes through Latch. (Deliberately NOT pinnedRequest: that guard refuses private IPs and exists for
+// agent-supplied URLs. This URL is operator config, never model-controlled.)
+const EMBED_URL = (process.env.BUREAU_EMBED_URL || "http://127.0.0.1:11434").replace(/\/+$/, "");
+const EMBED_MODEL = (process.env.BUREAU_EMBED_MODEL || "nomic-embed-text").trim();
+const isLoopbackUrl = (u) => /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(\/|$)/i.test(u);
+let _embedWarned = false;
+
+// Float32 <-> BLOB. Raw little-endian floats keep a 768-dim vector at 3KB rather than ~9KB of JSON.
+export function packVec(nums) {
+  const f = new Float32Array((nums || []).length);
+  for (let i = 0; i < f.length; i++) f[i] = Number(nums[i]) || 0;
+  return Buffer.from(f.buffer, f.byteOffset, f.byteLength);
+}
+export function unpackVec(buf) {
+  if (!buf || !buf.byteLength || buf.byteLength % 4) return new Float32Array(0);
+  // Read through a DataView rather than casting: a BLOB from SQLite carries no alignment guarantee,
+  // and it also lets this accept either a Buffer or a bare Uint8Array.
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const f = new Float32Array(buf.byteLength / 4);
+  for (let i = 0; i < f.length; i++) f[i] = view.getFloat32(i * 4, true);
+  return f;
+}
+// Cosine similarity in -1..1. Returns 0 for empty, mismatched or zero-magnitude vectors, so a junk row
+// can never outrank a real one.
+export function cosine(a, b) {
+  if (!a || !b || !a.length || a.length !== b.length) return 0;
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  if (!na || !nb) return 0;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+// Reciprocal Rank Fusion: blend independent rankings by RANK rather than score. BM25 scores and cosine
+// similarities live on different scales with no principled conversion between them, so normalising one
+// into the other would invent precision that isn't there. RRF needs no scale at all, and an item absent
+// from one list simply contributes nothing for it — which is exactly what we want while the corpus is
+// only partly embedded.
+export function rrfFuse(lists, keyOf, { k = 60, limit = 5 } = {}) {
+  const acc = new Map();
+  for (const list of (lists || [])) {
+    (list || []).forEach((item, i) => {
+      const key = keyOf(item);
+      if (key == null) return;
+      const cur = acc.get(key) || { item, score: 0 };
+      cur.score += 1 / (k + i + 1);
+      acc.set(key, cur);
+    });
+  }
+  return [...acc.values()].sort((a, b) => b.score - a.score).slice(0, limit);
+}
+const textHash = (s) => createHash("sha256").update(String(s)).digest("hex").slice(0, 16);
+// Stable identity for one memory entry. agentId+timestamp survives re-reads; entries with no `at`
+// (older rows) fall back to hashing their content so they still get a durable key.
+export function memoryKey(agentId, m) {
+  const at = Number(m?.at) || 0;
+  return at ? `${agentId}:${at}` : `${agentId}:h${textHash(`${m?.objective || ""}|${m?.summary || ""}`)}`;
+}
+export const memoryText = (m) => `${m?.objective || ""}\n${m?.summary || ""}`.trim();
+
+// Embed one string. Returns number[] or null and NEVER throws: every caller treats null as "no vector"
+// and falls back to BM25, so an embedder that is off, slow or missing degrades recall instead of
+// breaking runs.
+export async function embedText(text, { timeoutMs = 15000 } = {}) {
+  const input = String(text || "").slice(0, 8000).trim();
+  if (!input) return null;
+  if (!_embedWarned && !isLoopbackUrl(EMBED_URL)) {
+    _embedWarned = true;
+    console.warn(`⚠  BUREAU_EMBED_URL is not loopback (${EMBED_URL}) — memory text will leave this machine to be embedded.`);
+  }
+  const ctl = new AbortController();
+  const to = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${EMBED_URL}/api/embed`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: EMBED_MODEL, input }), signal: ctl.signal,
+    });
+    if (!res.ok) return null;
+    const j = await res.json();
+    const v = Array.isArray(j?.embeddings) ? j.embeddings[0] : (Array.isArray(j?.embedding) ? j.embedding : null);
+    return Array.isArray(v) && v.length ? v : null;
+  } catch { return null; } finally { clearTimeout(to); }
+}
+
+function putEmbedding(ws, kind, key, hash, vec) {
+  db.prepare(`INSERT INTO embeddings(ws,kind,key,model,dim,vec,text_hash,at) VALUES(?,?,?,?,?,?,?,?)
+    ON CONFLICT(ws,kind,key) DO UPDATE SET model=excluded.model, dim=excluded.dim, vec=excluded.vec, text_hash=excluded.text_hash, at=excluded.at`)
+    .run(ws, kind, key, EMBED_MODEL, vec.length, packVec(vec), hash, Date.now());
+}
+// key -> { vec, hash } for one workspace+kind, restricted to the CURRENT embedding model.
+function embeddingMap(ws, kind) {
+  const m = new Map();
+  try {
+    for (const r of db.prepare("SELECT key, vec, text_hash FROM embeddings WHERE ws = ? AND kind = ? AND model = ?").all(ws, kind, EMBED_MODEL))
+      m.set(r.key, { vec: unpackVec(r.vec), hash: r.text_hash });
+  } catch {}
+  return m;
+}
+// Which memory entries still need a vector (never embedded, or their text changed since).
+function pendingMemories(org, map) {
+  const todo = [];
+  for (const a of (org?.agents || [])) for (const m of (a.memory || [])) {
+    const text = memoryText(m);
+    if (!text) continue;
+    const key = memoryKey(a.id, m), hash = textHash(text);
+    const have = map.get(key);
+    if (!have || have.hash !== hash) todo.push({ key, text, hash });
+  }
+  return todo;
+}
+// Embed what's pending, newest work first. Bounded per call so a large backlog can't stall anything,
+// and it gives up early if the embedder is clearly down rather than grinding through every item.
+async function embedPendingMemories(ws = currentWs(), max = 200) {
+  const org = await readOrg();
+  const map = embeddingMap(ws, "memory");
+  const todo = pendingMemories(org, map);
+  let embedded = 0, failed = 0;
+  for (const t of todo.slice(0, max)) {
+    const v = await embedText(t.text);
+    if (!v) { failed++; if (failed >= 3 && embedded === 0) break; continue; }
+    putEmbedding(ws, "memory", t.key, t.hash, v);
+    embedded++;
+  }
+  return { pending: todo.length, embedded, failed, remaining: Math.max(0, todo.length - embedded) };
+}
+// Recall with the semantic half wired in. Embeds the query only when there is actually a corpus to
+// compare against, and falls back to plain BM25 on any failure — so this is always safe to call.
+async function recallSharedMemoryHybrid(org, query, limit = 4, excludeAgentId = "") {
+  let hybrid = null;
+  try {
+    const map = embeddingMap(currentWs(), "memory");
+    if (map.size) {
+      const qv = await embedText(query);
+      if (qv) hybrid = { queryVec: qv, vecOf: (it) => map.get(it._key)?.vec };
+    }
+  } catch {}
+  return recallSharedMemory(org, query, limit, excludeAgentId, hybrid);
 }
 // Pure keyword ranker (no disk): score each doc by how many significant query terms appear in its
 // name+content, keep those scoring >= 2, best first. Split out so it can be unit-tested directly.
@@ -1207,10 +1371,11 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
   if ((agent.memory || []).length) history.push({ role: "user", content:
     "Your own recent work — build on it, don't repeat it. To revise a document you wrote before, use read_file with its filename to get the current content, then file_write the SAME title to overwrite it:\n" +
     agent.memory.slice(0, 5).map((m) => `- "${m.objective}" → ${m.summary}${(m.files || []).length ? ` [files: ${m.files.join(", ")}]` : ""}`).join("\n") });
-  // Shared company memory: the most RELEVANT prior work from ACROSS the team (BM25 recall, not just
-  // this agent's own recency) so work compounds company-wide instead of siloing per agent.
+  // Shared company memory: the most RELEVANT prior work from ACROSS the team — semantic (vector) and
+  // lexical (BM25) recall fused, not just this agent's own recency — so work compounds company-wide
+  // instead of siloing per agent. Degrades to BM25 alone when no embedder is available.
   try {
-    const shared = recallSharedMemory(org, objective, 4, agent.id);
+    const shared = await recallSharedMemoryHybrid(org, objective, 4, agent.id);
     if (shared.length) history.push({ role: "user", content:
       "What the company already knows that's relevant here — prior work by teammates. Build on it; reuse their files; don't duplicate it or ask them to re-supply it:\n" +
       shared.map((m) => `- ${m.agentName} (${m.role}): "${m.objective}" → ${m.summary}${(m.files || []).length ? ` [files: ${m.files.join(", ")}]` : ""}`).join("\n") });
@@ -1639,6 +1804,11 @@ async function persistRun(objective, tokens, extra, perAgent, memoryEntries, pai
     org.activity.unshift({ objective, tokens, at: Date.now(), ...extra });
     org.activity = org.activity.slice(0, 50);
   });
+  // Keep the vector corpus current without making the run wait on it. Fire-and-forget: if the embedder
+  // is unavailable this is a no-op and recall quietly stays lexical. ws is captured now, since this
+  // outlives the request that set it.
+  const ws = currentWs();
+  embedPendingMemories(ws).catch(() => {});
   return { tokens: org.budget.tokens };
 }
 function addTally(tally, id, n) { if (tally && id && n) tally[id] = (tally[id] || 0) + n; }
@@ -2454,7 +2624,7 @@ const MCP_TOOLS = [
     handler: async (args) => { const objective = String(args.objective || "").trim(); if (!objective) throw new Error("objective required"); const { run } = beginRun({ mode: args.mode === "single" ? "single" : "company", agentId: args.agentId || "", objective, autoApprove: !!args.autoApprove, hush: !!args.hush, maxTurns: 6 }); return { runId: run.id }; } },
   { name: "search_memory", description: "Search the company's shared memory (every agent's past work) by relevance; returns the top matching entries.",
     inputSchema: { type: "object", properties: { query: { type: "string" }, limit: { type: "number" } }, required: ["query"] },
-    handler: async (args) => { const org = await readOrg(); return recallSharedMemory(org, String(args.query || ""), Math.min(20, Math.max(1, Number(args.limit) || 8))); } },
+    handler: async (args) => { const org = await readOrg(); return recallSharedMemoryHybrid(org, String(args.query || ""), Math.min(20, Math.max(1, Number(args.limit) || 8))); } },
   { name: "list_deliverables", description: "List the filenames of the company's finished deliverables (the drafts inbox).",
     inputSchema: { type: "object", properties: {} },
     handler: async () => { try { return (await readdir(draftsDir())).filter(isDeliverableFile); } catch { return []; } } },
@@ -3388,7 +3558,29 @@ const server = createServer(async (req, res) => {
       const org = await readOrg();
       const q = url.searchParams.get("q") || "";
       const limit = Math.min(20, Math.max(1, Number(url.searchParams.get("limit")) || 8));
-      return send(res, 200, { query: q, results: recallSharedMemory(org, q, limit) });
+      // ?lexical=1 forces BM25 only — the seam that makes a semantic-vs-keyword A/B possible.
+      const lexicalOnly = /^(1|true|yes)$/i.test(url.searchParams.get("lexical") || "");
+      const results = lexicalOnly ? recallSharedMemory(org, q, limit) : await recallSharedMemoryHybrid(org, q, limit);
+      return send(res, 200, { query: q, mode: lexicalOnly ? "lexical" : "hybrid", results });
+    }
+    // Vector-store status: is an embedder reachable, what's embedded, what's still pending.
+    if (p === "/api/embeddings" && req.method === "GET") {
+      const ws = currentWs();
+      const org = await readOrg();
+      const map = embeddingMap(ws, "memory");
+      const probe = /^(1|true|yes)$/i.test(url.searchParams.get("probe") || "");
+      const ready = probe ? !!(await embedText("ping", { timeoutMs: 20000 })) : null;
+      const dims = [...new Set([...map.values()].map((v) => v.vec.length))];
+      return send(res, 200, { url: EMBED_URL, model: EMBED_MODEL, loopback: isLoopbackUrl(EMBED_URL),
+        embedded: map.size, pending: pendingMemories(org, map).length, dims, ready });
+    }
+    // Embed whatever is pending. Bounded per call; run it again to continue a large backfill.
+    if (p === "/api/embeddings/backfill" && req.method === "POST") {
+      const body = await readBody(req).catch(() => ({}));
+      const max = Math.min(500, Math.max(1, Number(body?.max) || 200));
+      const r = await embedPendingMemories(currentWs(), max);
+      return send(res, 200, { ...r, model: EMBED_MODEL,
+        hint: r.embedded === 0 && r.pending > 0 ? `nothing embedded — is '${EMBED_MODEL}' pulled? try: ollama pull ${EMBED_MODEL}` : undefined });
     }
     if (p.startsWith("/api/run/") && p.endsWith("/stop") && req.method === "POST") {
       const id = p.split("/")[3];
