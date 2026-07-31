@@ -9,7 +9,20 @@ node test/run-all.mjs --e2e       # also the live autonomy e2e (needs Latch + a 
 node test/coverage-audit.mjs      # soft audit: exported fns / routes not tested AND not listed below
 node eval/recall-eval.mjs         # recall@3 of memory retrieval, shipped ranker vs alternatives (live)
 node eval/parallel-eval.mjs       # sequential-vs-parallel delegation A/B, repeated runs (live, ~4min/pair)
+node tools/backup.mjs             # verified snapshot of Bureau + Latch state; --list, --keep N, --root
+node tools/restore-drill.mjs      # restore the newest snapshot and boot a REAL Latch on it (live)
 ```
+
+`tools/backup.mjs` verifies every artifact as it writes it (opens the vacuumed SQLite copy and queries it,
+gunzips and parses `db.json.gz`, parses each config), records the verdicts in `manifest.json`, and renames
+the snapshot `*.FAILED` if any check fails. Exit 0 only on a fully verified snapshot; 2 means it **refused**
+to run (see SECURITY.md — it will not write into a git work tree or a cloud-synced folder).
+
+`tools/restore-drill.mjs` is the part that makes a backup more than a hope: it restores and boots a real
+Latch on the result, then asserts the restored instance serves the **same counts as production**. Two
+lessons are baked into it — count data in the *file*, not through `/api/state` (which caps every collection
+at 100 and filters archived items, so it reported 100 of 360 approvals and failed a good backup), and
+compare restored-vs-live rather than against a hardcoded number.
 
 `--serve` self-hosts a Bureau on :4174 (generating its own `OPERATOR_TOKEN`, so no Latch/auth.json
 needed) and tears it down after. Exits non-zero on any failure — it's the pre-push and CI gate.

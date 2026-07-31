@@ -10,6 +10,24 @@ _Forward-looking only — the detail of what's shipped lives in the code, the te
 
 ## Next
 
+**Open operational items (2026-07-31).** The feature roadmap is done; what remains is durability of an
+unattended service, in rough order of what would actually hurt:
+
+  - **Off-machine backups — an operator decision, not a default.** `tools/backup.mjs` protects against a
+    corrupt write, a bad migration, an accidental delete. It does **not** survive losing this disk, because
+    the snapshots are on it. Fixing that means deciding where the operator token and the Moonshot key are
+    allowed to live; the tool deliberately refuses cloud-synced folders rather than quietly choosing for you.
+  - **GPU under SYSTEM is still unproven.** `size_vram` from `/api/ps` needs a model loaded to read, and the
+    SYSTEM-profile Ollama does not write a log where the user-profile one does (checked: no
+    `systemprofile\AppData\Local\Ollama\server.log`). A silent session-0 CPU fallback would make every local
+    run slow with nothing reporting it. `boot.log` now captures Ollama's stderr, which is where it states its
+    GPU decision — so the next boot should answer this for free.
+  - **Nothing prunes GitHub refs for closed-not-merged PRs.** `deleteBranchOnMerge` only fires on merge.
+  - **No operator-token rotation procedure.** The token is shell access on this host; there is no documented
+    way to roll it.
+  - **Anthropic's OpenAI-compatible endpoint as Latch's `fallback`** — the recommended alternative to wiring a
+    Claude subscription seat into Bureau (which stays declined). Still unwired.
+
 **In flight — Parallel execution.** Stage 1 shipped (2026-07-23, commit `6dbe3a9`): opt-in
 `run.parallel` / **⚡ parallel reports** toggle runs a manager's sibling reports concurrently through
 a bounded semaphore (`ORCH_MAX_PARALLEL`, default 3), with no cross-sibling handoff — the manager's
@@ -170,8 +188,33 @@ _(Deliverable delete is complete — API and UI both shipped, see below.)_
 ## Shipped
 
 The core vision — *point Bureau at a goal and let it run itself, only surfacing finished, QA'd
-work* — is built, and guarded by an automated suite (`node test/run-all.mjs` — 562 headless
+work* — is built, and guarded by an automated suite (`node test/run-all.mjs` — 636 headless
 assertions across 7 suites + a live `--e2e`; see `test/README.md`).
+
+- **Unattended operation (2026-07-31)** — the boot-at-startup work changed Bureau's category from
+  *a thing you start* to *a service that runs whether or not anyone is watching*, which needs things a
+  hand-started dev tool never did:
+  - **Logs that exist.** A scheduled task captures no stdout, so a 3am crash-and-restart left no trace
+    at all — `bureau.log` sat at 0 bytes while the server ran, because the boot task uses
+    `Start-Bureau.ps1 -Foreground` and the redirect only existed on the detached branch. Both servers now
+    tee stdout/stderr to a size-rotated file in-process (`BUREAU_LOG`/`LATCH_LOG`, 5 MB × 3), so the log
+    exists however the process was started. Stamped per line, not per write. No `uncaughtException` or
+    `unhandledRejection` handler on purpose — registering either downgrades Node's default crash-and-exit,
+    and the traces already go through stderr, which the tee captures.
+  - **Boot failures are recorded too.** The tasks redirect streams 2 and 6 (`2>>boot.log 6>>boot.log`) —
+    PowerShell errors and the launcher's own `Write-Host` refusals, e.g. "Port 4173 is already served by
+    pid …", which no in-process tee can see. Stream 1 deliberately not redirected: that is the servers'
+    normal chatter, already captured with rotation.
+  - **Verified daily backups** (`tools/backup.mjs`, `LLMServer-Backup` at 03:30). Bureau's WAL database via
+    `VACUUM INTO` (a plain copy loses whatever is in `-wal`), Latch's 54 MB `db.json` gzipped to ~4 MB, and
+    every small config JSON. **Every artifact is opened and parsed after being written** and a snapshot
+    failing any check is renamed `*.FAILED` so it can never be mistaken for a good one. `--list` reports
+    "newest verified", or `NONE — you have no proven backup`.
+  - **A restore drill** (`tools/restore-drill.mjs`), because a backup nobody has read is a hope. It restores
+    the newest snapshot and boots a **real Latch** on it, then asserts the restored instance serves the same
+    counts as production. Proven 2026-07-31: 360/360 approvals, identical `/api/state`.
+  - Snapshots live **outside both git repos** and the tool **refuses** to write into a git work tree or a
+    cloud-synced folder — they contain the operator token and a billable API key.
 
 - **Safe autonomy** — per-agent allowlists → autonomy tiers → declarative policy rules, all under
   one inviolable hard floor (shell / api_call / email / over-ceiling spend always require you).

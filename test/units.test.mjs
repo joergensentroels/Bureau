@@ -10,7 +10,11 @@ import {
   packVec, unpackVec, cosine, rrfFuse, memoryKey, memoryText,
   objectiveSignature, dedupeMemories, deliverableEmbedText, deliverableTitle,
   chunkDocument, deliverableChunks, modelUnreachable, trimVersions, clientKey, isLoopback,
+  startLogTee,
 } from "../server.mjs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 let pass = 0, fail = 0;
 const chk = (label, cond) => { console.log(`${cond ? "✓" : "✗"} ${label}`); cond ? pass++ : fail++; };
@@ -510,6 +514,41 @@ chk("  different objectives keep different signatures", objectiveSignature("Writ
   // Never fuse things we can't identify.
   eq("  entries with no signature are never merged", dedupeMemories([{ objective: "" }, { objective: "" }]).length, 2);
   eq("  tolerates null and empty input", dedupeMemories(null).length, 0);
+}
+
+console.log("# startLogTee — the log a boot task leaves behind when nobody is watching");
+{
+  const dir = mkdtempSync(join(tmpdir(), "bureau-tee-"));
+  const f = join(dir, "t.log");
+  // Swap in no-op writes BEFORE starting the tee, so the tee captures THOSE as its passthrough and this
+  // suite's output stays readable. The tee's own logic is exercised exactly as in production.
+  const realOut = process.stdout.write.bind(process.stdout);
+  const realErr = process.stderr.write.bind(process.stderr);
+  process.stdout.write = () => true;
+  process.stderr.write = () => true;
+  const tee = startLogTee(f, 300, 3);              // 300-byte cap forces several rotations
+  for (let i = 0; i < 30; i++) console.log(`l${i}-padpadpadpadpadpad`);
+  process.stdout.write("no newline here");         // a chunk ending mid-line...
+  process.stdout.write(" and the rest\n");         // ...completed by the next write
+  console.error("stderr too");
+  tee.stop();
+  process.stdout.write = realOut;
+  process.stderr.write = realErr;
+
+  const files = readdirSync(dir).sort();
+  const all = files.map((n) => readFileSync(join(dir, n), "utf8")).join("");
+  eq("  rotates, keeping the live file plus keep=3 generations", files.length, 4);
+  chk("  never keeps a generation beyond keep", !files.some((n) => /\.log\.[4-9]$/.test(n)));
+  chk("  no file exceeds the size cap", files.every((n) => statSync(join(dir, n)).size <= 300));
+  chk("  captures stderr, not just stdout", all.includes("stderr too"));
+  chk("  every line carries a timestamp", all.split("\n").filter(Boolean).every((l) => /^\d{4}-\d\d-\d\dT/.test(l)));
+  // The one that would silently corrupt a stack trace: stamping per WRITE rather than per LINE splices a
+  // timestamp into the middle of any output that doesn't end in a newline.
+  chk("  a write ending mid-line gets one stamp, not one per write",
+    all.split("\n").some((l) => /^\S+Z no newline here and the rest$/.test(l)));
+  chk("  stop() restores the real streams", process.stdout.write === realOut);
+  rmSync(dir, { recursive: true, force: true });    // only possible because stop() closed the handle
+  chk("  the temp dir is removable after stop() (no leaked handle)", !readdirSync(tmpdir()).includes(dir));
 }
 {
   // The actual reported bug, end to end: limit=2 used to come back as the same entry twice.

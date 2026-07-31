@@ -315,6 +315,35 @@ _Verified end-to-end over `tailscale serve` (2026-07-25): HTTPS with a valid cer
 header survives the proxy, the read-only token reads but cannot write, and the SSE live feed streams
 incrementally rather than being buffered (a real run arrived in 7 chunks with gaps up to 22s)._
 
+## Backups contain credentials
+
+`tools/backup.mjs` snapshots Latch's `auth.json` (the operator token — which **is** shell access on this
+host) and `llm-provider.json` (a real, billable API key). Two consequences are enforced in code rather
+than left to discipline, because a warning printed by a 03:30 scheduled task is read by nobody and by
+then the secrets have already moved:
+
+- **Refuses a backup root inside a git work tree.** One `git add -A` would publish the token. The check
+  walks up from the resolved root looking for `.git`, so a subdirectory of a repo is caught too.
+- **Refuses a backup root inside a cloud-synced folder.** OneDrive/Dropbox/iCloud, matched both by the
+  env vars *and* by path segment — a SYSTEM task has no `%OneDrive%`, and this machine's is named
+  `OneDrive - PDC A S`. Segment matching, not substring, so `my-onedrive-notes` is not a false positive.
+
+Both exit 2 **before creating anything**. The default root (`..\_backups`, beside both repos) is outside
+either git work tree — `git check-ignore` reports it as "outside repository", which is stronger than
+gitignored: git cannot see it at all.
+
+`tools/restore-drill.mjs` boots a **real Latch** on a restored snapshot, so it is deliberately given
+nothing to do harm with: only `db.json` and `auth.json` are restored (no provider key, no GitHub token, no
+email credentials), `LATCH_SIMPLE_PLANNER_INTERVAL_MS=0` disables the planner so no queued work is acted
+on, it uses a spare port, and the restored copy — which holds that token — is deleted in a `finally`.
+
+## Logs
+
+Both servers tee stdout/stderr to a rotating file (`BUREAU_LOG` / `LATCH_LOG`, `…_MAX`, `…_KEEP`; set the
+path to `off` to disable). These logs carry whatever the servers print — objectives, agent output, action
+titles, error traces — so they are workspace-sensitive, not secret-bearing by design, but treat them as
+you would the audit log. They live in the repo directories and are covered by `.gitignore`.
+
 ## Operating guidance
 
 - Keep Bureau on **loopback** (see above for the one safe way to reach it from elsewhere).

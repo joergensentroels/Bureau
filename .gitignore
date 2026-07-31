@@ -35,3 +35,10 @@ eval/reports/
 # Start-Bureau.ps1's detached-mode logs
 bureau.log
 bureau.log.err
+
+# The rotating in-process log (server.mjs tees stdout/stderr), the boot task's stream 2/6 capture, and
+# the daily backup's output. The GLOB is the point: `bureau.log` was already listed above, but every
+# rotated generation — bureau.log.1, .2, .3 — was still tracked, as were boot.log and backup.log.
+# These carry objectives, agent output and error traces, so publishing them publishes the workspace.
+*.log
+*.log.[0-9]

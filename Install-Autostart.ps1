@@ -33,7 +33,7 @@ $here    = Split-Path -Parent $MyInvocation.MyCommand.Path        # ...\bureau
 $root    = Split-Path -Parent $here                              # ...\LLM server
 $latch   = Join-Path $root "openclaw-command-center"
 $prefix  = "LLMServer-"
-$tasks   = @("$prefix`Ollama", "$prefix`Latch", "$prefix`Bureau")
+$tasks   = @("$prefix`Ollama", "$prefix`Latch", "$prefix`Bureau", "$prefix`Backup")
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin -and -not $WhatIfPreference) {
@@ -75,7 +75,9 @@ if ($Verify) {
   Write-Host "--- tasks ---"
   $found = Get-ScheduledTask "$prefix*" -ErrorAction SilentlyContinue
   if (-not $found) { Write-Host "  none visible. Either they are not installed, or this shell is not elevated." -ForegroundColor Red; $fail += "no tasks visible" }
-  if ($found.Count -lt 3) { $fail += "expected 3 tasks, found $($found.Count)" }
+  # $tasks.Count, not a literal: this check sat two lines from the list it counts and would have gone
+  # stale the moment a fourth task was added — which is exactly what then happened.
+  if ($found.Count -lt $tasks.Count) { $fail += "expected $($tasks.Count) tasks, found $($found.Count)" }
   foreach ($t in $found) {
     $i = $t | Get-ScheduledTaskInfo
     # LastTaskResult 267009 = "currently running", which is the healthy steady state for a server.
@@ -185,10 +187,29 @@ Write-Host "ollama : $(if ($ollama) { $ollama } else { '(not found - skipping, s
 # "just make it a service" attempt fails on this machine.
 $sysEnv = "`$env:LATCH_DATA='$latch\data'; `$env:OLLAMA_MODELS='$env:USERPROFILE\.ollama\models'; `$env:OLLAMA_HOST='127.0.0.1:11434';"
 
+# A scheduled task captures NOTHING by default, which is why a 3am crash-and-restart left no trace. The
+# servers now tee their own stdout to a rotating log, so what is redirected here is only what an
+# in-process tee can never see:
+#
+#   stream 2 (errors)      PowerShell failures, and a native crash node dies too fast to log itself
+#   stream 6 (Write-Host)  the launcher's own messages — "Port 4173 is already served by pid ...", the
+#                          exact boot refusal you would otherwise have zero record of
+#
+# Stream 1 is deliberately NOT redirected: that is the servers' normal chatter, already captured WITH
+# rotation by the in-process tee, and duplicating it here would grow a second file without bound.
+# Ollama gets the same treatment mainly for its GPU-vs-CPU decision, which it reports on stderr.
+#
+# Rotated at task start rather than appended forever — one previous generation is kept, which is what
+# you want after a restart loop. SilentlyContinue because a locked log must never stop a server booting.
+$logRot = "if((Test-Path boot.log) -and (Get-Item boot.log).Length -gt 1mb){Move-Item boot.log boot.log.1 -Force -ErrorAction SilentlyContinue};"
+
 function New-BootTask {
   param([string]$Name, [string]$Command, [string]$WorkDir, [int]$DelaySeconds = 0)
   $ps = (Get-Command powershell.exe).Source
-  $inner = "$sysEnv $Command"
+  # boot.log RELATIVE, resolved against -WorkingDirectory: this repo lives under "LLM server", and a
+  # quoted absolute path nested inside an already-quoted -Command is how the MODULE_NOT_FOUND bug in
+  # Start-Bureau.ps1 happened. Relative sidesteps the quoting entirely.
+  $inner = "$logRot $sysEnv $Command 2>>boot.log 6>>boot.log"
   $action  = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -ExecutionPolicy Bypass -Command `"$inner`"" -WorkingDirectory $WorkDir
   $trigger = New-ScheduledTaskTrigger -AtStartup
   if ($DelaySeconds -gt 0) { $trigger.Delay = "PT$($DelaySeconds)S" }   # crude ordering: Ollama, then Latch, then Bureau
@@ -209,10 +230,41 @@ function New-BootTask {
   }
 }
 
+# The backup is a FINITE job, so its settings are deliberately the opposite of the servers' on both
+# counts: a one-hour execution limit (a hung backup should be killed, whereas killing a server is the
+# bug we fixed), and no restart-on-failure (tomorrow's run is the retry; retrying a failing backup five
+# times against a full disk just fills the log). Daily rather than hourly because the snapshot is 27 MB
+# and the thing it protects against — a bad write, a wrong answer to "are you sure" — is not hourly.
+#
+# StartWhenAvailable matters on a laptop: a machine asleep at 03:30 would otherwise simply skip the day.
+#
+# All streams redirected here, unlike the servers: for a job that runs and exits, stdout IS the record —
+# which snapshot was written, what it verified, what got pruned. Ten lines a day, rotated at 1 MB.
+function New-DailyTask {
+  param([string]$Name, [string]$Command, [string]$WorkDir, [string]$At)
+  $ps = (Get-Command powershell.exe).Source
+  $rot = "if((Test-Path backup.log) -and (Get-Item backup.log).Length -gt 1mb){Move-Item backup.log backup.log.1 -Force -ErrorAction SilentlyContinue};"
+  $inner = "$rot $sysEnv $Command *>>backup.log"
+  $action  = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -ExecutionPolicy Bypass -Command `"$inner`"" -WorkingDirectory $WorkDir
+  $trigger = New-ScheduledTaskTrigger -Daily -At $At
+  $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+  $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+    -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 1) -MultipleInstances IgnoreNew
+  if ($PSCmdlet.ShouldProcess($Name, "Register daily task as SYSTEM at $At")) {
+    Register-ScheduledTask -TaskName $Name -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+    Write-Host "  registered $Name (daily $At)"
+  } else {
+    Write-Host "  WOULD register $Name (daily $At)" -ForegroundColor Cyan
+    Write-Host "      $ps -NoProfile -ExecutionPolicy Bypass -Command `"$inner`"" -ForegroundColor DarkGray
+    Write-Host "      workdir=$WorkDir  as=SYSTEM" -ForegroundColor DarkGray
+  }
+}
+
 if ($ollama) { New-BootTask -Name "$prefix`Ollama" -Command "& '$ollama' serve" -WorkDir (Split-Path -Parent $ollama) -DelaySeconds 0 }
 New-BootTask -Name "$prefix`Latch"  -Command "& '$node' server.js" -WorkDir $latch -DelaySeconds 20
 # Bureau through its own launcher so the remote-guard default and LATCH_DATA logic stay in ONE place.
 New-BootTask -Name "$prefix`Bureau" -Command "& '$here\Start-Bureau.ps1' -Foreground" -WorkDir $here -DelaySeconds 40
+New-DailyTask -Name "$prefix`Backup" -Command "& '$node' tools\backup.mjs" -WorkDir $here -At "03:30"
 
 if (-not $WhatIfPreference) {
   Write-Host "`nRegistered. Verify without rebooting:"

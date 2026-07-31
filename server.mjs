@@ -11,6 +11,7 @@
 // No dependencies. Node built-ins only.
 
 import { readFile, writeFile, mkdir, readdir, stat, rm, rename } from "node:fs/promises";
+import { openSync, closeSync, writeSync, existsSync, statSync, renameSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { createServer } from "node:http";
 import http from "node:http";
@@ -67,6 +68,87 @@ const DELIV_NAME_RE = /^[a-z0-9][a-z0-9._-]*\.[a-z0-9]{1,6}$/i;
 export function validDeliverableName(name) { return DELIV_NAME_RE.test(String(name)); }
 
 let TOKEN = "";
+
+// ---------- log file (rotating tee) ------------------------------------------
+// Bureau starts from an At-Startup scheduled task, and a scheduled task captures no stdout — so a
+// crash-and-restart at 3am left no trace whatsoever. (The task even runs Start-Bureau.ps1 -Foreground,
+// whose redirect only exists on the DETACHED branch: `bureau.log` sat at 0 bytes while the server ran.)
+// Teeing INSIDE the process, rather than redirecting in the task, means the log exists however the
+// server was started, and it is what makes rotation possible at all: a service that never stops must
+// not write an unbounded file.
+//
+// Deliberately NOT process.on("uncaughtException"): installing a handler suppresses the default
+// crash-and-exit and would change what a fatal error does to this process. Node writes those traces
+// through process.stderr.write, so the tee already captures them with no change in semantics.
+//
+// Writes are SYNCHRONOUS for the same class of reason — an async append is simply lost when the
+// process exits immediately afterwards, which is exactly the moment the line matters most.
+const LOG_FILE = process.env.BUREAU_LOG || path.join(HERE, "bureau.log");
+const LOG_MAX = Math.max(64 * 1024, Number(process.env.BUREAU_LOG_MAX) || 5 * 1024 * 1024);
+const LOG_KEEP = Math.max(1, Number(process.env.BUREAU_LOG_KEEP) || 3);
+
+export function startLogTee(file = LOG_FILE, max = LOG_MAX, keep = LOG_KEEP) {
+  if (String(process.env.BUREAU_LOG || "").toLowerCase() === "off") return null;
+  let fd = null, bytes = 0, dead = false, atLineStart = true;
+  const open = () => {
+    bytes = existsSync(file) ? statSync(file).size : 0;   // size BEFORE opening: "a" doesn't report it
+    fd = openSync(file, "a");
+  };
+  // Rotation is synchronous like the writes it serves. An async rename would let a write land between
+  // the rename and the reopen, splitting one line across two files or into a now-unlinked handle.
+  const rotate = () => {
+    if (fd !== null) { closeSync(fd); fd = null; }
+    for (let i = keep - 1; i >= 1; i--) {
+      if (existsSync(`${file}.${i}`)) renameSync(`${file}.${i}`, `${file}.${i + 1}`);
+    }
+    if (existsSync(file)) renameSync(file, `${file}.1`);
+    open();
+  };
+  try { open(); } catch { return null; }   // no log is survivable; a server that won't boot is not
+  const append = (chunk) => {
+    if (dead) return;
+    try {
+      const s = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+      // Stamp at line STARTS only. A chunk can end mid-line (process.stdout.write without a newline),
+      // and multi-line output — stack traces above all — must stay readable rather than have a
+      // timestamp spliced into the middle of it.
+      let out = "";
+      for (const part of s.split(/(\n)/)) {
+        if (part === "") continue;
+        if (part === "\n") { out += part; atLineStart = true; continue; }
+        if (atLineStart) { out += `${new Date().toISOString()} `; atLineStart = false; }
+        out += part;
+      }
+      const buf = Buffer.from(out, "utf8");
+      if (bytes + buf.length > max) rotate();
+      writeSync(fd, buf);
+      bytes += buf.length;
+    } catch {
+      // Never console.* from in here — that re-enters this function and recurses until the stack dies.
+      // A failing log (disk full, file locked) silently stops teeing; the console half keeps working.
+      dead = true;
+      try { if (fd !== null) closeSync(fd); } catch { /* already gone */ }
+      fd = null;
+    }
+  };
+  // Returns a stop() as well as the path, because a function that patches two global streams and offers
+  // no way back is not finished. Production never calls it; the test does, and on Windows it MUST — an
+  // open handle on the log makes the temp directory undeletable.
+  const restore = [];
+  for (const stream of [process.stdout, process.stderr]) {
+    const orig = stream.write.bind(stream);
+    stream.write = (chunk, enc, cb) => { append(chunk); return orig(chunk, enc, cb); };
+    restore.push(() => { stream.write = orig; });
+  }
+  return {
+    file,
+    stop() {
+      for (const undo of restore) undo();
+      if (fd !== null) { try { closeSync(fd); } catch { /* already gone */ } fd = null; }
+      dead = true;
+    },
+  };
+}
 
 // ---------- datastore (SQLite, built-in node:sqlite — no external deps) ------
 // Each workspace's org is a JSON blob in the `workspaces` table; the audit log is normalized into
@@ -4407,6 +4489,14 @@ const server = createServer(async (req, res) => {
 // startup so importing doesn't bind a port or tick schedules.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
+  // Before anything that can fail. The most valuable line this log ever holds is the reason boot
+  // ABORTED — "Could not load Latch operator token" → exit(1) — and that is unreachable if the tee
+  // starts later. The banner is inside the log by construction, so each restart is visible as one.
+  const tee = startLogTee();
+  console.log(`\n=== Bureau starting — pid ${process.pid}, node ${process.version}${tee ? `, log ${tee.file}` : ", log OFF"}`);
+  // Safe to add: 'exit' cannot prevent the exit, so this changes no semantics — it only records the
+  // code. Distinguishing "stopped cleanly" from "died" is the whole question when you find it restarted.
+  process.on("exit", (code) => console.log(`=== Bureau exiting — pid ${process.pid}, code ${code}`));
   initDb();
   migrateJsonToDb()                       // one-time import of legacy JSON files → SQLite (reads data-bureau.json or the legacy data-foreman.json)
     .catch((e) => console.error("JSON→SQLite migration:", e.message))
