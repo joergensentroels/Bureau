@@ -221,6 +221,25 @@ code execution on the Bureau host. Rules that follow:
    understand you have moved shell-approval authority to that browser. **Set `BUREAU_REMOTE=1`** (below)
    so Bureau refuses to be the instrument.
 
+### Start it with `.\Start-Bureau.ps1`, not `node server.mjs`
+
+On a machine where `tailscale serve` proxies Bureau (this one does: `https://<host>.ts.net:8443` →
+`127.0.0.1:4173`), the control surface is **always** remotely reachable — so `BUREAU_REMOTE` is not an
+occasional flag, it is the standing posture. It was living only in whatever shell started the process,
+which meant a plain `node server.mjs` produced an **unguarded server on a live public hostname, silently**.
+A safety posture that disappears on restart without saying so is the failure this codebase keeps removing.
+
+`Start-Bureau.ps1` makes the guard the default and turning it off the thing you have to type:
+
+```
+.\Start-Bureau.ps1              # remote guard ON (the normal case)
+.\Start-Bureau.ps1 -Local       # guard OFF — warns loudly if tailscale is serving the port anyway
+.\Start-Bureau.ps1 -Foreground  # run in this window
+```
+
+It prints the tailnet URL when the port is served, refuses to start a second instance on a busy port, and
+`-Local` on a tailnet-served port prints a red warning rather than quietly doing as it's told.
+
 ### `BUREAU_REMOTE=1`
 
 Bureau's in-app approval seam (`POST /api/approvals/:id/decide`) performs the same Latch `PATCH` as an

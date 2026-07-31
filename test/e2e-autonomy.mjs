@@ -88,6 +88,10 @@ async function runAndStream(spec, onEvent, ms = 160000) {
 }
 
 let AGENT;
+// Whether the server under test is in remote mode. Read from the server rather than from this process's
+// env, because BUREAU_REMOTE is set on the SERVER — reading it here would report the test runner's
+// environment and silently assert the wrong posture.
+let REMOTE = false;
 async function clearPolicies() { const { j } = await api("GET", "/api/policies"); for (const p of j.policies || []) await api("DELETE", "/api/policies/" + p.id); }
 async function reset() { await clearPolicies(); if (AGENT) await api("PATCH", "/api/agents/" + AGENT, { tier: "supervised" }); }
 
@@ -117,7 +121,8 @@ const deliverableNames = async () => new Set((((await api("GET", "/api/deliverab
   const a = (org.agents || []).find((x) => !x.hr) || (org.agents || [])[0];
   if (!a) { console.error("no agents in org — hire one first"); process.exit(2); }
   AGENT = a.id;
-  console.log(`agent under test: ${a.name} (${AGENT})`);
+  REMOTE = Boolean((await api("GET", "/api/whoami")).j?.remote);
+  console.log(`agent under test: ${a.name} (${AGENT})${REMOTE ? "   [BUREAU_REMOTE is ON — the seam may only deny hard-floor actions]" : ""}`);
   const baselinePending = await pendingIds();     // so teardown only resolves approvals WE caused
   const baselineDrafts = await deliverableNames();
   await reset();
@@ -232,14 +237,23 @@ const deliverableNames = async () => new Set((((await api("GET", "/api/deliverab
       ok(s4.proposal.autoApprove === false, "S4: github_pr NOT auto-approved at trusted tier (hard floor held)");
       ok(!s4.proposal.approver, "S4: no approver stamped on the proposal");
       ok(!!s4.proposal.approvalId, "S4: the proposal carries a usable approvalId (undefined here was bug #1)");
-      ok(s4.seamStatus === 200, `S4: the in-app seam accepted it (got ${s4.seamStatus})`);
       ok(!!s4.events.find((e) => e.type === "result" && isWrite(e.data?.actionType) && e.data?.ok),
         "S4: it saved the deliverable first — the PR is built from that, not from retyped content (bug #2)");
-      ok(!!s4.res, "S4: the run reported a github_pr result");
-      ok(s4.res?.data?.ok === true, `S4: the PR succeeded (error: "${s4.res?.data?.error || "none"}")`);
-      ok(/github\.com\/.+\/pull\/\d+/.test(String(s4.res?.data?.url || "")), `S4: with a real PR URL (${s4.res?.data?.url})`);
-      ok(s4.res?.data?.decidedBy === "you", `S4: attributed to the human who approved it (decidedBy="${s4.res?.data?.decidedBy}")`);
-      if (s4.res?.data?.url) ghArtifacts.push({ url: s4.res.data.url, owner: ghTarget.owner, repo: ghTarget.repo });
+      // Under BUREAU_REMOTE the seam MUST refuse to approve a hard-floor action — that is the whole point
+      // of remote mode, and asserting a 200 here would turn correct behaviour into a red suite the moment
+      // someone deploys Bureau on a tailnet. Same scenario, both postures: the floor is verified either
+      // way, and remote mode's refusal becomes coverage instead of a failure.
+      if (REMOTE) {
+        ok(s4.seamStatus === 403, `S4 (BUREAU_REMOTE): the seam REFUSED to approve a hard-floor action (got ${s4.seamStatus})`);
+        console.log("  ~ S4: remote mode is on, so the PR itself must be approved in Latch/Compass — the rest of S4 needs a trusted-host run");
+      } else {
+        ok(s4.seamStatus === 200, `S4: the in-app seam accepted it (got ${s4.seamStatus})`);
+        ok(!!s4.res, "S4: the run reported a github_pr result");
+        ok(s4.res?.data?.ok === true, `S4: the PR succeeded (error: "${s4.res?.data?.error || "none"}")`);
+        ok(/github\.com\/.+\/pull\/\d+/.test(String(s4.res?.data?.url || "")), `S4: with a real PR URL (${s4.res?.data?.url})`);
+        ok(s4.res?.data?.decidedBy === "you", `S4: attributed to the human who approved it (decidedBy="${s4.res?.data?.decidedBy}")`);
+        if (s4.res?.data?.url) ghArtifacts.push({ url: s4.res.data.url, owner: ghTarget.owner, repo: ghTarget.repo });
+      }
     }
     await api("PATCH", "/api/agents/" + AGENT, { allow: savedAllow });
   }

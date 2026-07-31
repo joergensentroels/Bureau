@@ -31,3 +31,7 @@ server.err.log
 
 # eval harness: timestamped run reports (the committed baseline.json is the tracked reference)
 eval/reports/
+
+# Start-Bureau.ps1's detached-mode logs
+bureau.log
+bureau.log.err

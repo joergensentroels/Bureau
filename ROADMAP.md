@@ -119,10 +119,20 @@ The remaining backlog, roughly by value (competitive-gap analysis, 2026-07-22):
 - **Office-view revamp** — the isometric office is functional (renders from `public/assets/iso/`),
   but its visual design was parked. Pure presentation, no behavior change.
 _(Deliverable delete is complete — API and UI both shipped, see below.)_
-- **Remote access, last mile** — code complete (see Shipped). What remains is operator setup only:
-  Bureau is already served on the tailnet at `:8443` alongside Compass; a Cloudflare Tunnel + Access
-  hostname is the alternative for machines that can't run a mesh client. Untested piece: whether a
-  managed work laptop's network cooperates.
+- **Remote access — WORKING as of 2026-07-31, one step left (a device, not code).** Verified end to end
+  from this host: `tailscale serve` proxies `https://<your-host>.<your-tailnet>.ts.net:8443` → `127.0.0.1:4173`
+  (and `:443` → Latch on 8787), TLS valid, the UI and `/api/whoami` both 200 with a token, **401 without
+  one**, and Bureau stays bound to loopback only — the tailnet does the exposing, not a wider bind.
+  - **`BUREAU_REMOTE` was the real gap, and it was invisible.** It lived in whatever shell started the
+    process, so `node server.mjs` by hand served an **unguarded** control surface on a live public
+    hostname. `Start-Bureau.ps1` now makes the guard the default, warns in red if `-Local` is used while
+    tailscale is serving the port, and refuses to double-start. Confirmed `remote:true` over the tailnet.
+  - **Left to do: put the work laptop on the tailnet** (install Tailscale, sign in, approve the device) and
+    open `https://<your-host>.<your-tailnet>.ts.net:8443`. Current peers are only `openclaw` (linux) and an android
+    phone — no laptop yet. A Cloudflare Tunnel + Access hostname remains the fallback if a managed laptop
+    forbids a mesh client; nothing in Bureau changes either way.
+  - **The e2e knows about both postures:** S4 asserts the seam REFUSES a hard-floor approval (403) when
+    `BUREAU_REMOTE` is on, instead of failing because correct behaviour looked like a broken seam.
 
 ---
 
