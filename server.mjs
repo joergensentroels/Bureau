@@ -2745,6 +2745,11 @@ function beginRun(spec) {
 const SCHED_CADENCES = ["hourly", "daily", "weekly"];
 export function cadenceMs(c) { return c === "hourly" ? 3600e3 : c === "weekly" ? 7 * 864e5 : 864e5; }
 const runningSchedules = new Set();
+// Cap on scheduled runs in flight at once. `runningSchedules` stops one schedule double-firing, but the
+// tick awaits each run serially while setInterval keeps firing every 60s — so a second tick sees the
+// OTHER still-unadvanced due schedules and starts one of those. After downtime, with several schedules
+// overdue, that drips a new autoApprove run every minute while the backlog drains. This bounds it.
+const SCHED_MAX_CONCURRENT = Math.max(1, Number(process.env.BUREAU_SCHED_MAX_CONCURRENT) || 2);
 async function tickSchedules() {
   // Every workspace has its own schedules — tick each inside its own context.
   for (const w of WORKSPACES) {
@@ -2757,6 +2762,10 @@ async function tickSchedulesForCurrentWs() {
   const now = Date.now();
   const due = (org.schedules || []).filter((s) => s.enabled && s.nextRunAt && s.nextRunAt <= now && !runningSchedules.has(s.id));
   for (const s of due) {
+    if (runningSchedules.size >= SCHED_MAX_CONCURRENT) {
+      console.warn(`⚠  scheduler: ${runningSchedules.size} scheduled run(s) already in flight — deferring "${s.name || s.id}" to the next tick (BUREAU_SCHED_MAX_CONCURRENT=${SCHED_MAX_CONCURRENT})`);
+      break;   // leave nextRunAt untouched so it stays due and is picked up later
+    }
     runningSchedules.add(s.id);
     try {
       // advance the schedule and persist FIRST, so the run's later persist preserves it
@@ -2767,7 +2776,16 @@ async function tickSchedulesForCurrentWs() {
       let objective = s.objective;
       if (s.goalId) {   // goal-driven schedule: use the live goal objective; skip if the goal isn't active
         const goal = (org.goals || []).find((g) => g.id === s.goalId);
-        if (!goal || goal.status !== "active") continue;
+        if (!goal || goal.status !== "active") {
+          // Say so. This skip is silent otherwise: nextRunAt was just advanced, so the schedule keeps
+          // ticking forever, looks enabled, and never runs — with nothing anywhere explaining why. A
+          // goal-driven schedule outliving its goal is a normal thing to happen and a baffling thing to
+          // debug from the UI, which shows only "enabled, next run in 24h".
+          console.warn(`⚠  scheduler: schedule "${s.name || s.id}" is driven by goal ${s.goalId}, which is ${goal ? `status "${goal.status}"` : "gone"} — skipping (it will keep skipping until the goal is active again or the schedule is disabled)`);
+          logAudit({ kind: "schedule", name: s.name || s.id, actionType: "skipped", decision: "auto",
+            summary: `Goal-driven schedule skipped: goal ${s.goalId} is ${goal ? goal.status : "deleted"}` });
+          continue;   // the finally below still runs, so runningSchedules is released
+        }
         objective = goalObjective(goal);
       }
       const { done } = beginRun({ mode: s.mode, agentId: s.agentId, objective, maxTurns: s.maxTurns || 6, autoApprove: true, scheduleId: s.id, goalId: s.goalId || "", hush: !!s.hush });
@@ -3625,6 +3643,21 @@ const server = createServer(async (req, res) => {
         if (body.status !== undefined && ["active", "done", "paused"].includes(body.status)) {
           if (body.status === "done" && g.status !== "done" && ((g.runs || []).length || (g.keyResults || []).length)) becameDone = true;
           g.status = body.status;
+          // Keep the linked auto-advance schedule in step with the goal's status. Deleting a goal already
+          // removed its schedule, but COMPLETING one left it enabled — so a finished goal kept a schedule
+          // waking every cadence forever, advancing itself, and skipping because the goal wasn't active.
+          // A zombie created by the most ordinary action there is: ticking a goal off.
+          // Disabled rather than deleted, so re-opening the goal resumes it.
+          if (g.scheduleId) {
+            const sc = (o.schedules || []).find((s) => s.id === g.scheduleId);
+            if (sc) {
+              const shouldRun = g.status === "active";
+              if (sc.enabled !== shouldRun) {
+                sc.enabled = shouldRun;
+                if (shouldRun) sc.nextRunAt = Date.now() + cadenceMs(sc.cadence);   // don't fire instantly on re-open
+              }
+            }
+          }
         }
         if (body.keyResults !== undefined) g.keyResults = normKRs(body.keyResults);
         if (body.hush !== undefined) { g.hush = Boolean(body.hush); if (g.scheduleId) { const sc = (o.schedules || []).find((s) => s.id === g.scheduleId); if (sc) sc.hush = g.hush; } }
@@ -3794,6 +3827,10 @@ const server = createServer(async (req, res) => {
     if (p.startsWith("/api/schedules/") && req.method === "PATCH") {
       const id = p.split("/")[3];
       const body = await readBody(req);
+      // Validate before the transaction: a bad value must be a 400, not the 404 that returning null from
+      // the mutator would produce — "you sent nonsense" and "no such schedule" are different answers.
+      if (body.nextRunAt !== undefined && !Number.isFinite(Number(body.nextRunAt)))
+        return send(res, 400, { error: "nextRunAt must be a finite epoch-millis number" });
       const s = await updateOrg((org) => {
         const s = (org.schedules || []).find((x) => x.id === id);
         if (!s) return null;
@@ -3801,6 +3838,15 @@ const server = createServer(async (req, res) => {
         if (body.objective !== undefined) s.objective = String(body.objective).slice(0, 1000);
         if (body.cadence !== undefined && SCHED_CADENCES.includes(body.cadence)) { s.cadence = body.cadence; s.nextRunAt = Date.now() + cadenceMs(s.cadence); }
         if (body.hush !== undefined) s.hush = Boolean(body.hush);
+        // Explicit nextRunAt, applied LAST so it beats the side effects above (enabling a schedule pushes
+        // an overdue nextRunAt forward by a cadence, and changing cadence resets it).
+        //
+        // This existed nowhere before, which made the scheduler untestable BY CONSTRUCTION: no API path
+        // could make a schedule due, and POST /:id/run bypasses tickSchedules entirely — so the whole
+        // due-detect-and-advance path had never been observed running, on a timer that fires every 60s.
+        // A past value means "due now"; the far-future clamp keeps a typo'd millisecond value from
+        // parking a schedule until the year 50,000.
+        if (body.nextRunAt !== undefined) s.nextRunAt = Math.min(Number(body.nextRunAt), Date.now() + 365 * 864e5);
         return s;
       });
       if (!s) return send(res, 404, { error: "not found" });

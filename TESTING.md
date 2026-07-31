@@ -64,6 +64,8 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
 | `/api/rag` deliverable retrieval inspection | api |
 | `DELETE /api/deliverables/:name` — validation, not-found, traversal neutralised | api (happy path live) |
 | Inbound triggers — unknown/disabled token → 404, token shape, list auth | api (guards live) |
+| Goal-linked schedule lifecycle — done disables, re-open resumes, delete removes | api |
+| `nextRunAt` on PATCH — settable, clamped to a year, non-numeric → 400 | api |
 | `/api/embeddings` status + `/api/embeddings/backfill` + `/api/memory?lexical=` switch | api |
 | Approval seam validation (unknown id → 404, bad decision → 400) | api |
 | Role introspection `/api/whoami` (operator + readonly) | api |
@@ -86,6 +88,13 @@ _Done 2026-07-31: the page boots with no JS errors; unauthenticated, it correctl
 while keeping `👁 read-only` and `🔒 remote mode` hidden; and the **poller gate holds** — six boot requests
 and then silence, where the 2s/7s/12s pollers would otherwise have kept firing (they were measured at
 ~83 requests/minute before that fix)._
+
+**The scheduler, observed firing for the first time** (needs a live server + model; verified 2026-07-31,
+10 checks). It runs on a 60s timer and had never been seen working — because it *couldn't* be: no API
+path could make a schedule due (`PATCH` ignored `nextRunAt`, enabling an overdue schedule pushed it a
+cadence forward, and `POST /:id/run` bypasses `tickSchedules` altogether). With `nextRunAt` settable, a
+due schedule fires, `lastRunAt` is set and `nextRunAt` advances by one cadence without replaying a
+backlog. Scripted rather than in the suite because it must wait out real 60-second ticks.
 
 **Inbound trigger guards end-to-end** (needs a live server + model; verified 2026-07-31, 9 checks): fires
 with no credential (by design), an immediate second fire and 5 rapid retries all 429 with `retryAfterMs`,

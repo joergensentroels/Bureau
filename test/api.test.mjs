@@ -127,6 +127,33 @@ const ok = (c, m) => (c ? pass : fail).push(m);
     { const pf = (await api("GET", "/api/performance")).j; ok(Array.isArray(pf.agents) && typeof pf.auditWindow === "number", "performance well-formed"); }
     { const au = (await api("GET", "/api/audit?kind=deliverable")).j; ok(Array.isArray(au.audit) && au.totals && au.audit.every((r) => r.kind === "deliverable"), "audit endpoint filters by kind"); }
 
+    // ---- goal-linked schedules must follow the goal's lifecycle ----
+    // Deleting a goal already removed its auto-advance schedule; COMPLETING one did not, leaving a
+    // schedule that woke every cadence forever, advanced itself and skipped. A zombie produced by the
+    // most ordinary action in the feature: ticking a goal off.
+    { const g = await api("POST", "/api/goals", { title: "Lifecycle goal", cadence: "daily", keyResults: [{ text: "kr" }] });
+      const sid = g.j.scheduleId;
+      ok(!!sid, "goal created with a cadence gets a linked schedule");
+      const find = async () => ((await api("GET", "/api/schedules")).j.schedules || []).find((x) => x.id === sid);
+      ok((await find())?.enabled === true, "linked schedule starts enabled");
+      await api("PATCH", "/api/goals/" + g.j.id, { status: "done" });
+      ok((await find())?.enabled === false, "completing the goal disables its schedule (no zombie ticking forever)");
+      await api("PATCH", "/api/goals/" + g.j.id, { status: "active" });
+      const back = await find();
+      ok(back?.enabled === true, "re-opening the goal resumes the schedule (disabled, not deleted)");
+      ok(back?.nextRunAt > Date.now(), "and it does not fire instantly on re-open");
+      await api("DELETE", "/api/goals/" + g.j.id);
+      ok((await find()) === undefined, "deleting the goal removes the schedule entirely"); }
+    // nextRunAt is settable now — without it the scheduler could not be made due, so its whole
+    // due-detect path was unreachable from the API and had never been observed running.
+    { const s = await api("POST", "/api/schedules", { objective: "x", mode: "single", cadence: "daily" });
+      const due = await api("PATCH", "/api/schedules/" + s.j.id, { nextRunAt: 1000 });
+      ok(due.j.nextRunAt === 1000, "PATCH accepts an explicit nextRunAt (a past value means due now)");
+      const clamped = await api("PATCH", "/api/schedules/" + s.j.id, { nextRunAt: 9e15 });
+      ok(clamped.j.nextRunAt < Date.now() + 366 * 864e5, "a far-future nextRunAt is clamped to a year");
+      ok((await api("PATCH", "/api/schedules/" + s.j.id, { nextRunAt: "soon" })).status === 400, "a non-numeric nextRunAt → 400, not the 404 a null mutator return would give");
+      await api("DELETE", "/api/schedules/" + s.j.id); }
+
     // ---- inbound triggers: the ONLY unauthenticated endpoint, so its guards matter most ----
     { // Unknown token must 404 whether or not a token is presented, and must NOT need auth to reach.
       const bare = await fetch(B + "/api/trigger/definitely-not-a-real-token", { method: "POST", headers: { "content-type": "application/json", "x-workspace": WS }, body: "{}" });
