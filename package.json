@@ -1,0 +1,24 @@
+{
+  "name": "bureau",
+  "version": "0.1.0",
+  "private": true,
+  "author": "Troels Anker Jørgensen",
+  "license": "AGPL-3.0-or-later",
+  "description": "Bureau — hire a company of AI agents, point them at goals, and let them take real, approval-gated actions. Bureau is the control surface; Latch is the security boundary that holds every credential. Zero dependencies, Node built-ins only.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/joergensentroels/Bureau.git"
+  },
+  "homepage": "https://github.com/joergensentroels/Bureau#readme",
+  "bugs": {
+    "url": "https://github.com/joergensentroels/Bureau/issues"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node test/run-all.mjs --serve"
+  }
+}
