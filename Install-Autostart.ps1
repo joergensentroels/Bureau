@@ -26,7 +26,7 @@
 # The boot tasks this creates already pass -ExecutionPolicy Bypass themselves, so Restricted does not
 # affect them at startup — it only gets in the way of running this installer by hand.
 [CmdletBinding(SupportsShouldProcess = $true)]
-param([switch]$Uninstall)
+param([switch]$Uninstall, [switch]$Verify)
 
 $ErrorActionPreference = "Stop"
 $here    = Split-Path -Parent $MyInvocation.MyCommand.Path        # ...\bureau
@@ -41,15 +41,79 @@ if (-not $isAdmin -and -not $WhatIfPreference) {
   # form that fails on this machine (LocalMachine policy is Restricted) — a failure message handing back
   # the broken command. The header comment had the right form, but nobody reads a header while looking at
   # an error.
+  # Echo back the mode that was ACTUALLY asked for. This message used to always print the install form, so
+  # someone who ran -Verify or -Uninstall unelevated was handed a command that INSTALLS — a failure message
+  # that talks you into a different action than the one you attempted.
   $self = $MyInvocation.MyCommand.Path
-  Write-Host "This needs an elevated shell (SYSTEM tasks and boot triggers are admin-only)." -ForegroundColor Yellow
+  $mode = if ($Verify) { " -Verify" } elseif ($Uninstall) { " -Uninstall" } else { "" }
+  $what = if ($Verify) { "reading SYSTEM tasks" } elseif ($Uninstall) { "removing SYSTEM tasks" } else { "SYSTEM tasks and boot triggers" }
+  Write-Host "This needs an elevated shell ($what is admin-only)." -ForegroundColor Yellow
   Write-Host "Right-click PowerShell -> Run as administrator, then paste:" -ForegroundColor Yellow
-  Write-Host "  powershell -NoProfile -ExecutionPolicy Bypass -File `"$self`""
-  Write-Host ""
-  Write-Host "Preview without elevation:" -ForegroundColor DarkGray
-  Write-Host "  powershell -NoProfile -ExecutionPolicy Bypass -File `"$self`" -WhatIf" -ForegroundColor DarkGray
+  Write-Host "  powershell -NoProfile -ExecutionPolicy Bypass -File `"$self`"$mode"
+  if (-not $mode) {
+    Write-Host ""
+    Write-Host "Preview without elevation:" -ForegroundColor DarkGray
+    Write-Host "  powershell -NoProfile -ExecutionPolicy Bypass -File `"$self`" -WhatIf" -ForegroundColor DarkGray
+  }
   Write-Host "(-ExecutionPolicy is per-process; it does not change this machine's policy.)" -ForegroundColor DarkGray
   exit 1
+}
+
+# -Verify is the POST-REBOOT checklist. A standard user cannot even enumerate a task that runs as SYSTEM
+# (Get-ScheduledTask returns nothing, Start-ScheduledTask says Access denied), so this has to run elevated
+# — which is also why the install cannot be checked from an unprivileged session.
+#
+# The check that actually matters is the PROCESS OWNER. If node is owned by SYSTEM, the task started it; if
+# it is owned by troel, the Startup shortcut did, and the reboot proved nothing.
+if ($Verify) {
+  $ok = $true
+  Write-Host "--- tasks ---"
+  $found = Get-ScheduledTask "$prefix*" -ErrorAction SilentlyContinue
+  if (-not $found) { Write-Host "  none visible. Either they are not installed, or this shell is not elevated." -ForegroundColor Red; $ok = $false }
+  foreach ($t in $found) {
+    $i = $t | Get-ScheduledTaskInfo
+    # LastTaskResult 267009 = "currently running", which is the healthy steady state for a server.
+    $res = switch ($i.LastTaskResult) { 0 { "ok" } 267009 { "running" } 267011 { "not yet run" } default { "result=$($i.LastTaskResult)" } }
+    Write-Host ("  {0,-20} {1,-8} as={2,-8} lastRun={3,-9} {4}" -f $t.TaskName, $t.State, $t.Principal.UserId,
+      $(if ($i.LastRunTime.Year -gt 1999) { $i.LastRunTime.ToString("HH:mm:ss") } else { "never" }), $res)
+  }
+  Write-Host "`n--- who owns the running processes? (SYSTEM = the task started it; you = the Startup shortcut did) ---"
+  foreach ($port in 11434, 8787, 4173) {
+    $conn = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $conn) { Write-Host ("  :{0,-6} NOT LISTENING" -f $port) -ForegroundColor Red; $ok = $false; continue }
+    $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$($conn.OwningProcess)" -ErrorAction SilentlyContinue
+    $owner = try { $o = Invoke-CimMethod -InputObject $proc -MethodName GetOwner; "$($o.Domain)\$($o.User)" } catch { "?" }
+    $isSystem = $owner -match "SYSTEM"
+    Write-Host ("  :{0,-6} pid={1,-7} {2,-14} owner={3}" -f $port, $conn.OwningProcess, $proc.Name, $owner) -ForegroundColor $(if ($isSystem) { "Green" } else { "Yellow" })
+    if (-not $isSystem) { Write-Host "         ^ started by a logged-on user, not the boot task" -ForegroundColor Yellow }
+  }
+  Write-Host "`n--- the two things a SYSTEM account gets wrong by default ---"
+  try {
+    $tags = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/tags" -TimeoutSec 10
+    $names = ($tags.models | ForEach-Object { $_.name }) -join ", "
+    if ($tags.models.Count -gt 0) { Write-Host "  OLLAMA_MODELS resolved: $($tags.models.Count) model(s) - $names" -ForegroundColor Green }
+    else { Write-Host "  Ollama is up but reports NO models - OLLAMA_MODELS is wrong for this account" -ForegroundColor Red; $ok = $false }
+  } catch { Write-Host "  could not reach Ollama: $($_.Exception.Message)" -ForegroundColor Red; $ok = $false }
+  try {
+    $ps = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/ps" -TimeoutSec 10
+    if (-not $ps.models -or $ps.models.Count -eq 0) { Write-Host "  no model loaded right now, so GPU use is unknown - run something, then re-check /api/ps" -ForegroundColor DarkYellow }
+    else { foreach ($m in $ps.models) {
+        $vram = [int64]$m.size_vram
+        Write-Host ("  {0}: size_vram={1:N0} bytes -> {2}" -f $m.name, $vram, $(if ($vram -gt 0) { "ON GPU" } else { "CPU ONLY (session-0 GPU problem)" })) -ForegroundColor $(if ($vram -gt 0) { "Green" } else { "Red" })
+        if ($vram -le 0) { $ok = $false }
+    } }
+  } catch { Write-Host "  /api/ps unavailable: $($_.Exception.Message)" -ForegroundColor DarkYellow }
+  $authPath = Join-Path $latch "data\auth.json"
+  try {
+    $t = (Get-Content $authPath -Raw | ConvertFrom-Json).operatorToken
+    $w = Invoke-RestMethod -Uri "http://127.0.0.1:4173/api/whoami" -Headers @{ Authorization = "Bearer $t" } -TimeoutSec 10
+    Write-Host "  LATCH_DATA resolved: Bureau authenticated (role=$($w.role), remote=$($w.remote))" -ForegroundColor Green
+    if (-not $w.remote) { Write-Host "         ^ remote guard is OFF while the tailnet serves this port" -ForegroundColor Yellow }
+  } catch { Write-Host "  Bureau did not authenticate - LATCH_DATA likely wrong for the account it runs as" -ForegroundColor Red; $ok = $false }
+  Write-Host ""
+  if ($ok) { Write-Host "ALL GOOD. Once you have rebooted and seen this pass, delete the Startup shortcuts." -ForegroundColor Green }
+  else { Write-Host "NOT all good - see the red lines above. -Uninstall reverts to the Startup shortcuts." -ForegroundColor Red }
+  exit $(if ($ok) { 0 } else { 1 })
 }
 
 if ($Uninstall) {
