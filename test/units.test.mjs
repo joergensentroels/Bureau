@@ -31,6 +31,23 @@ for (const ip of ["2606:4700:4700::1111", "::ffff:8.8.8.8"])
 console.log("# normalizeAction — corrects the local model's common action mistakes");
 eq("  bash → shell", normalizeAction({ type: "propose_action", actionType: "bash", command: "ls" }, "").actionType, "shell");
 eq("  curl → api_call", normalizeAction({ type: "propose_action", actionType: "curl" }, "").actionType, "api_call");
+// GitHub issues. The read is named `read_issues`, NOT `github_issues`, precisely so that a one-letter slip
+// can't turn "show me the backlog" into an outward-facing post that emails every watcher. These
+// assertions pin the direction of every synonym, because the failure is silent and public.
+{
+  const norm = (t) => normalizeAction({ type: "propose_action", actionType: t, title: "x", command: "y" }, "").actionType;
+  for (const t of ["read_issues", "github_issues", "list_issues", "get_issues", "issues", "open_issues", "issue_list"])
+    eq(`  ${t} → read_issues (a read)`, norm(t), "read_issues");
+  for (const t of ["github_issue", "issue", "new_issue", "open_issue", "create_issue", "file_issue", "raise_issue", "bug_report"])
+    eq(`  ${t} → github_issue (a post)`, norm(t), "github_issue");
+  for (const t of ["github_comment", "issue_comment", "comment", "comment_issue", "reply_issue", "reply"])
+    eq(`  ${t} → github_comment`, norm(t), "github_comment");
+  // The dangerous confusions, asserted as NOT happening rather than left to inspection of the lists.
+  chk("  plural 'issues' never becomes the singular post action", norm("issues") !== "github_issue");
+  chk("  singular 'issue' never becomes the read action", norm("issue") !== "read_issues");
+  chk("  'github' alone still means a file commit, not an issue", norm("github") === "github_file");
+  chk("  'backlog' still means the INTERNAL plan, not GitHub", norm("backlog") === "plan_add");
+}
 eq("  web_research w/o URL → web_search", normalizeAction({ type: "propose_action", actionType: "web_research", command: "find pricing" }, "").actionType, "web_search");
 { const r = normalizeAction({ type: "propose_action", actionType: "web_search", command: "https://a.com/x" }, "");
   chk("  web_search w/ URL → web_research + command=url", r.actionType === "web_research" && r.command === "https://a.com/x"); }

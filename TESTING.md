@@ -74,6 +74,9 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
 | `DELETE /api/deliverables/:name` — validation, not-found, traversal neutralised | api (happy path live) |
 | Inbound triggers — unknown/disabled token → 404, token shape, list auth | api (guards live) |
 | Failed-run accounting — abnormal exits audited with a reason, counted, listed in `/api/runs` | workspaces |
+| GitHub issue posting hard-floored — tier, run-auto and policy-allow all fail to cross it | decision |
+| `read_issues` stays a safe read — tier may auto-approve, and it is not dragged onto the floor | decision |
+| Issue action synonyms — every alias's direction pinned; plural/singular can't cross over | units |
 | `modelUnreachable` — all-failed vs. one-success-among-failures, both directions | units |
 | `trimVersions` — keep/drop partition the input exactly at every cap boundary | units |
 | Purchasing budget — clamp, cent-rounding, non-numeric → 0; `/api/purchases` shape | endpoints |
@@ -134,6 +137,16 @@ _Done 2026-07-31: the page boots with no JS errors; unauthenticated, it correctl
 while keeping `👁 read-only` and `🔒 remote mode` hidden; and the **poller gate holds** — six boot requests
 and then silence, where the 2s/7s/12s pollers would otherwise have kept firing (they were measured at
 ~83 requests/minute before that fix)._
+
+**GitHub issues — Latch side verified, the GitHub round-trip is NOT** (needs a live Latch; verified
+2026-07-31, 17 checks). Covered: the read endpoint's auth (401 twice), a repo name that sanitises to
+nothing (400), both approval types accepted and sitting **pending** rather than auto-approved, their fields
+surviving sanitisation, and label capping. Every approval it creates is denied in a `finally` block and the
+script asserts zero left pending. **Not covered: any actual call to GitHub.** The stored token lacks Issues
+permission, so the read returns `502` carrying GitHub's own `403: Resource not accessible by personal access
+token`. Re-run this once the token has **Issues: Read and write** and the read branch will assert real
+issues instead. _The failure being legible at all is the point: an empty issue list would have looked like
+"no work to do."_
 
 **Version archives — no orphans, nothing unreachable** (needs a live server + model; verified 2026-07-31,
 8 checks). Measured on the real corpus first: **116 archive files on disk, 10 listed by any endpoint.**

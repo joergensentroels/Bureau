@@ -237,6 +237,20 @@ assertions across 7 suites + a live `--e2e`; see `test/README.md`).
   including two where BM25 returned nothing at all ("why lists help you not forget steps" → the
   checklist work; "picking what matters most next quarter" → the Q3 priority work, with no shared term
   since the corpus says "Q3"). One query surfaced no correct match in either mode; see **Next**._
+- **GitHub issues, both directions** (2026-07-31) — agents can work a real backlog instead of only pushing
+  files outward: `read_issues` pulls the repo's open issues (the external twin of the internal Plan),
+  `github_issue` opens one, `github_comment` replies on one. The token stays in Latch, which gained a
+  `GET /api/github/issues` read plus `github_issue` / `github_issue_comment` approval types and executors.
+  **Posting is hard-floored, committing a file is not**, and the asymmetry is the design: a commit is
+  content — silent and undoable via git history — while an issue emails every watcher the instant it posts
+  and nothing recalls that, which is why `email_draft` is floored too. Bureau and Latch enforce it
+  independently. Issue text is **untrusted third-party input**, framed for the model the same way
+  `mcp_call` results are, and the real containment is that every action an injected instruction could ask
+  for is itself gated. _Verified live on the Latch side, 17 checks (auth, validation, both approval types
+  pending rather than auto-approved, fields surviving sanitisation, label caps, zero leaked approvals).
+  **The GitHub round-trip is NOT yet verified**: the configured token lacks Issues permission, so the read
+  returns 502 carrying GitHub's own `403 Resource not accessible`. Add **Issues: Read and write** to the PAT
+  and re-run `verify-gh-issues`. Pull requests are the natural next increment on the same plumbing._
 - **The failure paths, made loud** (2026-07-31) — an audit of every place Bureau stayed quiet when
   something went wrong. Each of these was one line of `catch {}` or one missing sibling call, and none
   of them broke a test, because nothing was watching.

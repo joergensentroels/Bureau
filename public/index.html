@@ -635,10 +635,10 @@ function auditLine(r){
   const dec=`<span class="decbadge ${esc(r.decision||"auto")}">${esc(r.decision||"auto")}</span>`;
   if(r.kind==="run") return `<div class="ibrow"><span>⚙️</span><div class="ibmain"><div class="ibt">${esc(r.objective||"(run)")}</div><div class="ibd">${esc(r.agent||"")} · ${esc(r.verdict||"")}${r.total?` ${r.met}/${r.total}`:""} · ${(r.tokens||0).toLocaleString()} tok${r.costUsd?` · $${r.costUsd.toFixed(4)}`:""} · ${ago(r.at)}</div></div>${dec}</div>`;
   if(r.kind==="blocked") return `<div class="ibrow"><span>⛔</span><div class="ibmain"><div class="ibt">Blocked: ${esc(r.actionType||"action")} — ${esc(r.agent||"")}</div><div class="ibd">${esc(r.error||r.reason||"not permitted")} · ${ago(r.at)}</div></div><span class="decbadge denied">denied</span></div>`;
-  const ic={file_write:"📄",web_search:"🔎",web_research:"🌐",read_file:"📖",purchase:"🛒"}[r.actionType]||"•";
+  const ic={file_write:"📄",web_search:"🔎",web_research:"🌐",read_file:"📖",purchase:"🛒",github_file:"🐙",read_issues:"🐙",github_issue:"🐙",github_comment:"💬"}[r.actionType]||"•";
   return `<div class="ibrow"><span>${ic}</span><div class="ibmain"><div class="ibt">${esc(r.agent||"")} · ${esc(r.actionType||"action")}</div><div class="ibd">${r.ok?"✓":"✗"} ${esc(r.url||r.error||"")}${r.bytes?` · ${(r.bytes/1024).toFixed(1)} KB`:""} · ${ago(r.at)}</div></div>${dec}</div>`;
 }
-const POL_ACTIONS=[["","(any action)"],["web_search","web search"],["web_research","fetch page"],["read_file","read file"],["file_write","write file"],["note","note"],["purchase","purchase"],["api_call","API call"],["shell","shell"],["email_draft","send email"]];
+const POL_ACTIONS=[["","(any action)"],["web_search","web search"],["web_research","fetch page"],["read_file","read file"],["file_write","write file"],["note","note"],["purchase","purchase"],["api_call","API call"],["shell","shell"],["email_draft","send email"],["github_file","GitHub publish"],["read_issues","read GitHub issues"],["github_issue","open GitHub issue"],["github_comment","comment on GitHub issue"]];
 const POL_EFFECTS={block:"🚫 Block",require:"✋ Require me",allow:"✅ Auto-allow"};
 function policySummary(r){
   const w=r.when||{}; const parts=[];
@@ -2267,7 +2267,7 @@ function openAgentModal(mode, agent, opts){
         <select id="mmodeltier">${Object.entries((HEALTH&&HEALTH.tiers)||{standard:{label:"Standard"},heavy:{label:"Heavy"}}).map(([v,t])=>`<option value="${v}" ${((isEdit&&agent.modelTier)||(HEALTH&&HEALTH.defaultTier)||"standard")===v?"selected":""}>${esc(t.label)}${t.pricePer1K?` · ~$${(t.pricePer1K*1000).toFixed(2)}/1M tok`:""}</option>`).join("")}</select>
         <div class="dim" style="font-size:11px;margin-top:4px">Seniority mechanic: a heavier tier is smarter but burns this agent's budget faster. Only matters when the budget is above $0.</div></div>
       <div><label>Allowed actions <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">— none checked = all allowed</span></label>
-        <div class="allowgrid" id="mallow">${[["web_search","🔎 Web search"],["web_research","🌐 Fetch page"],["file_write","📄 Write file"],["read_file","📖 Read file"],["purchase","🛒 Purchase"],["api_call","🔌 API call"],["shell","⌨️ Shell"],["github_file","🐙 GitHub publish"]].map(([v,lbl])=>`<label class="allowchk"><input type="checkbox" value="${v}" ${isEdit&&(agent.allow||[]).includes(v)?"checked":""}>${lbl}</label>`).join("")}</div>
+        <div class="allowgrid" id="mallow">${[["web_search","🔎 Web search"],["web_research","🌐 Fetch page"],["file_write","📄 Write file"],["read_file","📖 Read file"],["purchase","🛒 Purchase"],["api_call","🔌 API call"],["shell","⌨️ Shell"],["github_file","🐙 GitHub publish"],["read_issues","🐙 Read issues"],["github_issue","🐙 Open issue"],["github_comment","🐙 Comment on issue"]].map(([v,lbl])=>`<label class="allowchk"><input type="checkbox" value="${v}" ${isEdit&&(agent.allow||[]).includes(v)?"checked":""}>${lbl}</label>`).join("")}</div>
         <div class="dim" style="font-size:11px;margin-top:4px">Check specific actions to restrict this agent to only those. Blocked attempts are refused and logged.</div></div>
       <div><label>Autonomy tier <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">— how much this agent may do without asking you</span></label>
         <select id="mtier">
