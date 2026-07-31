@@ -68,21 +68,21 @@ cross-sibling handoff, so siblings can duplicate reasoning the sequential path w
     - **So: enable `parallel` for paid-heavy runs, leave it off for local ones.** That is now measured
       rather than assumed, in both directions.
 
-**The eval gate is currently RED, and deliberately left that way.** `node eval/run-eval.mjs --baseline`
-(8 reps, 2026-07-31) reports `criteria.singleShotRate: 100% → 78%`, past the 15% tolerance. Decompose
-(50%/75%) and verify (100%) match the baseline exactly.
-  - **Not user-visible.** Criteria's *effective* rate is still 100% — the retry ladder absorbs every
-    first-shot miss. The cost is latency and tokens (p95 18.8s), not failed runs.
-  - **Bureau's code is not the cause, on evidence.** The last change to the criteria prompt (`67f7e6e`)
-    landed at 09:18Z, *before* the 10:40Z baseline, and `git log -S` finds no commit after the baseline
-    touching `buildCriteriaMsgs`, `validateCriteria` or `deriveCriteria`. The eval cases and harness are
-    unchanged too. Same code, different score.
-  - **The model server changed underneath it.** In July, port 11434 answered with llama.cpp's
-    "Start it with --embeddings"; today it is genuinely Ollama 0.32.1. So the baseline is not
-    apples-to-apples, and a swapped inference backend is the most likely explanation.
-  - **Re-baselining is left to the operator on purpose.** Running `--save-baseline` would turn the gate
-    green in one command and erase the only signal that anything moved. If the new backend is the intended
-    one, re-baseline deliberately and say so in the commit — don't let a red gate get quietly normalised.
+**The eval gate is GREEN — the red was machine load, not a regression (resolved 2026-07-31, `3ff52ab`).
+Do not re-baseline.** Three runs of `criteria.singleShotRate` on identical code and cases, hours apart:
+**78%** (n=32), **80%** (n=20, p50 9173ms), **100%** (n=60, p50 4227ms). The two low scores were taken
+while the test suite, the live e2e and a server restart competed for the same Ollama; the 100% run had the
+machine to itself. `effectiveRate` and `schemaRate` were 100% in all three, so the retry ladder absorbed
+every first-shot miss and no run ever received invalid JSON.
+  - **Run the gate on an otherwise idle machine, or its verdict is about your CPU.** It now records `n` and
+    `p50ms` per call-type and flags a p50 gap of ≥1.5× as non-comparable, so nobody re-baselines over a
+    load artifact or hunts a prompt regression that was never there.
+  - The earlier "the inference backend changed" hypothesis is the weaker one: all three of these runs were
+    the same backend within hours of each other.
+  - Baseline VALUES are all confirmed — criteria 100/100/100 at n=60, verify 100/100/100, decompose
+    50/75/75. What the baseline lacked was not better numbers but the context to interpret them.
+  - **Still true: never `--save-baseline` to turn a red gate green.** That erases the only signal something
+    moved. Re-baselining is the operator's call and belongs in a deliberate commit.
 
 The remaining backlog, roughly by value (competitive-gap analysis, 2026-07-22):
 
@@ -103,12 +103,19 @@ The remaining backlog, roughly by value (competitive-gap analysis, 2026-07-22):
     remaining misses are the tail of a small corpus, not a bug — tuning them away would cost recall
     elsewhere, which is precisely the trap.
   - Deliverable embedding and chunking: both **done**, see Shipped.
-- **Outbound integrations** — ◐ partial. **GitHub publish is done** (`github_file` / `github_repo`
-  actions → Latch's native GitHub connector; Latch holds the token and commits on approval, Bureau
-  stores nothing) with a **per-workspace target repo/owner** (setup: `GITHUB.md`). Still open only:
-  GitHub **issues/PRs** (no Latch connector yet). **Slack was dropped on purpose** — agents coordinate
-  through the internal Plan (shared state), not a chat channel; for *human* digests, point the existing
-  notify-webhook at a Slack incoming webhook yourself.
+- **Outbound integrations** — ✅ **done as of 2026-07-31.** `github_file` / `github_repo` (publish), plus
+  `read_issues` / `github_issue` / `github_comment` / `github_pr` — the loop closes in both directions:
+  agents read a real backlog, respond on it, and propose finished work as a reviewable PR. Latch holds the
+  token throughout. Verified with an agent opening a real PR end to end. See Shipped for the design calls
+  (posting is hard-floored, committing a file is not; issue text is untrusted third-party input).
+  **Slack was dropped on purpose** — agents coordinate through the internal Plan (shared state), not a chat
+  channel; for *human* digests, point the existing notify-webhook at a Slack incoming webhook yourself.
+  - Possible follow-ons, none needed for the current shape: reading PR state (open/merged/closed) back
+    into a run, and multi-commit PRs accumulated across turns.
+  - **Operator setup outstanding:** the PAT needs **Administration: Read and write** if you want Bureau to
+    flip repo settings such as "Automatically delete head branches" (`POST /api/github/repo-settings`
+    currently 403s). Everything else the connector needs is granted. `GET /api/github/doctor` reports which
+    capability is missing — and lists Administration as *unprovable by any read* rather than guessing.
 - **Office-view revamp** — the isometric office is functional (renders from `public/assets/iso/`),
   but its visual design was parked. Pure presentation, no behavior change.
 _(Deliverable delete is complete — API and UI both shipped, see below.)_
