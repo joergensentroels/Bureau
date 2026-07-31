@@ -66,6 +66,8 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
 | Inbound triggers — unknown/disabled token → 404, token shape, list auth | api (guards live) |
 | Failed-run accounting — abnormal exits audited with a reason, counted, listed in `/api/runs` | workspaces |
 | `modelUnreachable` — all-failed vs. one-success-among-failures, both directions | units |
+| `trimVersions` — keep/drop partition the input exactly at every cap boundary | units |
+| `/api/deliverables/:name/versions` lists from the directory, not just org metadata | versions script |
 | Notification webhook — `/api/notify/test`, dead endpoint → 502 + audit row, HTTP 500 ≠ delivered | workspaces |
 | `run_failed` push on the failure path (it used to push nothing) | workspaces |
 | `/stop` on an unknown run → 404 (it used to confirm `ok:true`) | robustness |
@@ -93,6 +95,17 @@ _Done 2026-07-31: the page boots with no JS errors; unauthenticated, it correctl
 while keeping `👁 read-only` and `🔒 remote mode` hidden; and the **poller gate holds** — six boot requests
 and then silence, where the 2s/7s/12s pollers would otherwise have kept firing (they were measured at
 ~83 requests/minute before that fix)._
+
+**Version archives — no orphans, nothing unreachable** (needs a live server + model; verified 2026-07-31,
+8 checks). Measured on the real corpus first: **116 archive files on disk, 10 listed by any endpoint.**
+The DoD checklist is rewritten after every verify pass and is deliberately kept out of `org.deliverables`,
+so each rewrite archived a file that was an orphan from birth — one objective had accumulated 19. Now
+checklists aren't archived, the list endpoint reads the directory, and all 116 existing files are
+reachable again. _One part is NOT covered end-to-end: the on-disk unlink past the 20-version cap needs 21
+overwrites of the same document, and no endpoint writes deliverable content (only agents do). The
+arithmetic that drives it is unit-tested as `trimVersions` — a keep/drop partition — because an
+off-by-one there either leaks files forever or deletes an archive still listed. `BUREAU_VERSION_KEEP`
+lowers the cap if someone wants to exercise the unlink for real._
 
 **What Bureau produces when the model is unreachable** (needs a spawned server + a live one; verified
 2026-07-31, 9 checks). Scripted because it needs a second Bureau pointed at a dead `LATCH_URL` alongside

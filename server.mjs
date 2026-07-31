@@ -46,6 +46,15 @@ const currentWs = () => wsStore.getStore()?.ws || "default";
 const profilesDir = (ws = currentWs()) => ws === "default" ? _PROFILES_DEFAULT : path.join(HERE, `agent-profiles-${ws}`);
 const draftsDir = (ws = currentWs()) => ws === "default" ? _DRAFTS_DEFAULT : path.join(HERE, `drafts-${ws}`);
 const versionsDir = (ws = currentWs()) => path.join(draftsDir(ws), ".versions");   // prior versions of each deliverable (name.<ts>)
+const VERSION_KEEP = Math.max(1, Number(process.env.BUREAU_VERSION_KEEP) || 20);   // per-document archive cap — enforced on DISK as well as in metadata
+// Split a document's version list into what to keep and what to delete. Pure, and exported, because the
+// off-by-one is the whole risk: `drop` must be exactly the entries `keep` no longer contains, or the
+// unlink loop below either leaks files forever (too few) or deletes archives still listed (too many).
+export function trimVersions(list, keep = VERSION_KEEP) {
+  const all = Array.isArray(list) ? list : [];
+  const k = Math.max(1, Number(keep) || 1);
+  return { keep: all.slice(-k), drop: all.slice(0, Math.max(0, all.length - k)) };
+}
 // Definition-of-Done checklists ("checklist-*.md") live in drafts/ but are QA internals, not
 // deliverables — keep them out of the deliverables listings (still openable directly by filename).
 const DELIV_EXT = new Set(["md", "txt", "csv", "json", "js", "mjs", "ts", "py", "html", "sql", "yaml", "yml", "xml", "sh"]);
@@ -1120,23 +1129,45 @@ async function writeDraft(title, content) {
     const full = path.join(draftsDir(), name);
     if (full !== path.join(draftsDir(), path.basename(full))) return { ok: false, error: "invalid filename" };
     const newBody = body.slice(0, 100 * 1024);
+    // The DoD checklist is regenerated after every verify pass and is deliberately kept out of
+    // org.deliverables — so archiving it produced files that were orphans from birth: never listed by
+    // /versions (no org entry to list them from) and never deleted. Measured on the real corpus: 116
+    // archive files, 10 reachable, 106 not — and the biggest single document was 19 checklist snapshots
+    // of one objective. A regenerated artifact has no history worth keeping.
+    const isChecklist = name.startsWith("checklist-");
     // Versioning: snapshot the prior content before overwriting, so revisions keep a history.
     const prev = await readFile(full, "utf8").catch(() => null);
-    let ver = null;
-    if (prev != null && prev !== newBody) {
+    let ver = null, verError = "";
+    if (prev != null && prev !== newBody && !isChecklist) {
       const ts = Date.now();
-      try { await mkdir(versionsDir(), { recursive: true }); await writeFile(path.join(versionsDir(), `${name}.${ts}`), prev); ver = { at: ts, bytes: Buffer.byteLength(prev) }; } catch {}
+      try { await mkdir(versionsDir(), { recursive: true }); await writeFile(path.join(versionsDir(), `${name}.${ts}`), prev); ver = { at: ts, bytes: Buffer.byteLength(prev) }; }
+      catch (e) {
+        // Swallowing this loses the PREVIOUS content permanently — the overwrite below happens anyway.
+        // The write still proceeds (the new content is what was asked for), but not silently: `versioned:
+        // false` alone couldn't be trusted, because an unchanged document reports exactly the same thing.
+        verError = e.message;
+        console.warn(`⚠  ${name}: could not archive the previous version (${e.message}) — overwriting anyway, the prior content is lost`);
+        logAudit({ kind: "deliverable", actionType: "version-archive-failed", name, url: name, ok: false, error: String(e.message).slice(0, 200), decision: "auto" });
+      }
     }
     await writeFile(full, newBody);
     // Lifecycle: any write returns the doc to 'draft' (its content changed and needs re-review).
-    if (!name.startsWith("checklist-")) {
+    if (!isChecklist) {
+      let pruned = [], orgOk = true;
       await updateOrg((o) => {
         const d = (o.deliverables[name] = o.deliverables[name] || { status: "draft", versions: [] });
-        if (ver) d.versions = [...(d.versions || []), ver].slice(-20);
+        if (ver) {
+          const t = trimVersions([...(d.versions || []), ver]);
+          d.versions = t.keep;
+          pruned = t.drop;   // trimmed from metadata → delete the files too
+        }
         d.status = "draft"; d.updatedAt = Date.now();
-      }).catch(() => {});
+      }).catch((e) => { orgOk = false; console.warn(`⚠  ${name}: written to disk but its status/version metadata could not be updated: ${e.message}`); });
+      // Metadata was capped at 20 while the directory was never pruned, so everything past the cap
+      // became unreachable storage that grew forever. Keep disk and metadata in agreement.
+      if (orgOk) for (const v of pruned) await rm(path.join(versionsDir(), `${name}.${v.at}`), { force: true }).catch(() => {});
     }
-    return { ok: true, name, path: full, bytes: Buffer.byteLength(newBody), versioned: !!ver };
+    return { ok: true, name, path: full, bytes: Buffer.byteLength(newBody), versioned: !!ver, versionError: verError || undefined };
   } catch (e) { return { ok: false, error: e.message }; }
 }
 // Read back a document from drafts/ (so an agent can revise its own past deliverable).
@@ -3278,12 +3309,12 @@ const server = createServer(async (req, res) => {
     // throw that away.
     //
     // Precisely what survives: the archived FILE is readable via
-    // `GET /api/deliverables/:name/versions/:ts` (that endpoint reads the .versions directory directly,
-    // not org metadata), and the deletion is recorded in the audit log with the archive filename. What
-    // does NOT survive is the versions LIST, which is built from the org entry this removes — so keep the
-    // `archivedAs` value from the response, or find it later via `/api/audit?kind=deliverable`. The org
-    // entry is dropped rather than tombstoned on purpose: "deleted" is not one of the four real statuses,
-    // and a fake status would leak into the dashboards and counts that walk org.deliverables.
+    // `GET /api/deliverables/:name/versions/:ts`, and the deletion is recorded in the audit log with the
+    // archive filename. The versions LIST now finds it too — that endpoint reads the .versions directory
+    // rather than the org entry this removes, so the archive is discoverable without having kept the
+    // `archivedAs` value from the response. The org entry is still dropped rather than tombstoned on
+    // purpose: "deleted" is not one of the four real statuses, and a fake status would leak into the
+    // dashboards and counts that walk org.deliverables.
     //
     // Also drops the document's embedding rows. Without that, a deleted document keeps its vectors and
     // goes on being recalled into agent prompts as "relevant existing company work" — retrieval would
@@ -3313,11 +3344,30 @@ const server = createServer(async (req, res) => {
       return send(res, 200, { ok: true, name, archivedAs: `${name}.${at}`, bytes, previousStatus: removed?.status || "" });
     }
     // Deliverable version history (list of prior versions, newest first).
+    // The DIRECTORY is the record, not the org entry. Listing only from metadata hid every archive that
+    // metadata never had or no longer has: checklists (never given an entry), archives past the old
+    // 20-cap, and the snapshot DELETE leaves behind after removing the entry. Measured on the real
+    // corpus: 116 files on disk, 10 listed. `unlisted` marks the ones metadata doesn't know about, so
+    // the byte count is a stat rather than a remembered value.
     if (p.startsWith("/api/deliverables/") && p.endsWith("/versions") && req.method === "GET") {
       const name = path.basename(decodeURIComponent(p.slice("/api/deliverables/".length, -"/versions".length)));
       if (!validDeliverableName(name)) return send(res, 400, { error: "bad name" });
       const org = await readOrg();
-      return send(res, 200, { name, versions: (org.deliverables[name]?.versions || []).slice().reverse() });
+      const byTs = new Map((org.deliverables[name]?.versions || []).map((v) => [Number(v.at), { at: Number(v.at), bytes: v.bytes || 0 }]));
+      try {
+        const vdir = versionsDir();
+        for (const f of await readdir(vdir)) {
+          // `<name>.<ts>` — prefix match rather than a built regex, since filenames carry dots.
+          if (!f.startsWith(name + ".")) continue;
+          const tail = f.slice(name.length + 1);
+          if (!/^\d{10,}$/.test(tail)) continue;
+          const at = Number(tail);
+          if (byTs.has(at)) continue;
+          let bytes = 0; try { bytes = (await stat(path.join(vdir, f))).size; } catch {}
+          byTs.set(at, { at, bytes, unlisted: true });
+        }
+      } catch {}
+      return send(res, 200, { name, versions: [...byTs.values()].sort((a, b) => b.at - a.at) });
     }
     // A specific prior version's content (for the diff view).
     if (p.startsWith("/api/deliverables/") && p.includes("/versions/") && req.method === "GET") {

@@ -9,7 +9,7 @@ import {
   approvalActType, remoteBlocksApproval, REMOTE_MODE,
   packVec, unpackVec, cosine, rrfFuse, memoryKey, memoryText,
   objectiveSignature, dedupeMemories, deliverableEmbedText, deliverableTitle,
-  chunkDocument, deliverableChunks, modelUnreachable,
+  chunkDocument, deliverableChunks, modelUnreachable, trimVersions,
 } from "../server.mjs";
 
 let pass = 0, fail = 0;
@@ -215,6 +215,25 @@ eq("  empty title → null", normPlanItem({ title: "  " }), null);
 eq("  valid status honored", normPlanItem({ title: "T", status: "doing" }).status, "doing");
 eq("  bad status → todo", normPlanItem({ title: "T", status: "nonsense" }).status, "todo");
 chk("  owner defaults from arg", normPlanItem({ title: "T" }, "agent_9").agentId === "agent_9");
+
+// Version metadata was capped at 20 while the .versions DIRECTORY was never pruned, so archives past the
+// cap became files nothing listed and nothing deleted (measured: 116 on disk, 10 listed). Now the same
+// split drives both, which makes the off-by-one the entire risk: `drop` too small leaks forever, too
+// large unlinks an archive that is still listed. So assert keep+drop partition the input exactly.
+console.log("# trimVersions — metadata cap and on-disk deletion must agree");
+{
+  const mk = (n) => Array.from({ length: n }, (_, i) => ({ at: i + 1 }));
+  const partitions = (n, k) => { const t = trimVersions(mk(n), k); return JSON.stringify([...t.drop, ...t.keep]) === JSON.stringify(mk(n)); };
+  eq("  under the cap keeps everything, drops nothing", trimVersions(mk(3), 20), { keep: mk(3), drop: [] });
+  eq("  exactly at the cap drops nothing", trimVersions(mk(20), 20).drop, []);
+  eq("  one over the cap drops exactly the oldest", trimVersions(mk(21), 20).drop, [{ at: 1 }]);
+  chk("  one over the cap keeps exactly the cap", trimVersions(mk(21), 20).keep.length === 20);
+  eq("  five over the cap drops the five oldest, in order", trimVersions(mk(25), 20).drop.map((v) => v.at), [1, 2, 3, 4, 5]);
+  for (const [n, k] of [[0, 20], [1, 1], [20, 20], [21, 20], [25, 20], [100, 3]])
+    chk(`  keep+drop reconstruct the input exactly (n=${n}, keep=${k})`, partitions(n, k));
+  eq("  a non-array is handled, not thrown on", trimVersions(undefined, 20), { keep: [], drop: [] });
+  chk("  a nonsense cap floors at 1 rather than dropping everything", trimVersions(mk(4), 0).keep.length === 1);
+}
 
 // A run where EVERY model call failed did no work. Before this predicate existed, such a run reported
 // verdict "none" and the delegation safety net wrote its own failure placeholders into the inbox as a
