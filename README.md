@@ -120,6 +120,7 @@ for it once and remembers it. Bureau binds loopback only.
 | `BUREAU_REMOTE` | unset | `1` → Bureau won't **approve** hard-floor actions (deny still works); set it when reachable from a machine you trust less |
 | `BUREAU_EMBED_URL` | `http://127.0.0.1:11434` | local embedder for semantic memory (warns if non-loopback) |
 | `BUREAU_EMBED_MODEL` | `nomic-embed-text` | embedding model; recall falls back to BM25 if it's missing |
+| `BUREAU_TRIGGER_MIN_GAP_MS` | `15000` | minimum gap between two fires of one inbound trigger (retry-storm guard) |
 | `LATCH_DATA` | `…/openclaw-command-center/data` | where Latch's `auth.json` lives |
 
 ## Security

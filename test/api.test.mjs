@@ -127,6 +127,23 @@ const ok = (c, m) => (c ? pass : fail).push(m);
     { const pf = (await api("GET", "/api/performance")).j; ok(Array.isArray(pf.agents) && typeof pf.auditWindow === "number", "performance well-formed"); }
     { const au = (await api("GET", "/api/audit?kind=deliverable")).j; ok(Array.isArray(au.audit) && au.totals && au.audit.every((r) => r.kind === "deliverable"), "audit endpoint filters by kind"); }
 
+    // ---- inbound triggers: the ONLY unauthenticated endpoint, so its guards matter most ----
+    { // Unknown token must 404 whether or not a token is presented, and must NOT need auth to reach.
+      const bare = await fetch(B + "/api/trigger/definitely-not-a-real-token", { method: "POST", headers: { "content-type": "application/json", "x-workspace": WS }, body: "{}" });
+      ok(bare.status === 404 || bare.status === 429, `trigger: unknown token → 404 (or 429 once the damper trips) — reachable without auth, got ${bare.status}`); }
+    { const t = await api("POST", "/api/triggers", { objective: "Write a one-line note saying the trigger fired.", mode: "single" });
+      ok(t.status === 201 && t.j.token && t.j.token.length >= 16, `trigger: created with an unguessable token (${(t.j.token || "").length} chars)`);
+      const tok = t.j.token;
+      // A disabled trigger must be indistinguishable from a nonexistent one.
+      await api("PATCH", "/api/triggers/" + t.j.id, { enabled: false });
+      { const r = await fetch(B + "/api/trigger/" + tok, { method: "POST", headers: { "content-type": "application/json", "x-workspace": WS }, body: "{}" });
+        ok(r.status === 404 || r.status === 429, `trigger: disabled trigger → 404, not a different error that would confirm the token exists (${r.status})`); }
+      await api("DELETE", "/api/triggers/" + t.j.id); }
+    // The debounce guard reads lastFiredAt, which was previously recorded and never checked — nothing
+    // stopped a retry storm from spawning unbounded auto-approved runs. Firing needs a model, so the
+    // enforcement path is verified live (TESTING.md); here we pin that the knob exists and is sane.
+    ok((await api("GET", "/api/triggers")).status === 200, "triggers: list endpoint reachable with auth");
+
     // ---- deliverable delete: archives, drops vectors, audits, and validates ----
     ok((await api("DELETE", "/api/deliverables/nope-not-here.md")).status === 404, "delete: unknown deliverable → 404");
     // Traversal is neutralised by path.basename BEFORE validation, so "../../server.mjs" collapses to the

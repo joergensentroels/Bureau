@@ -63,6 +63,7 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
 | `chunkDocument` / `deliverableChunks` — boundaries, overlap, size + count caps, title per passage | units |
 | `/api/rag` deliverable retrieval inspection | api |
 | `DELETE /api/deliverables/:name` — validation, not-found, traversal neutralised | api (happy path live) |
+| Inbound triggers — unknown/disabled token → 404, token shape, list auth | api (guards live) |
 | `/api/embeddings` status + `/api/embeddings/backfill` + `/api/memory?lexical=` switch | api |
 | Approval seam validation (unknown id → 404, bad decision → 400) | api |
 | Role introspection `/api/whoami` (operator + readonly) | api |
@@ -85,6 +86,12 @@ _Done 2026-07-31: the page boots with no JS errors; unauthenticated, it correctl
 while keeping `👁 read-only` and `🔒 remote mode` hidden; and the **poller gate holds** — six boot requests
 and then silence, where the 2s/7s/12s pollers would otherwise have kept firing (they were measured at
 ~83 requests/minute before that fix)._
+
+**Inbound trigger guards end-to-end** (needs a live server + model; verified 2026-07-31, 9 checks): fires
+with no credential (by design), an immediate second fire and 5 rapid retries all 429 with `retryAfterMs`,
+refusals and the accepted fire both audited, sustained bad-token probing trips the failed-auth damper and
+appears in the audit log, and a disabled trigger stays a 404. Firing needs a model, so the enforcement
+path is scripted rather than in the server suite.
 
 **Deliverable deletion end-to-end** (needs a live server + embedder; verified 2026-07-31, 16 checks): the
 happy path needs a real file on disk, which only an agent run or a direct write produces, so the server
