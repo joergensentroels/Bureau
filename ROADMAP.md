@@ -28,8 +28,11 @@ cross-sibling handoff, so siblings can duplicate reasoning the sequential path w
 
   - **Keep parallel opt-in and off by default.** That was already the case; this is now a measured
     position rather than a guess.
-  - **Stage 2 — dependency-aware decompose. The reliability GATE IS PASSED (measured 2026-07-31); what
-    remains is a value question, and the value looks thin.**
+  - **Stage 2 — dependency-aware decompose: PAUSED, moved to the backlog by the operator (2026-07-31).**
+    Not blocked and not abandoned — the reliability gate passed and the measurements below stand. It is
+    parked because the value case is thin, and the one thing that should un-park it is a **correctness**
+    observation, not an appetite for speed: real runs showing siblings damaged by a missing predecessor's
+    output. Everything needed to resume is recorded here; nothing needs re-measuring.
     - `node eval/run-eval.mjs --type=decompose --reps=8 [--dependson]`, same cases, same ladder:
       baseline **50%** single-shot / 75% effective / 75% schema, p50 21.8s → with `dependsOn` **72%** /
       75% / 75%, p50 **8.2s**. Asking for the extra field made the flakiest call parse on the first rung
@@ -119,6 +122,26 @@ The remaining backlog, roughly by value (competitive-gap analysis, 2026-07-22):
 - **Office-view revamp** — the isometric office is functional (renders from `public/assets/iso/`),
   but its visual design was parked. Pure presentation, no behavior change.
 _(Deliverable delete is complete — API and UI both shipped, see below.)_
+- **Reboot survival — FIXED 2026-07-31 (`Install-Autostart.ps1`), needs one elevated run + a real reboot
+  to confirm.** All three processes lived in the **per-user Startup folder**, which only fires after an
+  interactive logon — and this machine has no auto-login. So an unattended reboot stopped at the lock
+  screen with Bureau, Latch and Ollama all down and no way to start them remotely. Tailscale *is* a real
+  service, so the symptom is a **502 from a hostname that resolves perfectly** — which reads like an app
+  crash rather than "nothing ever started", and is why this went unnoticed since 2026-07-19.
+  - Fix: three At-Startup Scheduled Tasks running as **SYSTEM** (no stored password, no logon needed),
+    with restart-on-failure and no execution time limit (the default 3-day cap would silently kill a
+    long-lived server). Run `.\Install-Autostart.ps1` from an **elevated** shell; `-WhatIf` previews and
+    `-Uninstall` reverts. The Startup shortcuts are left in place until a real reboot proves the tasks.
+  - **Two path traps that make a naive "just make it a service" attempt fail here**, both handled
+    explicitly: as SYSTEM, `os.homedir()` is `C:\Windows\system32\config\systemprofile`, so Bureau would
+    not find Latch's `auth.json` (and `exit(1)` on boot) and Ollama would report no models. `LATCH_DATA` is
+    now pinned from the repo layout inside `Start-Bureau.ps1`, and `OLLAMA_MODELS` is passed by the task.
+  - **Deliberately NOT auto-login.** It is the other fix, and it means the account password in the registry
+    plus an unlocked desktop on boot — a physical-security trade for remote availability. That is the
+    operator's call to make knowingly, and handling the password is not something to automate.
+  - **Still unverified until a real reboot: whether Ollama is happy under SYSTEM in session 0** (GPU
+    acceleration is the thing to watch). If models get slow, leave Ollama in the Startup folder and keep
+    only Latch + Bureau as tasks — Bureau degrades honestly when the model is gone (see `modelUnreachable`).
 - **Remote access — WORKING as of 2026-07-31, one step left (a device, not code).** Verified end to end
   from this host: `tailscale serve` proxies `https://<your-host>.<your-tailnet>.ts.net:8443` → `127.0.0.1:4173`
   (and `:443` → Latch on 8787), TLS valid, the UI and `/api/whoami` both 200 with a token, **401 without

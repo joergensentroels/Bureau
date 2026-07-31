@@ -39,6 +39,17 @@ if ($Local) {
 }
 $env:BUREAU_PORT = "$Port"
 
+# Pin LATCH_DATA to the repo layout rather than letting server.mjs fall back to os.homedir().
+# That fallback is correct when a person runs this, and WRONG under a service account: as SYSTEM,
+# os.homedir() is C:\Windows\system32\config\systemprofile, so Bureau would look for Latch's auth.json
+# somewhere it has never existed and exit(1) on boot — the failure a reboot-autostart task would hit
+# first. Derived from this script's own location, so it follows the repo if it moves.
+if (-not $env:LATCH_DATA) {
+  $guess = Join-Path (Split-Path -Parent $here) "openclaw-command-center\data"
+  if (Test-Path (Join-Path $guess "auth.json")) { $env:LATCH_DATA = $guess }
+  else { Write-Host "note: could not locate Latch's data dir beside this repo; relying on os.homedir()" -ForegroundColor DarkYellow }
+}
+
 # Say plainly whether this machine is exposing Bureau, and whether the guard matches. Getting this pair
 # wrong is the only way this script can hurt you, so it is reported rather than assumed.
 $tsExe = (Get-Command tailscale -ErrorAction SilentlyContinue).Source
