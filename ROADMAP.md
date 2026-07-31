@@ -122,8 +122,8 @@ _(Deliverable delete is complete — API and UI both shipped, see below.)_
 ## Shipped
 
 The core vision — *point Bureau at a goal and let it run itself, only surfacing finished, QA'd
-work* — is built, and guarded by an automated suite (`node test/run-all.mjs` — 292 headless
-assertions + a live `--e2e`; see `test/README.md`).
+work* — is built, and guarded by an automated suite (`node test/run-all.mjs` — 562 headless
+assertions across 7 suites + a live `--e2e`; see `test/README.md`).
 
 - **Safe autonomy** — per-agent allowlists → autonomy tiers → declarative policy rules, all under
   one inviolable hard floor (shell / api_call / email / over-ceiling spend always require you).
@@ -237,6 +237,50 @@ assertions + a live `--e2e`; see `test/README.md`).
   including two where BM25 returned nothing at all ("why lists help you not forget steps" → the
   checklist work; "picking what matters most next quarter" → the Q3 priority work, with no shared term
   since the corpus says "Q3"). One query surfaced no correct match in either mode; see **Next**._
+- **The failure paths, made loud** (2026-07-31) — an audit of every place Bureau stayed quiet when
+  something went wrong. Each of these was one line of `catch {}` or one missing sibling call, and none
+  of them broke a test, because nothing was watching.
+  - **A run that fails now leaves a record** (`f4558cf`). Measured: `POST /api/run` answered 201 with a
+    runId and left **zero** durable trace — `/api/runs` empty, `/api/audit` empty, `budget.runs` still 0.
+    Two one-call repros (company run with an empty roster; single run naming a deleted agent) did
+    `emit(error); finishRun()` and skipped `persistRun` entirely. Worst on the unattended paths: a
+    schedule whose agent was deleted no-op'd on every fire, forever, and the audit log agreed nothing
+    happened. All abnormal exits now go through one `failRun()` — audit row with `verdict:"error"` **and
+    the reason**, consumption booked (paid dollars leave the account the moment Latch serves a turn, so
+    dropping them would silently restore an agent's budget), run listed. The crash handler moved *inside*
+    `wsStore.run` — hung outside it, the bookkeeping would have filed every workspace's failures under
+    `default`. `/stop` on an unknown run 404s instead of confirming `ok:true`.
+  - **Notifications report their own failures** (`45a3d5e`). The one feature whose whole job is to reach
+    an absent operator was fire-and-forget over a response nobody read. Measured: a closed port was
+    completely silent (0 audit rows, `/api/notify` still showing the URL as healthy) and **HTTP 500
+    counted as success**; a *failed* run pushed nothing at all. Now `res.ok` is checked, failures are
+    warned and audited as `kind:"notify"` (a healthy webhook stays quiet — only failures and recoveries
+    are logged), `lastDelivery` is readable, `run_failed` fires, and **`POST /api/notify/test`** plus a
+    Test button let an operator confirm a URL instead of saving it and hoping.
+  - **An unreachable model is a failure, not a finished run** (`3860961`). With the model down and zero
+    tokens spent, a run reported verdict `none`, wrote an audited `file_write` with `ok=true`, and left a
+    draft in the inbox reading _"The team completed the assigned tasks."_ — a sentence **Bureau** wrote,
+    from a `catch` in the manager's synthesis fallback. That is precisely the fabrication the turn loop
+    guards against in a comment a few hundred lines above. Fallback text now says the summary is missing
+    rather than claiming success; `modelUnreachable(run)` (true only when calls were attempted and *every*
+    one failed) fails the run with the cause; and the delegation safety net will not invent a deliverable
+    out of Bureau's own placeholders. _Verified with a second Bureau on a dead `LATCH_URL` **and** a
+    control run against the real model — a guard that condemns working runs would be worse than the bug._
+- **Version archives: no orphans, nothing unreachable** (2026-07-31, `7e59b29`) — measured the real
+  corpus: **116 archive files on disk, 10 listed by any endpoint.** The DoD checklist is rewritten after
+  every verify pass and is deliberately kept out of `org.deliverables`, so each rewrite archived a file
+  with no org entry to list it from and nothing ever pruned `.versions/` — orphans from birth, one per
+  pass, forever (one objective had 19). Checklists are no longer archived; the 20-version cap now applies
+  to **disk** as well as metadata (`trimVersions`, unit-tested as a partition because the off-by-one
+  either leaks files or deletes an archive still listed); and the versions list reads the **directory**,
+  which made all 116 reachable again and means a deleted document's archive is discoverable without
+  having kept `archivedAs`. A failed archive write no longer loses the prior content silently.
+- **Memory de-duplicated at write time** (2026-07-31, `9b80669`) — `agent.memory` keeps 8 per agent and
+  `persistRun` blind-prepended, so repeats of one objective evicted distinct history: measured, **all
+  eight** of one agent's slots held e2e test objectives and three weeks of real work was gone. Recall-time
+  de-duplication existed for exactly this symptom but collapses duplicates in the *ranking* — it cannot
+  recover what the cap already discarded. Same preference logic now runs before truncating, so the cap
+  holds 8 *distinct* objectives (and a later summary-less re-run can't displace the attempt that worked).
 - **Deliverable deletion, archiving rather than destroying** (2026-07-31) — closed a gap that had always
   been there: a document could be written, versioned, QA'd, signed off and delivered but never removed.
   `DELETE /api/deliverables/:name` moves the file into the existing `.versions` store as `name.<ts>` (the
