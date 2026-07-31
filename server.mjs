@@ -518,11 +518,38 @@ function authRole(req) {
 const TRIGGER_MIN_GAP_MS = Math.max(0, Number(process.env.BUREAU_TRIGGER_MIN_GAP_MS ?? 15000));
 const AUTH_FAIL_MAX = 10;                      // failures inside the window before we start refusing
 const AUTH_FAIL_WINDOW_MS = 10 * 60 * 1000;
-const authFails = new Map();                   // ip -> { n, first, last }
+const authFails = new Map();                   // key -> { n, first, last }
 const clientIp = (req) => String(req.socket?.remoteAddress || "unknown");
+export const isLoopback = (ip) => {
+  const s = String(ip || "").replace(/^::ffff:/i, "");
+  return s === "127.0.0.1" || s === "::1" || s === "localhost" || s.startsWith("127.");
+};
+// What the damper counts failures against. `socket.remoteAddress` alone was wrong the moment Bureau went
+// behind `tailscale serve`: every request then arrives from 127.0.0.1, so a laptop on the tailnet, a phone,
+// and the operator's own browser all shared ONE bucket — and because a success cleared it, ordinary local
+// activity continuously wiped any remote attacker's counter. A brute-force alarm that the victim's own
+// traffic keeps resetting is not an alarm.
+//
+// So: when the connection comes from loopback we are behind a local reverse proxy, and a forwarding header
+// is the real client. Take the RIGHTMOST entry of x-forwarded-for — each proxy appends the address it saw,
+// so the last hop is the one our trusted proxy observed, while anything further left is attacker-supplied
+// and must never be trusted. A non-loopback peer's forwarding headers are ignored outright: a direct
+// remote caller can set any header it likes, and honouring that would let it forge a fresh identity per
+// request and evade the damper entirely — strictly worse than the bug being fixed.
+export function clientKey(req) {
+  const sock = String(req?.socket?.remoteAddress || "unknown");
+  if (!isLoopback(sock)) return sock;
+  const xff = String(req?.headers?.["x-forwarded-for"] || "");
+  const hops = xff.split(",").map((s) => s.trim()).filter(Boolean);
+  const last = hops.length ? hops[hops.length - 1] : "";
+  const real = last || String(req?.headers?.["x-real-ip"] || "").trim();
+  // `proxy:` prefix so a forwarded address can never collide with a directly-connecting peer of the same
+  // address, and so the audit log says which path a burst arrived by.
+  return real ? `proxy:${real}` : sock;
+}
 // Record one rejected credential. Returns true if this address should be throttled.
 function authFailure(req, p) {
-  const ip = clientIp(req), now = Date.now();
+  const ip = clientKey(req), now = Date.now();
   const prev = authFails.get(ip);
   const rolled = prev && now - prev.first > AUTH_FAIL_WINDOW_MS;
   // A window that ends after piling up gets one closing summary, so the true volume stays visible even
@@ -546,7 +573,28 @@ function authFailure(req, p) {
   }
   return e.n > AUTH_FAIL_MAX;
 }
-function authSuccess(req) { authFails.delete(clientIp(req)); }
+// A success used to DELETE the counter outright, which is the other half of the same bug: one legitimate
+// request erased an entire guessing burst, so on any shared-address deployment the damper could be held
+// open indefinitely by the victim's own traffic. Decay instead — a real user gets unstuck immediately
+// (their count drops below the threshold on the first success) while a burst still has to be re-earned
+// rather than wiped. Below the threshold a success clears it completely, so an honest typo leaves nothing
+// behind.
+const AUTH_FAIL_DECAY = 3;
+function authSuccess(req) {
+  const key = clientKey(req), e = authFails.get(key);
+  if (!e) return;
+  // Clamped, not merely decremented. A flat subtraction made "does one success unstick me?" depend on how
+  // many failures happened to precede it — 13 failures still left you throttled, which is a confusing
+  // thing to explain to someone holding a correct token. Clamping to MAX-DECAY makes it a guarantee: ONE
+  // success always leaves this client below the threshold with a few attempts of headroom, however big the
+  // burst was, while never wiping the record to zero the way the original delete did.
+  const floor = Math.max(0, AUTH_FAIL_MAX - AUTH_FAIL_DECAY);
+  const next = Math.min(e.n - AUTH_FAIL_DECAY, floor);
+  if (next <= 0) { authFails.delete(key); return; }   // a normal typo leaves nothing behind
+  e.n = next;
+  e.last = Date.now();
+  authFails.set(key, e);
+}
 
 // ---- Latch contextTags: hyphen-separated, never colon-separated --------------------------------
 // Latch SANITISES contextTags on the way in: colons are stripped, tags are lowercased, and a tag
@@ -3226,7 +3274,23 @@ const server = createServer(async (req, res) => {
     // explain a 403 instead of failing opaquely — useful when you deliberately hand a remote/untrusted
     // browser the narrower agentToken. Reveals no secret: the caller already proved which token it has.
     if (p === "/api/whoami" && req.method === "GET") {
-      return send(res, 200, { role, readonly: role === "readonly", readOnlyTokenConfigured: !!READ_TOKEN, remote: REMOTE_MODE });
+      // `client` reports what Bureau believes about the connection, because that is what the failed-auth
+      // damper keys on and it is invisible otherwise. Behind a reverse proxy (`tailscale serve`) every
+      // request arrives from loopback, so `socket` alone cannot tell two remote machines apart — this makes
+      // that observable instead of something you deduce from surprising throttle behaviour. Echoing the
+      // forwarding headers back reveals nothing: the caller (or its proxy) sent them.
+      return send(res, 200, {
+        role, readonly: role === "readonly", readOnlyTokenConfigured: !!READ_TOKEN, remote: REMOTE_MODE,
+        client: {
+          socket: String(req.socket?.remoteAddress || ""),
+          forwardedFor: String(req.headers["x-forwarded-for"] || ""),
+          forwarded: String(req.headers["forwarded"] || ""),
+          realIp: String(req.headers["x-real-ip"] || ""),
+          tailscaleUser: String(req.headers["tailscale-user-login"] || ""),
+          key: clientKey(req),                 // what the damper actually counts against
+          behindTrustedProxy: isLoopback(String(req.socket?.remoteAddress || "")),
+        },
+      });
     }
     // MCP endpoint (JSON-RPC 2.0). GET has no server-initiated SSE stream → 405 (spec-compliant).
     if (p === "/mcp") {

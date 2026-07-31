@@ -221,6 +221,36 @@ code execution on the Bureau host. Rules that follow:
    understand you have moved shell-approval authority to that browser. **Set `BUREAU_REMOTE=1`** (below)
    so Bureau refuses to be the instrument.
 
+### The failed-auth damper counts per CLIENT, including behind a proxy
+
+Repeated rejected credentials from one client get refused with a `429` and written to the audit log. Two
+things about it were wrong the moment Bureau went behind `tailscale serve`, and both were found by opening
+it from a second machine rather than by reading the code:
+
+- **It keyed on `socket.remoteAddress`.** Through a local reverse proxy every request arrives from
+  `127.0.0.1`, so a laptop, a phone and the operator's own browser shared **one** bucket: any client's
+  failures throttled everyone else.
+- **A success `delete`d the counter.** Combined with the above, ordinary local activity continuously wiped
+  any remote attacker's burst — a brute-force alarm the victim's own traffic keeps resetting.
+
+Now: when the connection is from **loopback** (so a local reverse proxy), the **rightmost** hop of
+`x-forwarded-for` is the client — each proxy appends the address it saw, so the last hop is what our proxy
+observed and everything left of it is caller-supplied. Keys are prefixed `proxy:` so a forwarded address can
+never collide with a directly-connecting peer. **A non-loopback peer's forwarding headers are ignored
+outright** — honouring them would let a direct remote caller mint a fresh identity per request and evade the
+damper completely, which is strictly worse than the bug being fixed. Verified live: `tailscale serve` does
+send `x-forwarded-for` (and `Tailscale-User-Login`), so per-client keying genuinely works here.
+
+A success now **clamps** the counter to `AUTH_FAIL_MAX - 3` rather than deleting it: one success always
+unsticks a legitimate client — whatever the burst size — while a guessing burst is never wiped to zero. A
+small count (an ordinary typo) still clears completely.
+
+`GET /api/whoami` reports `client.{socket, forwardedFor, key, behindTrustedProxy}` so what the damper is
+counting against is observable, instead of something you infer from surprising throttle behaviour.
+
+_Honest scope: the token is high-entropy, so this is an alarm and a brake, not the lock. Behind a NAT or a
+proxy that strips `x-forwarded-for`, clients still share a key — the clamp is what limits the damage there._
+
 ### Start it with `.\Start-Bureau.ps1`, not `node server.mjs`
 
 On a machine where `tailscale serve` proxies Bureau (this one does: `https://<host>.ts.net:8443` →

@@ -9,7 +9,7 @@ import {
   approvalActType, remoteBlocksApproval, REMOTE_MODE,
   packVec, unpackVec, cosine, rrfFuse, memoryKey, memoryText,
   objectiveSignature, dedupeMemories, deliverableEmbedText, deliverableTitle,
-  chunkDocument, deliverableChunks, modelUnreachable, trimVersions,
+  chunkDocument, deliverableChunks, modelUnreachable, trimVersions, clientKey, isLoopback,
 } from "../server.mjs";
 
 let pass = 0, fail = 0;
@@ -278,6 +278,38 @@ console.log("# trimVersions — metadata cap and on-disk deletion must agree");
     chk(`  keep+drop reconstruct the input exactly (n=${n}, keep=${k})`, partitions(n, k));
   eq("  a non-array is handled, not thrown on", trimVersions(undefined, 20), { keep: [], drop: [] });
   chk("  a nonsense cap floors at 1 rather than dropping everything", trimVersions(mk(4), 0).keep.length === 1);
+}
+
+// The failed-auth damper counts failures per client. `socket.remoteAddress` alone broke the moment Bureau
+// went behind `tailscale serve`: every request arrives from 127.0.0.1, so a laptop, a phone and the local
+// browser shared ONE bucket, and since a success cleared it the operator's own traffic continuously wiped
+// any attacker's counter. Verified live that tailscale DOES send x-forwarded-for, so per-client keying is
+// possible — but trusting a forwarding header is exactly where this fix goes wrong, hence both directions.
+console.log("# clientKey — per-client throttling behind a proxy, without trusting a forgeable header");
+{
+  const req = (addr, headers = {}) => ({ socket: { remoteAddress: addr }, headers });
+  for (const ip of ["127.0.0.1", "::1", "::ffff:127.0.0.1", "127.0.0.53"]) chk(`  loopback: ${ip}`, isLoopback(ip) === true);
+  for (const ip of ["100.64.0.1", "10.0.0.4", "8.8.8.8", "fd7a:115c::1", ""]) chk(`  not loopback: ${ip || "(empty)"}`, isLoopback(ip) === false);
+
+  eq("  loopback + no forwarding header → the socket itself", clientKey(req("127.0.0.1")), "127.0.0.1");
+  eq("  loopback + x-forwarded-for → the forwarded client", clientKey(req("127.0.0.1", { "x-forwarded-for": "100.64.0.1" })), "proxy:100.64.0.1");
+  eq("  two tailnet clients get DIFFERENT keys (the whole point)",
+    [clientKey(req("127.0.0.1", { "x-forwarded-for": "100.64.0.1" })), clientKey(req("127.0.0.1", { "x-forwarded-for": "100.64.0.2" }))],
+    ["proxy:100.64.0.1", "proxy:100.64.0.2"]);
+  // Each proxy APPENDS the address it saw, so the rightmost hop is the one our trusted proxy observed and
+  // everything left of it is caller-supplied. Taking the leftmost would let a client forge its identity.
+  eq("  a client-forged x-forwarded-for cannot win: rightmost hop is used", clientKey(req("127.0.0.1", { "x-forwarded-for": "1.2.3.4, 100.64.0.1" })), "proxy:100.64.0.1");
+  eq("  whitespace in the hop list is tolerated", clientKey(req("127.0.0.1", { "x-forwarded-for": " 1.2.3.4 ,  100.64.0.1 " })), "proxy:100.64.0.1");
+  // The dangerous direction: a DIRECT remote peer setting its own header. Honouring that would let it mint
+  // a fresh identity per request and evade the damper completely — worse than the bug being fixed.
+  eq("  a DIRECT remote peer's forwarding header is IGNORED", clientKey(req("203.0.113.9", { "x-forwarded-for": "127.0.0.1" })), "203.0.113.9");
+  eq("  ...even when it forges many hops", clientKey(req("203.0.113.9", { "x-forwarded-for": "a, b, c" })), "203.0.113.9");
+  eq("  x-real-ip is honoured only from loopback too", clientKey(req("127.0.0.1", { "x-real-ip": "100.1.1.1" })), "proxy:100.1.1.1");
+  eq("  and ignored from a direct peer", clientKey(req("203.0.113.9", { "x-real-ip": "127.0.0.1" })), "203.0.113.9");
+  eq("  an empty forwarding header falls back to the socket", clientKey(req("127.0.0.1", { "x-forwarded-for": "  ,  " })), "127.0.0.1");
+  eq("  a proxied key can never collide with a direct peer of the same address",
+    [clientKey(req("127.0.0.1", { "x-forwarded-for": "203.0.113.9" })), clientKey(req("203.0.113.9"))], ["proxy:203.0.113.9", "203.0.113.9"]);
+  eq("  a missing socket address does not throw", clientKey({ headers: {} }), "unknown");
 }
 
 // A run where EVERY model call failed did no work. Before this predicate existed, such a run reported
