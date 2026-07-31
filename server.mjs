@@ -717,7 +717,10 @@ async function fileApproval(agent, action, run = null) {
     // Open an issue. title = the issue title, command = the issue body, details = why (kept as the
     // approval's own details so the CEO sees the reasoning separately from what will be posted).
     const tgt = (await readOrg()).github || {};
-    return await latch("POST", "/api/approvals", {
+    // `.json`, not the whole {status, json} — every other case here unwraps, and the caller reads
+    // `approval.id`. Returning the wrapper made approvalId undefined, which broke BOTH the in-app seam
+    // (nothing to look up) and the dispatch's own poll for the resulting URL.
+    const { json } = await latch("POST", "/api/approvals", {
       type: "github_issue",
       title: `Open GitHub issue: ${String(action.title || "").slice(0, 120)}`,
       details: String(action.details || "").slice(0, 500),
@@ -728,12 +731,13 @@ async function fileApproval(agent, action, run = null) {
       riskLevel: "medium",
       contextTags: tags("github"),
     });
+    return json;
   }
   if ((action.actionType || "") === "github_comment") {
     // Comment on an existing issue. title carries the issue number the agent read via read_issues.
     const tgt = (await readOrg()).github || {};
     const num = parseInt(String(action.title || "").replace(/[^0-9]/g, ""), 10) || 0;
-    return await latch("POST", "/api/approvals", {
+    const { json } = await latch("POST", "/api/approvals", {
       type: "github_issue_comment",
       title: `Comment on GitHub issue #${num}`,
       details: String(action.details || "").slice(0, 500),
@@ -744,6 +748,7 @@ async function fileApproval(agent, action, run = null) {
       riskLevel: "medium",
       contextTags: tags("github"),
     });
+    return json;
   }
   if ((action.actionType || "") === "github_pr") {
     // The PR's content is the run's own deliverables — read back off disk so what the operator approves is
@@ -755,7 +760,7 @@ async function fileApproval(agent, action, run = null) {
       const r = await readDraftFile(n);
       if (r.ok && String(r.content || "").trim()) files.push({ path: `${String(action.dir || "deliverables").replace(/^\/+|\/+$/g, "")}/${r.name}`, content: r.content });
     }
-    return await latch("POST", "/api/approvals", {
+    const { json } = await latch("POST", "/api/approvals", {
       type: "github_pull_request",
       title: `Open GitHub PR: ${String(action.title || "").slice(0, 110)}`,
       details: `${String(action.details || "").slice(0, 400)}${files.length ? `\n\nFiles: ${files.map((f) => f.path).join(", ")}` : ""}`,
@@ -770,6 +775,7 @@ async function fileApproval(agent, action, run = null) {
       riskLevel: "medium",
       contextTags: tags("github"),
     });
+    return json;
   }
   if ((action.actionType || "") === "github_repo") {
     const tgt = (await readOrg()).github || {};
@@ -1950,11 +1956,21 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
     // A pull request needs something to change. Caught HERE rather than at execution, because the
     // alternative is filing an approval the operator has to read and decline for a PR that was always
     // going to be empty — and the model can still fix it, since the corrective message says how.
-    if (actType === "github_pr" && !(next.files || run.producedFiles || []).length) {
-      emit(run, "blocked", { agent: who, depth, actionType: actType, reason: "no deliverable to put in the pull request" });
-      logAudit({ kind: "blocked", runId: run.id, agentId: agent.id, agent: who, actionType: actType, error: "no produced files", decision: "denied" });
-      history.push({ role: "user", content: `A pull request needs a file to change, and this run has not saved one yet. Use file_write to save the finished document FIRST, then propose github_pr — it will include what you saved. Or finish.` });
-      continue;
+    //
+    // The candidate files are THIS agent's writes so far (`filesWritten`) plus anything earlier agents in a
+    // delegation produced (`run.producedFiles`). Using only the latter was a real bug: `run.producedFiles`
+    // is merged from `filesWritten` at the END of runAgentTask, so mid-task it is empty for the very file
+    // the agent just saved. Observed live — the agent wrote dod-checklist.md, proposed github_pr, and was
+    // told six times that it had produced nothing, while narrating "Pull request created" to the CEO. The
+    // guard was reading state that does not exist yet at the moment it runs.
+    if (actType === "github_pr") {
+      next.files = [...new Set([...(next.files || []), ...filesWritten, ...(run.producedFiles || [])])];
+      if (!next.files.length) {
+        emit(run, "blocked", { agent: who, depth, actionType: actType, reason: "no deliverable to put in the pull request" });
+        logAudit({ kind: "blocked", runId: run.id, agentId: agent.id, agent: who, actionType: actType, error: "no produced files", decision: "denied" });
+        history.push({ role: "user", content: `A pull request needs a file to change, and nothing has been SAVED yet in this run. Use file_write to save the finished document first — then github_pr will include it automatically. Or finish.` });
+        continue;
+      }
     }
     const tier = String(agent.tier || "supervised").toLowerCase();
     // The autonomy tier + policy + hard-floor decision lives in one place (decideApproval) so it's

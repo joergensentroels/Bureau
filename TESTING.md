@@ -138,8 +138,26 @@ while keeping `👁 read-only` and `🔒 remote mode` hidden; and the **poller g
 and then silence, where the 2s/7s/12s pollers would otherwise have kept firing (they were measured at
 ~83 requests/minute before that fix)._
 
-**GitHub pull requests — verified end to end** (needs a live Latch + permitted token; 2026-07-31, 13
-checks via `verify-gh-pr`). A **denied** approval produces no branch and no PR; an approved one creates the
+**An AGENT opens a pull request — the test that mattered** (needs a live Latch + model; 2026-07-31, 13
+checks via `verify-agent-pr`). A real run: the agent saves a document, proposes `github_pr`, the **hard
+floor refuses to auto-approve it at TRUSTED tier**, the in-app seam approves it, Latch branches/commits/
+opens the PR, the URL comes back to the agent, and the audit row reads `ok=true, decision="you"`.
+
+**This found two product bugs that 32 Latch-side checks could not**, because those bypassed `fileApproval`:
+the PR guard read `run.producedFiles`, which is only merged from `filesWritten` *after* the turn loop —
+so `github_pr` was unreachable mid-task; and all three new actions returned `{status, json}` instead of
+`json` from `fileApproval`, leaving `approval.id` undefined, which broke the seam **and** the dispatch's
+URL poll for issues and comments too. _Lesson: "verified end to end" needs a test that crosses every seam.
+Verifying the half you just wrote most carefully is the half least likely to be wrong._
+
+_Harness traps, each of which hid one of the above: there is **no `GET /api/run/:id/events`** — watch a
+live run over `/api/run/:id/stream` (SSE replays history on connect); polling the invented route returned a
+404 body whose `.events` was undefined, so a healthy run reported zero events and read as "the agent
+proposed nothing". Dump the **full event histogram** on failure, not just `propose` types — the `blocked`
+events were the answer. And give the agent an allowlist **wider** than the actions under test, or it burns
+turns being blocked by the allowlist rather than by the floor._
+
+**GitHub pull requests — the Latch-side executor** (2026-07-31, 13 checks via `verify-gh-pr`). A **denied** approval produces no branch and no PR; an approved one creates the
 branch, commits onto it and opens the PR, reporting number, URL and `branch → base`; the branch carries the
 `bureau/` prefix; the PR is **filtered out of `read_issues`** (GitHub returns PRs through the issues
 endpoint); and a PR with no files refuses with *"needs at least one file to change"* and returns to pending
