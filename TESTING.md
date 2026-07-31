@@ -96,6 +96,18 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
 
 ## Intentionally not auto-tested (accounted for — audit allowlist)
 
+**`run-eval --baseline` measures your CPU as much as the model — run it on an idle machine.** Identical
+code and cases, three times on 2026-07-31: `criteria.singleShotRate` **78%** (n=32), **80%** (n=20, p50
+9173ms), **100%** (n=60, p50 4227ms). The two low scores were taken while the test suite, the live e2e and
+a server restart were competing for the same Ollama; the 100% run had the machine to itself.
+`effectiveRate` and `schemaRate` were **100% in all three** — the retry ladder absorbed every first-shot
+miss, so no run ever received invalid JSON. **The red gate that stood since 2026-07-31 was load, not a
+regression.** The gate now records `n` and `p50ms` in the baseline and flags a p50 gap of ≥1.5× as
+non-comparable, so nobody re-baselines over a load artifact or hunts a prompt regression that isn't there.
+_These rates are over n = reps × cases (5 reps × 4 cases = 20), so a sample is worth 1/n — 5%, not 20%. I
+first wrote the tolerance floor as 1/reps and concluded the 15% gate could never pass; that was wrong, and
+the arithmetic is now shown in the output so it can be checked rather than trusted._
+
 **The recall eval's absolute numbers move when the corpus does — read the variant ORDERING.** Memory
 recall@3 read 10/12 on 2026-07-30 and 8/12 on 2026-07-31 with the ranker untouched. Every live
 `e2e-autonomy` run writes real memory entries against one agent and `agent.memory` keeps only 8, so test

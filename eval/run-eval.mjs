@@ -19,6 +19,14 @@
 //   node eval/run-eval.mjs --save-baseline  # write the LOCAL aggregates to eval/baseline.json
 //   node eval/run-eval.mjs --baseline       # compare LOCAL run to the baseline; exit 1 on regression
 //
+// On reps and the gate: these are RATES over n = reps × cases (5 reps × 4 criteria cases = n 20), so one
+// sample is worth 1/n. --baseline floors its tolerance at 1/n and prints the arithmetic. It also compares
+// p50 latency, because single-shot rate is confounded by machine load: identical code and cases scored
+// 78%/80% while other work competed for Ollama and 100% with the machine idle, `effective` and
+// `schema-valid` at 100% throughout. **Run the gate on an otherwise idle machine, or its verdict is about
+// your CPU.** Baselines written before 2026-07-31 carry no `n`/`p50ms`; the gate says so rather than
+// assuming.
+//
 // No dependencies. Node built-ins only.
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
@@ -234,8 +242,12 @@ async function main() {
   console.log(`\nReport: eval/reports/${stamp}.{json,md}`);
 
   // Baseline: local aggregates keyed by type (the reliability floor we don't want to regress below).
+  // `n` and `p50ms` are recorded so a later comparison can tell how much precision the numbers carry and
+  // whether the two runs were made under comparable load. Without them a rate is a number with no error
+  // bar and no context — which is how a score gets argued about instead of interpreted.
   const localBaseline = Object.fromEntries(results.filter((r) => r.mode === "local").map((r) => [r.type,
-    { singleShotRate: r.agg.singleShotRate, effectiveRate: r.agg.effectiveRate, schemaRate: r.agg.schemaRate }]));
+    { singleShotRate: r.agg.singleShotRate, effectiveRate: r.agg.effectiveRate, schemaRate: r.agg.schemaRate,
+      n: r.agg.n, p50ms: r.agg.p50ms }]));
 
   if (SAVE_BASELINE) {
     await writeFile(BASELINE_FILE, JSON.stringify({ at: report.at, reps: REPS, local: localBaseline }, null, 2));
@@ -246,19 +258,48 @@ async function main() {
     let base;
     try { base = JSON.parse(await readFile(BASELINE_FILE, "utf8")); }
     catch { console.error("\nNo eval/baseline.json — run with --save-baseline first."); process.exit(2); }
-    const regressions = [];
+    // These rates are measured over n = reps × CASES, not over reps — at the default 5 reps and 4
+    // criteria cases n is 20, so one sample is worth 5%, not 20%. (I first wrote this block using 1/reps
+    // and concluded the 15% gate could never pass. That was wrong: a 5% resolution against a 15%
+    // tolerance is fine, and the red gate was a real 4-out-of-20 difference, not a rounding artifact.)
+    //
+    // Two things still belong here:
+    //  1. A tolerance finer than 1/n cannot be met, so floor it at 1/n and show the arithmetic.
+    //  2. Report p50 alongside, because MACHINE LOAD confounds single-shot rate and the gate cannot see
+    //     it. Measured 2026-07-31 on identical code and cases, hours apart: criteria single-shot 78%
+    //     (n=32), 80% (n=20, p50 9173ms), and 100% (n=60, p50 4227ms). The two low scores were taken
+    //     while the test suite, the live e2e and a server restart were competing for the same Ollama; the
+    //     100% run had the machine to itself. `effective` and `schema-valid` were 100% in all three, so
+    //     the ladder absorbed every first-shot miss and no run ever received invalid JSON. A single-shot
+    //     drop next to a doubled p50 is a statement about the machine, not the model — flag it, so nobody
+    //     re-baselines over it or goes hunting a prompt regression that was never there.
+    const regressions = [], noise = [], caveats = [];
     for (const [type, cur] of Object.entries(localBaseline)) {
       const b = base.local?.[type]; if (!b) continue;
+      const nCur = Number(cur.n) || 0, nBase = Number(b.n) || 0;
+      const res = Math.max(nCur ? 1 / nCur : 0, nBase ? 1 / nBase : 0);
+      const effTol = Math.max(TOL, res);
+      if (!nBase) caveats.push(`${type}: the baseline records no sample count (it predates that field), so its precision is unknown`);
+      if (effTol > TOL) caveats.push(`${type}: tolerance floored ${pct(TOL)} → ${pct(effTol)} — one sample is worth ${pct(res)} at n=${Math.min(...[nCur, nBase].filter(Boolean))}`);
+      if (b.p50ms && cur.p50ms) {
+        const ratio = Math.max(cur.p50ms / b.p50ms, b.p50ms / cur.p50ms);
+        if (ratio >= 1.5) caveats.push(`${type}: p50 ${b.p50ms}ms → ${cur.p50ms}ms (${ratio.toFixed(1)}× apart) — NOT comparable load; treat a single-shot difference as suspect before believing it`);
+      }
       for (const metric of ["singleShotRate", "effectiveRate", "schemaRate"]) {
         const drop = (b[metric] ?? 0) - (cur[metric] ?? 0);
-        if (drop > TOL) regressions.push(`${type}.${metric}: ${pct(b[metric])} → ${pct(cur[metric])} (−${pct(drop)})`);
+        const line = `${type}.${metric}: ${pct(b[metric])} → ${pct(cur[metric])} (−${pct(drop)}, n ${nBase || "?"} → ${nCur || "?"})`;
+        if (drop > effTol) regressions.push(line);
+        else if (drop > 0) noise.push(line);
       }
     }
+    if (caveats.length) console.log(`\nHow to read this comparison:\n  ${caveats.join("\n  ")}`);
+    if (noise.length) console.log(`\n~ within one sample, NOT treated as a regression:\n  ${noise.join("\n  ")}`);
     if (regressions.length) {
-      console.error(`\n✗ REGRESSION vs baseline (tolerance ${pct(TOL)}):\n  ${regressions.join("\n  ")}`);
+      console.error(`\n✗ REGRESSION vs baseline:\n  ${regressions.join("\n  ")}`);
+      console.error(`  Before re-baselining: was the machine idle? Re-run with nothing else touching Ollama.`);
       process.exit(1);
     }
-    console.log(`\n✓ No regression vs baseline (tolerance ${pct(TOL)}).`);
+    console.log(`\n✓ No regression vs baseline.`);
   }
 }
 
