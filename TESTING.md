@@ -64,6 +64,8 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
 | `/api/rag` deliverable retrieval inspection | api |
 | `DELETE /api/deliverables/:name` — validation, not-found, traversal neutralised | api (happy path live) |
 | Inbound triggers — unknown/disabled token → 404, token shape, list auth | api (guards live) |
+| Failed-run accounting — abnormal exits audited with a reason, counted, listed in `/api/runs` | workspaces |
+| `/stop` on an unknown run → 404 (it used to confirm `ok:true`) | robustness |
 | Goal-linked schedule lifecycle — done disables, re-open resumes, delete removes | api |
 | `nextRunAt` on PATCH — settable, clamped to a year, non-numeric → 400 | api |
 | `/api/embeddings` status + `/api/embeddings/backfill` + `/api/memory?lexical=` switch | api |

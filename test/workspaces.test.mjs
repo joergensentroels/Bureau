@@ -21,6 +21,7 @@ const api = async (m, p, body, ws) => {
 const pass = [], fail = [];
 const ok = (c, m) => (c ? pass : fail).push(m);
 const orgOf = async (ws) => (await api("GET", "/api/org", null, ws)).j;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 (async () => {
   const before = await orgOf("default");
@@ -48,6 +49,35 @@ const orgOf = async (ws) => (await api("GET", "/api/org", null, ws)).j;
 
   // unknown workspace header falls back to default (never a phantom company)
   ok((await orgOf("no-such-ws-xyz")).agents.length === dAgents, "unknown workspace id falls back to default");
+
+  // A run that ends abnormally must still be accounted for. Both of these fail before any LLM call, so
+  // they belong in the model-free suite — and B is empty, which is exactly the precondition. Before the
+  // fix, POST /api/run answered 201 and then left NOTHING: no /api/runs entry, no audit row, budget.runs
+  // still 0. Worst on the unattended paths, where a schedule whose agent was deleted no-ops forever and
+  // the audit log agrees nothing happened.
+  const auditRuns = async (ws) => ((await api("GET", "/api/audit", null, ws)).j.audit || []).filter((x) => x.kind === "run");
+  const waitForRunRows = async (ws, n) => {
+    for (let i = 0; i < 25; i++) { const rows = await auditRuns(ws); if (rows.length >= n) return rows; await sleep(200); }
+    return auditRuns(ws);
+  };
+  const noRoster = await api("POST", "/api/run", { mode: "company", objective: "Write a status note.", autoApprove: true }, b.id);
+  ok(noRoster.status === 201 && noRoster.j.runId, "a company run against an empty roster is accepted (201)");
+  const rows1 = await waitForRunRows(b.id, 1);
+  ok(rows1.length === 1 && rows1[0].verdict === "error", "…and audited as a failed run (it used to leave no trace at all)");
+  ok(/no agents|no roster/i.test(rows1[0]?.error || ""), "the audit row says WHY it failed, not just that it did");
+  ok(((await api("GET", "/api/runs", null, b.id)).j.runs || []).length === 1, "the failed run is listed in /api/runs");
+  const orgB = await orgOf(b.id);
+  ok((orgB.budget?.runs || 0) === 1, "org.budget.runs counts the failed run");
+  ok((orgB.activity || [])[0]?.verdict === "error", "org.activity records it as an error");
+
+  const ghost = await api("POST", "/api/run", { mode: "single", agentId: "agent_deleted_yesterday", objective: "Do the thing.", autoApprove: true }, b.id);
+  const rows2 = await waitForRunRows(b.id, 2);
+  ok(rows2.length === 2, "a single run naming a deleted agent is audited too");
+  ok(/agent_deleted_yesterday/.test((rows2.find((x) => x.runId === ghost.j.runId) || {}).error || ""), "and the row names the agent that was missing");
+  ok((await orgOf(b.id)).agents.length === 0, "neither failed run invented an agent in B");
+
+  // /stop used to answer {ok:true} for any id at all, including one that never existed.
+  ok((await api("POST", "/api/run/nope_run/stop", {}, b.id)).status === 404, "stop: unknown run → 404 (it used to claim ok:true)");
 
   // Deletion must be THOROUGH. The UI promises "all its data (agents, deliverables, history)", and
   // embeddings were silently exempt: that table postdates the delete handler, so a deleted company left

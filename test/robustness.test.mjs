@@ -67,7 +67,11 @@ const ok = (c, m) => (c ? pass : fail).push(m);
     { const r = await fetch(B + "/..%2f..%2fserver.mjs"); ok(r.status === 403 || r.status === 404, "static traversal to server.mjs blocked"); }
 
     // ---- run lifecycle endpoints on unknown ids ----
-    ok((await api("POST", "/api/run/nope_run/stop")).j.ok === true, "stop on unknown run is a no-op ok (idempotent)");
+    // This line used to demand {ok:true} and call it "idempotent" — while the three below demand 404
+    // from plan/stream on the very same unknown id. Confirming "stopped" for a run the server has no
+    // handle on isn't idempotence, it's a false confirmation, and the inconsistency sat here in plain
+    // sight because the word "idempotent" made it read as a decision rather than an oversight.
+    ok((await api("POST", "/api/run/nope_run/stop")).status === 404, "stop on unknown run → 404, like its plan/stream siblings");
     ok((await api("POST", "/api/run/nope_run/plan", { decision: "approve" })).status === 404, "plan on unknown run → 404");
     { const r = await fetch(B + "/api/run/nope_run/stream", { headers: { "x-workspace": WS, ...AUTH } }); ok(r.status === 404, "stream of unknown run → 404"); }
     { const r = (await api("GET", "/api/runs/nope_run")).j; ok(r.summary === null && Array.isArray(r.actions) && r.replayable === false, "runs/:id reconstructs empty for unknown id (200, null summary)"); }

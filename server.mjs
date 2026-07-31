@@ -2062,7 +2062,7 @@ export async function paidProviderAvailable() {
 async function runSingle(run) {
   const org = await readOrg();
   const agent = org.agents.find((a) => a.id === run.agentId);
-  if (!agent) { emit(run, "error", { message: "agent not found" }); return finishRun(run); }
+  if (!agent) return failRun(run, `no agent with id "${run.agentId}" — it may have been deleted since this run was scheduled`);
   emit(run, "start", { agent: agent.name, role: agent.role, objective: run.objective, hush: run.hush });
   run.memoryEntries = []; run.producedFiles = []; run.paidAvailable = await paidProviderAvailable();
   run.maxPaidUsd = Number(org.guardrails?.maxPaidUsdPerRun) || 0;   // server-side per-run paid ceiling (0 = unlimited)
@@ -2070,6 +2070,7 @@ async function runSingle(run) {
   // The single agent funds the JSON-critical orchestration calls (deriveCriteria/verifyRun) for its run.
   run.orch = { payerId: agent.id, budgetUsd: Number(agent.budgetUsd) || 0, startPaidSpent: Number(agent.paidSpentUsd) || 0 };
   const tally = {};
+  run.perAgentTally = tally;   // visible on the run so failRun can still book what was consumed
   const worker = async (objective) => {
     const { summary, tokens } = await runAgentTask(run, agent, org, objective);
     addTally(tally, agent.id, tokens);
@@ -2489,6 +2490,7 @@ async function runGated(run, worker, persistExtra, perAgentTally) {
   const crit = await deriveCriteria(run.objective, run);
   run.criteria = crit.items;
   let tokens = crit.tokens;
+  run.tokensSoFar = tokens;   // kept current so an abnormal exit still books the real consumption
   if (run.criteria.length) emit(run, "criteria", { items: run.criteria });
   run.producedFiles = run.producedFiles || [];
   // Persist the team checklist as an editable markdown file, refreshed after every verify pass.
@@ -2523,12 +2525,14 @@ async function runGated(run, worker, persistExtra, perAgentTally) {
   while (true) {
     const w = await worker(objective);
     tokens += w.tokens || 0;
+    run.tokensSoFar = tokens;
     product = { product: w.product || "", body: w.body || "" };
     if (!run.criteria.length || run.stopped) break;
     // Only (re-)verify criteria not already met — cheaper, and a flaky re-check can't regress a pass.
     const toCheck = run.criteria.filter((c) => c.status !== "met");
     const v = await verifyRun(run.objective, product, run.producedFiles, toCheck, run);
     tokens += v.tokens;
+    run.tokensSoFar = tokens;
     const byId = new Map(v.items.map((it) => [it.id, it]));
     run.criteria = run.criteria.map((c) => {
       const m = byId.get(c.id);
@@ -2579,11 +2583,12 @@ async function runGated(run, worker, persistExtra, perAgentTally) {
 // and delegation recurses down the reporting lines from there.
 async function runDelegation(run) {
   const org = await readOrg();
-  if (!org.agents.length) { emit(run, "error", { message: "no agents to delegate to" }); return finishRun(run); }
+  if (!org.agents.length) return failRun(run, "no agents to delegate to — this company has no roster", { agent: "Manager" });
   emit(run, "start", { agent: "Manager", role: "Manager", objective: run.objective, company: true, hush: run.hush });
   const roots = org.agents.filter((a) => !(a.managerId || ""));
   const topReports = roots.length ? roots : org.agents;
   const tally = {};
+  run.perAgentTally = tally;   // visible on the run so failRun can still book what was consumed
   run.memoryEntries = []; run.producedFiles = []; run.paidAvailable = await paidProviderAvailable();
   run.maxPaidUsd = Number(org.guardrails?.maxPaidUsdPerRun) || 0;   // server-side per-run paid ceiling (0 = unlimited)
   org._mcpTools = await loadMcpTools();   // external MCP tools agents may call this run (empty if unconfigured)
@@ -2611,6 +2616,36 @@ function finishRun(run, done = {}) {
   run.done = true;
   for (const res of run.listeners) res.end();
   run.listeners.clear();
+}
+
+// A run can end abnormally two ways: a precondition fails (no agents to delegate to, or the named
+// agent is gone), or something throws mid-flight. Every one of those used to VANISH — the error went
+// to the run's SSE stream and the console, and nothing at all reached the audit log, /api/runs,
+// org.activity, or the token/dollar ledgers. Verified live: POST /api/run answered 201 with a runId
+// and afterwards `/api/runs` had 0 entries, `/api/audit` had 0 rows and budget.runs was still 0. The
+// run was, to every durable surface, something that never happened.
+//
+// That is worst on the paths nobody is watching. A schedule or trigger whose agent was deleted
+// no-ops on every fire, forever, and the audit log agrees that nothing occurred.
+//
+// It also books what was already consumed. Paid dollars especially: they left the account the moment
+// Latch served the turn, so discarding run.paidTally would silently restore the agent's budget and let
+// repeated failures spend straight past it.
+async function failRun(run, message, extra = {}) {
+  if (run.done) return;   // already finished and accounted for — a late throw must not double-book it
+  const msg = String(message || "run failed").slice(0, 300);
+  emit(run, "error", { message: msg });
+  const tokens = Number(run.tokensSoFar) || 0;
+  const costUsd = Math.round(Object.values(run.paidTally || {}).reduce((s, v) => s + v, 0) * 1e6) / 1e6;
+  try {
+    await persistRun(run.objective, tokens, { ...extra, verdict: "error", error: msg }, run.perAgentTally, run.memoryEntries, run.paidTally);
+  } catch (e) {
+    // Don't let a failed persist swallow the audit row too — that's how a failure becomes invisible.
+    console.warn(`⚠  run ${run.id}: could not persist the failed run (${e.message}) — auditing it anyway`);
+  }
+  logAudit({ kind: "run", runId: run.id, agent: extra.agent || "", objective: run.objective, tokens, costUsd,
+    verdict: "error", error: msg, decision: run.autoApprove ? "auto" : "you" });
+  finishRun(run, { verdict: "error", error: msg });
 }
 
 // Create a run object and kick it off. Returns { run, done } where done resolves when it finishes.
@@ -2737,7 +2772,13 @@ function beginRun(spec) {
   const go = mode === "company" ? runDelegation : runSingle;
   // Run the entire (async, timer-driven) execution inside the run's workspace context, so every
   // readOrg/updateOrg/draft it touches — even after the originating request returns — hits the right company.
-  const done = wsStore.run({ ws: run.ws }, () => go(run)).catch((e) => { console.error("run failed:", e); emit(run, "error", { message: e.message }); finishRun(run); });
+  // The .catch lives INSIDE wsStore.run: registered there it inherits the workspace context, so the
+  // audit row and ledger writes for a crashed run land in the run's own company. Hung outside (as it
+  // was), failRun's updateOrg/logAudit would have written to "default" whatever workspace crashed.
+  const done = wsStore.run({ ws: run.ws }, () => go(run).catch((e) => {
+    console.error(`run ${run.id} failed:`, e);
+    return failRun(run, e?.message || String(e), { agent: mode === "company" ? "Manager" : "" });
+  }));
   return { run, done };
 }
 
@@ -3945,8 +3986,12 @@ const server = createServer(async (req, res) => {
     }
     if (p.startsWith("/api/run/") && p.endsWith("/stop") && req.method === "POST") {
       const id = p.split("/")[3];
-      const run = runs.get(id); if (run) run.stopped = true;
-      return send(res, 200, { ok: true });
+      const run = runs.get(id);
+      // Used to answer {ok:true} for ANY id, including one that never existed — "stopped" for something
+      // it had no handle on. Its sibling /steer already 404'd; this one just didn't look.
+      if (!run) return send(res, 404, { error: "no such run (it may have finished and been pruned)" });
+      run.stopped = true;
+      return send(res, 200, { ok: true, stopped: !run.done, alreadyFinished: !!run.done });
     }
     // Mid-run steering: pause/resume the run, or inject a CEO course-correction that active agents
     // pick up on their next turn. Same shape as /stop and /plan — mutate a field on the in-memory run.
