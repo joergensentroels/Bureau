@@ -28,10 +28,24 @@ cross-sibling handoff, so siblings can duplicate reasoning the sequential path w
 
   - **Keep parallel opt-in and off by default.** That was already the case; this is now a measured
     position rather than a guess.
-  - **Stage 2 — dependency-aware decompose** — the case for it is now *weaker*, not stronger: if blanket
-    concurrency yields 0.92x locally, ordering it more cleverly cannot help locally either. Stage 2 only
-    pays off where the underlying calls actually overlap, i.e. the paid tier. Still gated on measuring
-    whether a `dependsOn` field regresses decompose reliability (already the flakiest JSON call).
+  - **Stage 2 — dependency-aware decompose. The reliability GATE IS PASSED (measured 2026-07-31); what
+    remains is a value question, and the value looks thin.**
+    - `node eval/run-eval.mjs --type=decompose --reps=8 [--dependson]`, same cases, same ladder:
+      baseline **50%** single-shot / 75% effective / 75% schema, p50 21.8s → with `dependsOn` **72%** /
+      75% / 75%, p50 **8.2s**. Asking for the extra field made the flakiest call parse on the first rung
+      MORE often and roughly halved median latency — the opposite of the feared regression. Likely
+      mechanism: a more concrete schema leaves less room to wander into a `<think>` block.
+    - The field is also **usable, not merely present**: 100% of tasks carry `dependsOn`, and 100% are
+      integer arrays referencing *earlier* tasks (a forward or self reference would parse and still be
+      unexecutable). Graphs are stable and sensible — `0:[] 1:[0] 2:[0,1]`.
+    - **But the value case stayed weak.** Blanket parallel is 0.92x locally and already delivers ~1.7x on
+      paid, and **dependencies are ALREADY conveyed implicitly by task order** — the decompose prompt says
+      "put the dependency FIRST — each person is given the finished work of everyone listed before them".
+      Stage 2 would make that explicit, not new. So it is a scheduling refinement on top of a 1.7x that
+      exists, not a way to unlock parallelism.
+    - **Recommendation: don't build Stage 2 for its own sake.** The honest reason to revisit it is if
+      real runs show dependent tasks being damaged by blanket parallel (siblings missing a predecessor's
+      output) — that is a correctness argument, and a better one than speed.
   - **PAID TIER SETTLED 2026-07-31 — parallel is worth ~1.7x there (range 1.57–1.73x), against 0.92x
     locally. Total cost of the measurement: $1.48 over 5 pairs.**
     - **The answer:** 3 matched pairs (equal sub-task counts, no provider error, no cap hit) gave

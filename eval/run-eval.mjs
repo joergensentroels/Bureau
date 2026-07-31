@@ -51,6 +51,11 @@ const WANT_PAID = flag("paid");
 const SAVE_BASELINE = flag("save-baseline");
 const CHECK_BASELINE = flag("baseline");
 const TOL = Number(opt("tol", 0.15)) || 0.15;   // regression tolerance (absolute rate drop) for --baseline
+// --dependson: ask decompose for an extra `dependsOn` field per task. This is the GATE on parallel
+// Stage 2 (dependency-aware decompose): decompose is already the flakiest JSON call at 50% single-shot,
+// so before building anything on `dependsOn` we need to know whether merely asking for it makes that
+// worse. Run the same command with and without the flag and compare.
+const WANT_DEPENDSON = flag("dependson");
 
 const pct = (x) => `${(x * 100).toFixed(0)}%`;
 const mean = (xs) => xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0;
@@ -81,7 +86,11 @@ async function runLadder(msgs, budgets, mode) {
 // Score one parsed object against the matching production validator; returns {schemaOk, extra}.
 function score(type, obj, kase) {
   if (type === "criteria") { const v = validateCriteria(obj); return { schemaOk: v.ok, count: v.count }; }
-  if (type === "decompose") { const v = validateDecompose(obj, kase.reports); return { schemaOk: v.ok, count: v.count, fannedOut: v.fannedOut }; }
+  if (type === "decompose") {
+    const v = validateDecompose(obj, kase.reports);
+    const dep = WANT_DEPENDSON ? scoreDependsOn(obj) : null;
+    return { schemaOk: v.ok, count: v.count, fannedOut: v.fannedOut, ...(dep ? { depPresent: dep.present, depWellFormed: dep.wellFormed } : {}) };
+  }
   if (type === "verify") {
     const v = validateVerify(obj, kase.criteria.length);
     let correct = 0;
@@ -91,9 +100,45 @@ function score(type, obj, kase) {
   return { schemaOk: false };
 }
 
+// The exact schema line inside the production decompose system prompt. Patched rather than rewritten so
+// the variant differs from production by ONE field and nothing else — otherwise the A/B measures a
+// different prompt instead of the cost of the extra field.
+const DECOMPOSE_SCHEMA_LINE = '{ "plan":"one sentence on your approach", "tasks":[{"assignee":"<exact report name>","task":"<what to do>"}] }';
+const DEPENDSON_SCHEMA_LINE = '{ "plan":"one sentence on your approach", "tasks":[{"assignee":"<exact report name>","task":"<what to do>","dependsOn":[<0-based indexes of earlier tasks whose output this one needs; [] if independent>]}] }';
+function withDependsOn(msgs) {
+  const sys = msgs[0];
+  if (!String(sys?.content || "").includes(DECOMPOSE_SCHEMA_LINE))
+    // Fail loudly. A silent no-op here would run the BASELINE prompt twice and report "no regression",
+    // which is exactly the shape of bug that let `hush:true` make an earlier --paid run measure nothing.
+    throw new Error("--dependson: the decompose schema line no longer matches; update DECOMPOSE_SCHEMA_LINE in run-eval.mjs");
+  const patched = String(sys.content)
+    .replace(DECOMPOSE_SCHEMA_LINE, DEPENDSON_SCHEMA_LINE)
+    + '\nEvery task MUST carry "dependsOn": an array of 0-based indexes of earlier tasks in this same list whose finished output it needs. Use [] for a task that can start immediately.';
+  return [{ ...sys, content: patched }, ...msgs.slice(1)];
+}
+// How well the model actually FILLED the field — separate from whether the JSON parsed. A variant that
+// parses fine but emits garbage dependencies is no use for building topological levels on.
+function scoreDependsOn(obj) {
+  const tasks = Array.isArray(obj?.tasks) ? obj.tasks : [];
+  if (!tasks.length) return null;
+  let present = 0, wellFormed = 0;
+  tasks.forEach((t, i) => {
+    if (!("dependsOn" in (t || {}))) return;
+    present++;
+    const d = t.dependsOn;
+    // Well-formed = an array of integers that all point at EARLIER tasks (a forward or self reference
+    // cannot be executed in order, so it is not usable even though it parses).
+    if (Array.isArray(d) && d.every((x) => Number.isInteger(x) && x >= 0 && x < i)) wellFormed++;
+  });
+  return { present: present / tasks.length, wellFormed: wellFormed / tasks.length };
+}
+
 function buildMsgs(type, kase) {
   if (type === "criteria") return buildCriteriaMsgs(kase.objective);
-  if (type === "decompose") return buildDecomposeMsgs("Manager", kase.reports, kase.objective);
+  if (type === "decompose") {
+    const base = buildDecomposeMsgs("Manager", kase.reports, kase.objective);
+    return WANT_DEPENDSON ? withDependsOn(base) : base;
+  }
   if (type === "verify") return buildVerifyMsgs(kase.objective, kase.criteria.map((c) => ({ text: c.text })), kase.evidence);
   throw new Error(`unknown type ${type}`);
 }
@@ -119,6 +164,11 @@ async function evalTypeMode(type, cases, mode) {
     effectiveRate: mean(rows.map((r) => r.effectiveParseOk ? 1 : 0)),
     schemaRate: mean(rows.map((r) => r.schemaOk ? 1 : 0)),
     fanOutRate: type === "decompose" ? mean(schemaRows.map((r) => r.fannedOut ? 1 : 0)) : null,
+    // Aggregated, not just computed: score() produced these per row and nothing carried them into the
+    // report, so the fill quality of `dependsOn` was silently discarded and had to be probed by hand.
+    // "Parses" and "is usable" are different questions and both belong in the output.
+    depPresentRate: WANT_DEPENDSON && schemaRows.length ? mean(schemaRows.map((r) => r.depPresent || 0)) : null,
+    depWellFormedRate: WANT_DEPENDSON && schemaRows.length ? mean(schemaRows.map((r) => r.depWellFormed || 0)) : null,
     verdictAccuracy: type === "verify" && vc.length ? mean(vc.map((r) => r.verdictCorrect / r.verdictTotal)) : null,
     verdictSample: type === "verify" ? vc.length : null,
     p50ms: Math.round(quantile(rows.map((r) => r.ms), 0.5)),
@@ -135,6 +185,7 @@ function renderTable(results) {
   lines.push(hdr, sep);
   for (const { type, mode, agg } of results) {
     const extra = type === "decompose" ? `fan-out ${agg.fanOutRate == null ? "—" : pct(agg.fanOutRate)}`
+      + (agg.depWellFormedRate == null ? "" : ` · dependsOn present ${pct(agg.depPresentRate)} / usable ${pct(agg.depWellFormedRate)}`)
       : type === "verify" ? `verdict ${agg.verdictAccuracy == null ? "—" : pct(agg.verdictAccuracy)} (n=${agg.verdictSample})`
         : "—";
     lines.push(`| ${type} | ${mode} | ${pct(agg.singleShotRate)} | ${pct(agg.effectiveRate)} | ${pct(agg.schemaRate)} | ${extra} | ${agg.p50ms}ms | ${agg.p95ms}ms | ${agg.meanTokens} | ${agg.usd ? "$" + agg.usd.toFixed(4) : "—"} |`);
