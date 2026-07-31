@@ -27,7 +27,7 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
 
 - **Pure** (`decision`, `units`, `net`) — no server, no model. Logic, validators, SSRF guard, BM25,
   the semaphore, the approval-decision core (incl. hard floor).
-- **Server** (`api`, `workspaces`, `robustness`) — hit a running server (no model). CRUD + validation,
+- **Server** (`api`, `workspaces`, `endpoints`, `robustness`) — hit a running server (no model). CRUD + validation,
   auth gate + role separation, security headers, MCP JSON-RPC, steer routing, SOP CRUD, spend cap,
   workspace isolation, hardening/malformed-input.
 - **Live e2e** (`e2e-autonomy`, `--e2e` only) — needs Latch + a local LLM. Proves the safe-autonomy stack
@@ -67,6 +67,11 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
 | Failed-run accounting — abnormal exits audited with a reason, counted, listed in `/api/runs` | workspaces |
 | `modelUnreachable` — all-failed vs. one-success-among-failures, both directions | units |
 | `trimVersions` — keep/drop partition the input exactly at every cap boundary | units |
+| Purchasing budget — clamp, cent-rounding, non-numeric → 0; `/api/purchases` shape | endpoints |
+| Inbox — three queues, `counts.total` can't drift, `latchOk` reported, `seen` monotonic | endpoints |
+| `/api/ceo`, `/api/agent-status` — shape + length caps | endpoints |
+| HR refusals — `no_hr` / `no_vision` / `no_roles` distinguished, not one 500 | endpoints |
+| `hire-plan` `reportsTo` resolution — 2- and 3-way cycles refused, no dangling managerId, 14 cap | endpoints |
 | `/api/deliverables/:name/versions` lists from the directory, not just org metadata | versions script |
 | Notification webhook — `/api/notify/test`, dead endpoint → 502 + audit row, HTTP 500 ≠ delivered | workspaces |
 | `run_failed` push on the failure path (it used to push nothing) | workspaces |
@@ -165,6 +170,8 @@ changes — the real corpus has no document long enough to exercise it (largest 
 manually / via Latch's own tests): `/api/state`, `/api/llm/chat`, `/api/llm/config`,
 `/api/mcp/servers`, `/api/github/config`, `/api/bio/generate`.
 
-**Pre-existing endpoints not yet back-filled with tests (acknowledged backlog, predate this work):**
-`/api/purchases`, `/api/inbox`, `/api/inbox/seen`, `/api/ceo`, `/api/agent-status`, `/api/hr/suggest`,
-`/api/hr/plan`, `/api/hr/hire-plan`, `/relocate`.
+**`POST /api/agents/:id/relocate` — only the 404 path is automated.** The success path files a real
+`human_verification` approval in Latch, and a suite that leaves pending approvals in the operator's inbox
+every run is a suite people learn to work around. The department move and the generated question are
+verified by hand. (Everything else on the old "not yet back-filled" list is now covered by
+`endpoints.test.mjs` — see the table above.)

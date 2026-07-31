@@ -16,7 +16,7 @@ const wantE2E = process.argv.includes("--e2e");
 const wantServe = process.argv.includes("--serve");
 
 const PURE = ["decision.test.mjs", "units.test.mjs", "net.test.mjs"];
-const SERVER = ["api.test.mjs", "workspaces.test.mjs", "robustness.test.mjs"];
+const SERVER = ["api.test.mjs", "workspaces.test.mjs", "endpoints.test.mjs", "robustness.test.mjs"];
 const LIVE = ["e2e-autonomy.mjs"];
 
 function run(file) {
