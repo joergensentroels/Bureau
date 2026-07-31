@@ -127,10 +127,18 @@ _(Deliverable delete is complete — API and UI both shipped, see below.)_
     process, so `node server.mjs` by hand served an **unguarded** control surface on a live public
     hostname. `Start-Bureau.ps1` now makes the guard the default, warns in red if `-Local` is used while
     tailscale is serving the port, and refuses to double-start. Confirmed `remote:true` over the tailnet.
-  - **Left to do: put the work laptop on the tailnet** (install Tailscale, sign in, approve the device) and
-    open `https://<your-host>.<your-tailnet>.ts.net:8443`. Current peers are only `openclaw` (linux) and an android
-    phone — no laptop yet. A Cloudflare Tunnel + Access hostname remains the fallback if a managed laptop
-    forbids a mesh client; nothing in Bureau changes either way.
+  - **DONE — confirmed from the managed work laptop, 2026-07-31.** Tailscale installed there, opened
+    `https://<your-host>.<your-tailnet>.ts.net:8443`, full UI rendering with live company data and `🔒 REMOTE MODE`
+    visible in the header. The open question from July — "whether a managed work laptop's network
+    cooperates" — is answered: it does, with no Cloudflare Tunnel needed. That fallback stays documented
+    for a machine that forbids a mesh client, but is not required here.
+  - **Two defects only a second machine could find, both fixed the same day.** Signed out, the UI rendered
+    its first-run onboarding wizard over a live 12-agent company (a 401 body has no `ceo`, so "cannot read"
+    and "brand new" were one condition) and the only route to the sign-in prompt was an accidental 401 —
+    the badge was a `<span>` whose tooltip told you to reload. And the failed-auth damper keyed on
+    `socket.remoteAddress`, so behind `tailscale serve` every client shared one bucket with localhost while
+    any success wiped the counter. See SECURITY.md. _On the host you almost never load the page
+    unauthenticated, which is exactly why all three survived until someone did._
   - **The e2e knows about both postures:** S4 asserts the seam REFUSES a hard-floor approval (403) when
     `BUREAU_REMOTE` is on, instead of failing because correct behaviour looked like a broken seam.
 
