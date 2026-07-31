@@ -3465,6 +3465,11 @@ const server = createServer(async (req, res) => {
         runs: org.budget.runs || 0, tokens: org.budget.tokens || 0, deliverables,
         funds: org.budget.funds || 0, spent: org.budget.spent || 0, purchases: (org.purchases || []).length,
         paidAllocated: agents.reduce((s, a) => s + (a.budgetUsd || 0), 0),
+        // Allocated alone can't tell you you're over. Ship the SPENT side with it — the sum of every
+        // agent's real paid-API spend — plus how many have exhausted their allowance, so the header can
+        // read "$1.14 / $1.00" instead of a $1 that looks fine while an agent has overshot.
+        paidSpent: Math.round(agents.reduce((s, a) => s + (a.paidSpentUsd || 0), 0) * 1e6) / 1e6,
+        paidExhausted: agents.filter((a) => (a.budgetUsd || 0) > 0 && (a.paidSpentUsd || 0) >= (a.budgetUsd || 0)).length,
         schedules: { total: schedules.length, active: schedules.filter((s) => s.enabled).length },
         goals: { total: (org.goals || []).length, active: (org.goals || []).filter((g) => g.status === "active").length },
         topAgents,

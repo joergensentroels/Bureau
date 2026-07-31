@@ -975,19 +975,41 @@ function wireApprovalRows(wrap){
   });
 }
 
+// Amber on the paid budget at 75% used, red at 100%. Operator's number — named rather than inlined so
+// it's one edit, and so the threshold isn't buried in a colour expression.
+const PAID_WARN_AT = 0.75;
 function fmtUsd(n){ return "$"+(Math.round((n||0)*100)/100).toLocaleString(); }
 // Paid spend per run is often sub-cent — show up to 4 decimals for small amounts so it isn't "$0".
 function fmtUsdFine(n){ n=Number(n)||0; if(n>0&&n<0.01) return "$"+n.toFixed(4); return fmtUsd(n); }
 function updateEconomy(){
   const bal=$("#balance"); if(!bal) return;
-  const allocated=(ORG.agents||[]).reduce((s,a)=>s+(a.budgetUsd||0),0);   // real $ allocated to paid-model use
+  // spent / allocated, not allocated alone. Allocated on its own cannot tell you you are close to the
+  // ceiling or past it — the header read "$1" while an agent had actually spent $1.14, which is the one
+  // thing a budget display exists to surface. Both numbers come from the same per-agent records the
+  // economy is enforced against, so this can't drift from the real gate.
+  const agents=ORG.agents||[];
+  const allocated=agents.reduce((s,a)=>s+(a.budgetUsd||0),0);        // real $ allocated to paid-model use
+  const spentPaid=agents.reduce((s,a)=>s+(a.paidSpentUsd||0),0);     // real $ already spent on the paid API
   const paidOn=!!(HEALTH&&HEALTH.paid);
-  bal.textContent = allocated>0 ? fmtUsd(allocated) : "local only";
-  bal.style.color = (allocated>0 && !paidOn) ? "var(--warn)" : "";
-  const k=$("#balanceK"); if(k) k.textContent = paidOn ? "Paid budget" : "Paid budget · no provider";
-  bal.title = paidOn
-    ? `${fmtUsd(allocated)} allocated across agents for the paid model (${(HEALTH.paid&&HEALTH.paid.model)||"paid"}). Agents with $0 use the free local model.`
-    : `${fmtUsd(allocated)} allocated — but NO paid provider is configured in Latch, so every agent runs on the local model regardless. Configure a provider (API key) to activate paid budgets.`;
+  const pctUsed = allocated>0 ? spentPaid/allocated : 0;
+  bal.textContent = allocated>0 ? `${fmtUsdFine(spentPaid)} / ${fmtUsd(allocated)}` : "local only";
+  // Over budget is the loud case; near the ceiling is the useful warning. "Allocated but no provider"
+  // stays a warning too, but must not mask an overspend, so danger wins.
+  bal.style.color = allocated>0 && pctUsed>=1 ? "var(--danger)"
+    : allocated>0 && (pctUsed>=PAID_WARN_AT || !paidOn) ? "var(--warn)" : "";
+  const exhausted=agents.filter(a=>(a.budgetUsd||0)>0 && (a.paidSpentUsd||0)>=(a.budgetUsd||0));
+  const k=$("#balanceK"); if(k) k.textContent = !paidOn ? "Paid budget · no provider"
+    : pctUsed>=1 ? "Paid budget · over" : `Paid budget · ${Math.round(pctUsed*100)}% used`;
+  const rest = allocated>0
+    ? `${fmtUsdFine(spentPaid)} spent of ${fmtUsd(allocated)} allocated across ${agents.filter(a=>(a.budgetUsd||0)>0).length} funded agent(s)`
+      + ` · ${fmtUsdFine(Math.max(0,allocated-spentPaid))} left`
+      + (exhausted.length ? `\nEXHAUSTED: ${exhausted.map(a=>`${a.name} (${fmtUsdFine(a.paidSpentUsd)}/${fmtUsd(a.budgetUsd)})`).join(", ")} — they fall back to the local model.` : "")
+      // The ceiling is "budget plus one call", not a hard stop: canUsePaid() checks BEFORE a call, so the
+      // call that crosses the line still completes. Say so, or a small overshoot looks like a leak.
+      + `\nA budget stops FURTHER paid calls once crossed; the call that crosses it still completes, so a small overshoot is expected. guardrails.maxPaidUsdPerRun is the per-run brake.`
+    : "No agent has a paid budget, so everything runs on the free local model.";
+  bal.title = paidOn ? rest
+    : `${rest}\n\nNO paid provider is configured in Latch, so every agent runs on the local model regardless of budget.`;
   // company purchasing funds
   const funds=ORG.budget?.funds||0, spent=ORG.budget?.spent||0, rem=Math.round((funds-spent)*100)/100;
   const fEl=$("#funds"); if(fEl){ fEl.textContent = funds>0?fmtUsd(rem):"not set"; fEl.style.color = (funds>0&&rem<0)?"var(--danger)":(funds>0&&rem<funds*0.15?"var(--warn)":""); }
@@ -1813,7 +1835,13 @@ async function loadDashboard(){
     ...(d.goals&&d.goals.total?[card("Goals",d.goals.active+" active",`${d.goals.total} total`)]:[]),
     card("Runs completed",(d.runs||0).toLocaleString(),`${d.deliverables} deliverable${d.deliverables===1?"":"s"}`),
     card("Tokens used",(d.tokens||0).toLocaleString(),"the real compute cost"),
-    card("Paid budget",d.paidAllocated>0?fmtUsd(d.paidAllocated):"local only",(HEALTH&&HEALTH.paid)?"paid model active":"no paid provider"),
+    // Same spent/allocated shape as the header, from the same per-agent records, so the two can't disagree.
+    card("Paid budget",
+      d.paidAllocated>0?`${fmtUsdFine(d.paidSpent||0)} / ${fmtUsd(d.paidAllocated)}`:"local only",
+      d.paidAllocated>0
+        ? (d.paidExhausted ? `${d.paidExhausted} agent(s) exhausted` : `${fmtUsdFine(Math.max(0,d.paidAllocated-(d.paidSpent||0)))} left`)
+          + ((HEALTH&&HEALTH.paid)?"":" · no paid provider")
+        : ((HEALTH&&HEALTH.paid)?"paid model active":"no paid provider")),
     card("Company funds",d.funds>0?fmtUsd(rem):"not set",d.funds>0?`${fmtUsd(d.spent)} spent · ${d.purchases} buy${d.purchases===1?"":"s"}`:"click header to set"),
   ].join("");
   const top=(d.topAgents||[]).filter(a=>a.tokensUsed>0);
