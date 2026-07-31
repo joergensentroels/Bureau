@@ -1,5 +1,12 @@
 // Live end-to-end test: does the safe-autonomy stack COMPOSE in a real company run?
 //   tier auto-approve  →  policy `require` override  →  in-app approval seam  →  DoD verdict  →  policy `block`
+//   →  the GitHub loop (agent saves a deliverable, opens a real PR, floor holds, seam approves)
+//
+// S4 (GitHub) exists because two bugs hid in exactly the seam it crosses: `fileApproval` returned the wrong
+// shape so `approvalId` was undefined, and the PR guard read state that is only populated after the turn
+// loop. 32 tests passed while all three GitHub actions were broken through a real run, because every one of
+// them stopped at one system's edge. It SKIPS (inconclusive, exit 0) when GitHub is not configured, so a
+// clone without a sandbox repo does not go red.
 //
 // Requires a running Bureau server AND a reachable Latch backend + local model.
 //   start:  BUREAU_PORT=4174 node server.mjs
@@ -41,6 +48,20 @@ const api = async (m, p, body) => {
   const t = await r.text(); let j = {}; try { j = t ? JSON.parse(t) : {}; } catch { j = { raw: t }; }
   return { status: r.status, j };
 };
+// Cleanup for S4 talks to LATCH directly. Bureau deliberately does not proxy close/delete-branch — an
+// agent closing issues or deleting refs is a different question from an agent opening a PR, so those stay
+// operator-only routes. The operator token IS Latch's token, so the test tidies the repo with exactly the
+// credentials a human would use.
+const LATCH = (process.env.LATCH_URL || "http://127.0.0.1:8787").replace(/\/$/, "");
+const latchApi = async (m, p, body) => {
+  try {
+    const r = await fetch(LATCH + p, { method: m, headers: { "content-type": "application/json", ...AUTH }, body: body ? JSON.stringify(body) : undefined });
+    const t = await r.text(); let j = {}; try { j = t ? JSON.parse(t) : {}; } catch { j = { raw: t }; }
+    return { status: r.status, j };
+  } catch (e) { return { status: 0, j: { error: e.message } }; }
+};
+const ghArtifacts = [];   // { url, owner, repo } for every PR S4 really opened
+
 const pass = [], fail = [];
 const ok = (c, m) => (c ? pass : fail).push(m);
 const evCounts = (evs) => { const c = {}; for (const e of evs) c[e.type] = (c[e.type] || 0) + 1; return JSON.stringify(c); };
@@ -158,12 +179,95 @@ const deliverableNames = async () => new Set((((await api("GET", "/api/deliverab
     ok(!r3.events.some((e) => e.type === "propose" && isWrite(e.data.actionType)), "S3: blocked before an approval was filed");
   }
 
+  // ---- S4: the GitHub loop — the seam two bugs hid behind ----------------------------------------
+  // This scenario exists because on 2026-07-31 all three GitHub actions were broken through a real agent
+  // run while 32 Latch-side checks passed: those filed approvals DIRECTLY against Latch and never crossed
+  // `fileApproval`, which returned the wrong shape (`{status, json}` instead of `json`), leaving
+  // `approvalId` undefined so the seam had nothing to look up. A second bug made `github_pr` unreachable
+  // mid-task by reading `run.producedFiles`, which is only merged after the turn loop ends. Both are
+  // invisible to unit tests and to any test that stops at one system's edge. Hence: agent → floor → seam
+  // → Latch → GitHub → back to the agent, in one run.
+  console.log("\n=== S4: agent opens a real PR — floor holds, seam approves, URL comes back ===");
+  // S3 leaves a policy BLOCKING file_write. Without this reset the agent cannot save a deliverable, so
+  // github_pr has nothing to put in a PR and never gets proposed — which the first run of this scenario
+  // reported as "the model chose a different action". It was leftover state from the previous scenario.
+  // Scenario order is state, and a scenario that mutates policy must hand the next one a clean slate.
+  await reset();
+  const ghCfg = (await api("GET", "/api/integrations")).j?.github || {};
+  const ghTarget = (await api("GET", "/api/org")).j?.github || {};
+  if (!ghCfg.configured || !(ghTarget.repo && ghTarget.owner)) {
+    inconclusive(`S4: GitHub is not set up here (connector configured=${!!ghCfg.configured}, workspace target=${ghTarget.owner || "?"}/${ghTarget.repo || "?"}) — skipping, not failing`);
+  } else {
+    const before = (await api("GET", "/api/agents/" + AGENT)).j;
+    const savedAllow = Array.isArray(before?.allow) ? before.allow : [];
+    // Allowlist WIDER than the actions under test: a narrow one makes the model burn turns on allowlist
+    // blocks, which reads as "it never proposed a PR" when it never got that far. The FLOOR is under test.
+    await api("PATCH", "/api/agents/" + AGENT, { tier: "trusted", allow: [...new Set([...savedAllow, "file_write", "read_file", "note", "github_pr"])] });
+    const s4 = await attempts(2, async (i) => {
+      let proposal = null, seamStatus = 0;
+      const r = await runAndStream({
+        mode: "single", agentId: AGENT, maxTurns: 10, autoApprove: true, hush: true,
+        objective: "Write and save a SHORT markdown note (about three sentences) on why a definition-of-done "
+          + "checklist is useful. Save it with file_write FIRST. Then open a GitHub pull request containing it "
+          + "with the github_pr action, titled \"Add DoD checklist note\". Do both steps.",
+      }, async (ev, runId) => {
+        if (ev.type === "propose" && ev.data?.actionType === "github_pr" && !proposal) {
+          proposal = ev.data;
+          // Approve from inside the stream: the run is waiting on this decision right now.
+          seamStatus = (await api("POST", `/api/approvals/${ev.data.approvalId}/decide`, { decision: "approved" })).status;
+        }
+      }, 300000);
+      console.log(`  attempt ${i}: events ${evCounts(r.events)}`);
+      // Print WHY things were blocked. Counting them told me nothing; the reasons said "blocked by policy"
+      // and pointed straight at the leftover S3 rule. A histogram without the reasons is half a diagnosis.
+      const why = [...new Set(r.events.filter((e) => e.type === "blocked").map((e) => `${e.data?.actionType}:${e.data?.reason}`))];
+      if (why.length) console.log(`    blocked: ${why.join(" | ")}`);
+      if (!proposal) return null;
+      const res = r.events.find((e) => e.type === "result" && e.data?.actionType === "github_pr");
+      return { proposal, seamStatus, res, events: r.events };
+    });
+    if (!s4) {
+      inconclusive("S4: the agent never proposed github_pr in 2 runs (model choice, not a product failure)");
+    } else {
+      ok(s4.proposal.autoApprove === false, "S4: github_pr NOT auto-approved at trusted tier (hard floor held)");
+      ok(!s4.proposal.approver, "S4: no approver stamped on the proposal");
+      ok(!!s4.proposal.approvalId, "S4: the proposal carries a usable approvalId (undefined here was bug #1)");
+      ok(s4.seamStatus === 200, `S4: the in-app seam accepted it (got ${s4.seamStatus})`);
+      ok(!!s4.events.find((e) => e.type === "result" && isWrite(e.data?.actionType) && e.data?.ok),
+        "S4: it saved the deliverable first — the PR is built from that, not from retyped content (bug #2)");
+      ok(!!s4.res, "S4: the run reported a github_pr result");
+      ok(s4.res?.data?.ok === true, `S4: the PR succeeded (error: "${s4.res?.data?.error || "none"}")`);
+      ok(/github\.com\/.+\/pull\/\d+/.test(String(s4.res?.data?.url || "")), `S4: with a real PR URL (${s4.res?.data?.url})`);
+      ok(s4.res?.data?.decidedBy === "you", `S4: attributed to the human who approved it (decidedBy="${s4.res?.data?.decidedBy}")`);
+      if (s4.res?.data?.url) ghArtifacts.push({ url: s4.res.data.url, owner: ghTarget.owner, repo: ghTarget.repo });
+    }
+    await api("PATCH", "/api/agents/" + AGENT, { allow: savedAllow });
+  }
+
   // ---- teardown: restore what we changed, and remove what we created ----
   await reset();
   const leftPending = [...(await pendingIds())].filter((id) => !baselinePending.has(id));
   for (const id of leftPending) await api("POST", `/api/approvals/${id}/decide`, { decision: "denied", note: "e2e teardown: test artifact" });
   // Name-diff against the startup baseline, so this can only remove documents this run created.
   const newDrafts = [...(await deliverableNames())].filter((n) => !baselineDrafts.has(n));
+  // Close every PR S4 opened, and delete its head branch. This is why the GitHub scenario could not exist
+  // until POST /api/github/close and /api/github/delete-branch did: a suite that leaves real PRs and refs
+  // behind on every run is a suite people stop running. Reported, not assumed — a close that fails says so.
+  const ghClosed = [], ghStuck = [];
+  for (const a of ghArtifacts) {
+    const number = Number(String(a.url).split("/").pop()) || 0;
+    if (!number) { ghStuck.push(`${a.url} (could not parse a number from the URL)`); continue; }
+    // Read the PR's head branch BEFORE closing, then close, then delete the ref. Order matters: the delete
+    // endpoint refuses a branch with an OPEN pull request, which is the guard doing its job.
+    const br = await latchApi("GET", `/api/github/branches?owner=${encodeURIComponent(a.owner)}&repo=${encodeURIComponent(a.repo)}`);
+    const head = (br.j?.branches || []).find((b) => b.openPr === number)?.name || "";
+    const c = await latchApi("POST", "/api/github/close", { owner: a.owner, repo: a.repo, number });
+    if (!c.j?.ok) { ghStuck.push(`#${number} close failed: ${c.j?.error || c.status}`); continue; }
+    if (!head) { ghClosed.push(`#${number} closed (head branch not identified — delete by hand)`); continue; }
+    const d = await latchApi("POST", "/api/github/delete-branch", { owner: a.owner, repo: a.repo, branch: head });
+    ghClosed.push(d.j?.ok ? `#${number} closed, branch ${head} deleted` : `#${number} closed; branch ${head} NOT deleted: ${d.j?.error || d.status}`);
+  }
+
   const archived = [], stuck = [];
   for (const n of newDrafts) {
     const r = await api("DELETE", "/api/deliverables/" + encodeURIComponent(n));
@@ -178,8 +282,10 @@ const deliverableNames = async () => new Set((((await api("GET", "/api/deliverab
   console.log(`\nteardown: policies cleared, tier restored, ${leftPending.length} approval(s) this test caused were denied.`);
   if (archived.length) console.log(`  archived the ${archived.length} deliverable(s) this run created (recoverable):\n    ${archived.join("\n    ")}`);
   else if (!stuck.length) console.log("  no new deliverables to remove.");
+  if (ghClosed.length) console.log(`  GitHub: ${ghClosed.join("; ")}`);
   // Report rather than swallow: a teardown that half-worked must not read as a clean one.
   if (stuck.length) console.log(`  ⚠ COULD NOT REMOVE — delete by hand:\n    ${stuck.join("\n    ")}`);
+  if (ghStuck.length) console.log(`  ⚠ GITHUB NOT CLEANED UP — close by hand:\n    ${ghStuck.join("\n    ")}`);
   // Inconclusive is NOT failure: the model choosing a different action says nothing about the product.
   process.exit(fail.length ? 1 : 0);
 })().catch((e) => { console.error("HARNESS ERROR:", e); process.exit(2); });

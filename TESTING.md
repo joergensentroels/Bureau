@@ -32,8 +32,18 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
   workspace isolation, hardening/malformed-input.
 - **Live e2e** (`e2e-autonomy`, `--e2e` only) — needs Latch + a local LLM. Proves the safe-autonomy stack
   composes: trusted-tier auto-approve → policy `require` overriding the tier → the in-app approval seam →
-  DoD verdict → policy `block` refusing a write before any approval is filed. _9/9 passing as of
-  2026-07-31; before that it had never been run since the auth gate landed in July._
+  DoD verdict → policy `block` refusing a write before any approval is filed → **the GitHub loop** (agent
+  saves a deliverable, opens a real PR, floor holds at trusted tier, seam approves, URL returns).
+  _**18/18** as of 2026-07-31, up from 9; before that it had never been run since the auth gate landed in July._
+  - **S4 (GitHub) exists because two bugs hid in exactly the seam it crosses** while 32 tests passed — they
+    all stopped at one system's edge. Two of its assertions name those defects outright, so a regression
+    fails with the reason attached. It **skips** (inconclusive, exit 0) when GitHub isn't configured.
+  - **Scenario order is state.** S3 leaves a policy blocking `file_write`; S4 calls `reset()` first because
+    without it the agent can't save a deliverable and `github_pr` correctly refuses to PR nothing — which
+    the first run misreported as "the model chose a different action". Teardown-only reset worked until a
+    fourth scenario disagreed with the third.
+  - **~13 minutes with retries**, which is why it stays outside the pre-push gate. S1 needed 2 attempts and
+    S2 needed 3 in the passing run; that's the nondeterminism the retry design is for.
   - Scenarios that need the model to propose a specific action **retry up to 3×** and report
     **INCONCLUSIVE**, not failed, if it never does — exit code stays 0. A live suite that goes red
     because a nondeterministic model picked a different tool teaches people to ignore it.
