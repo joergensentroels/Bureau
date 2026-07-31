@@ -13,6 +13,10 @@
 #                                   # approved in Latch/Compass, not from Bureau's UI. Denying still works.
 #   .\Start-Bureau.ps1 -Local       # no remote guard. Only for a machine that is NOT reachable off-host.
 #   .\Start-Bureau.ps1 -Foreground  # run in this window instead of detached (Ctrl+C to stop)
+#
+# If that fails with UnauthorizedAccess: this machine's LocalMachine execution policy is Restricted, which
+# blocks every .ps1 regardless of signing. Use a per-process bypass — it does not change machine policy:
+#   powershell -NoProfile -ExecutionPolicy Bypass -File "<this path>"
 [CmdletBinding()]
 param(
   [switch]$Local,

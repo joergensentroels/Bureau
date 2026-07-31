@@ -14,9 +14,17 @@
 # trade for a remote-availability gain. That is the operator's call to make knowingly, not a default, and
 # handling the password is not something this script will do.
 #
-#   .\Install-Autostart.ps1            # create/refresh the three tasks (needs an elevated shell)
-#   .\Install-Autostart.ps1 -WhatIf    # print exactly what it would create, change nothing
-#   .\Install-Autostart.ps1 -Uninstall # remove them and fall back to the Startup shortcuts
+# RUN IT LIKE THIS. This machine's LocalMachine execution policy is Restricted, which blocks every .ps1
+# regardless of signing, so `.\Install-Autostart.ps1` fails with UnauthorizedAccess. The -ExecutionPolicy
+# flag is per-process — it does NOT change the machine's policy, which is the point: a persistent policy
+# change is a security decision and this script does not need one.
+#
+#   powershell -NoProfile -ExecutionPolicy Bypass -File "<this path>"              # install (ELEVATED shell)
+#   powershell -NoProfile -ExecutionPolicy Bypass -File "<this path>" -WhatIf      # preview, change nothing
+#   powershell -NoProfile -ExecutionPolicy Bypass -File "<this path>" -Uninstall   # remove the tasks
+#
+# The boot tasks this creates already pass -ExecutionPolicy Bypass themselves, so Restricted does not
+# affect them at startup — it only gets in the way of running this installer by hand.
 [CmdletBinding(SupportsShouldProcess = $true)]
 param([switch]$Uninstall)
 
