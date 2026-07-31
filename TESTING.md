@@ -168,8 +168,11 @@ _Found by reading real output rather than predicting: the first successful run p
 parse as a flag, and the whole-string trim looked sufficient until a real title with `[brackets]` went
 through it. The sanitiser now trims per segment._
 
-**Artifacts:** PRs #2 and #3 and their `bureau/verification-*` branches are in `bureauProjects/sandbox`.
-Nothing deletes refs — that is GitHub's "Automatically delete head branches" setting — so close them by hand.
+**Artifacts:** `POST /api/github/close` (Latch, operator-only, no approval — the operator *is* the human an
+approval exists to reach) closes an issue or PR by number; GitHub closes PRs through the issues endpoint,
+so one route covers both. Issue #1 and PRs #2–#4 in `bureauProjects/sandbox` were closed this way.
+**Closing never deletes the head branch**, so the `bureau/*` refs remain — that is GitHub's "Automatically
+delete head branches" repo setting, and no code here prunes refs.
 
 **GitHub issues — verified end to end** (needs a live Latch + a permitted token; 2026-07-31). Two scripts:
 `verify-gh-issues` (17 checks — auth 401 twice, a repo name that sanitises to nothing → 400, both approval
@@ -187,8 +190,8 @@ exists), **`GET /api/approvals/:id` does not exist in Latch** (only PATCH and DE
 `sandbox` answers as `Sandbox` in URLs, so never compare repo names case-sensitively._
 
 _Artifact: issue #1 in `bureauProjects/sandbox` is a deliberate verification artifact; the round-trip
-script comments on it rather than opening more. Latch has no close-issue capability, so the script does not
-claim to tidy it up._
+script comments on it rather than opening more. It can now be closed via `POST /api/github/close` — the
+capability the scripts used to say they lacked._
 
 **Version archives — no orphans, nothing unreachable** (needs a live server + model; verified 2026-07-31,
 8 checks). Measured on the real corpus first: **116 archive files on disk, 10 listed by any endpoint.**
