@@ -45,7 +45,7 @@ chk("policy allow CANNOT auto mcp_call (floor wins)", decideApproval("autonomous
 // opening an issue or commenting emails every watcher the instant it posts and nothing un-sends that —
 // the same property that floors email_draft. Every escape route is checked, because "floored" is only
 // true if tier, run-auto AND a policy allow all fail to cross it.
-for (const a of ["github_issue", "github_comment"]) {
+for (const a of ["github_issue", "github_comment", "github_pr"]) {
   chk(`autonomous ${a} floored (a post notifies humans; a commit does not)`, decideApproval("autonomous", a, {}, gr, false), { auto: false, approver: "" });
   chk(`run-auto ${a} floored (scheduled runs cannot post either)`, decideApproval("supervised", a, {}, gr, true), { auto: false, approver: "" });
   chk(`policy allow CANNOT auto ${a} (floor wins)`, decideApproval("autonomous", a, {}, gr, false, "allow"), { auto: false, approver: "" });

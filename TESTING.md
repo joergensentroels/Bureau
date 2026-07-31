@@ -74,7 +74,7 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
 | `DELETE /api/deliverables/:name` — validation, not-found, traversal neutralised | api (happy path live) |
 | Inbound triggers — unknown/disabled token → 404, token shape, list auth | api (guards live) |
 | Failed-run accounting — abnormal exits audited with a reason, counted, listed in `/api/runs` | workspaces |
-| GitHub issue posting hard-floored — tier, run-auto and policy-allow all fail to cross it | decision |
+| GitHub issue/PR posting hard-floored — tier, run-auto and policy-allow all fail to cross it | decision |
 | `read_issues` stays a safe read — tier may auto-approve, and it is not dragged onto the floor | decision |
 | Issue action synonyms — every alias's direction pinned; plural/singular can't cross over | units |
 | `modelUnreachable` — all-failed vs. one-success-among-failures, both directions | units |
@@ -137,6 +137,21 @@ _Done 2026-07-31: the page boots with no JS errors; unauthenticated, it correctl
 while keeping `👁 read-only` and `🔒 remote mode` hidden; and the **poller gate holds** — six boot requests
 and then silence, where the 2s/7s/12s pollers would otherwise have kept firing (they were measured at
 ~83 requests/minute before that fix)._
+
+**GitHub pull requests — verified end to end** (needs a live Latch + permitted token; 2026-07-31, 13
+checks via `verify-gh-pr`). A **denied** approval produces no branch and no PR; an approved one creates the
+branch, commits onto it and opens the PR, reporting number, URL and `branch → base`; the branch carries the
+`bureau/` prefix; the PR is **filtered out of `read_issues`** (GitHub returns PRs through the issues
+endpoint); and a PR with no files refuses with *"needs at least one file to change"* and returns to pending
+rather than opening an empty one. _Pass a run number as argv[1] to keep branch names distinct across runs._
+
+_Found by reading real output rather than predicting: the first successful run produced
+`bureau/-verification-...`. A leading dash is a **valid** git ref but makes `git checkout -verification…`
+parse as a flag, and the whole-string trim looked sufficient until a real title with `[brackets]` went
+through it. The sanitiser now trims per segment._
+
+**Artifacts:** PRs #2 and #3 and their `bureau/verification-*` branches are in `bureauProjects/sandbox`.
+Nothing deletes refs — that is GitHub's "Automatically delete head branches" setting — so close them by hand.
 
 **GitHub issues — verified end to end** (needs a live Latch + a permitted token; 2026-07-31). Two scripts:
 `verify-gh-issues` (17 checks — auth 401 twice, a repo name that sanitises to nothing → 400, both approval

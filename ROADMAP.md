@@ -252,8 +252,20 @@ assertions across 7 suites + a live `--e2e`; see `test/README.md`).
   a DENIED create approval posts nothing, a comment posts and the count rises, and a bad issue number fails
   with `No issue #999999` and returns to pending so it is retryable. `GET /api/github/doctor` was added
   along the way because `/api/github/config` reported `ready: true` while every issue call 403'd — `ready`
-  only ever meant "a URL and token are present". Pull requests are the natural next increment on the same
-  plumbing; they need a branching model decided first._
+  only ever meant "a URL and token are present"._
+- **GitHub pull requests** (2026-07-31) — `github_pr` opens a PR containing the deliverables the run already
+  saved. **One approval creates the branch, commits onto it, and opens the PR**, which makes it the widest
+  single action Bureau has and is why it is hard-floored. Atomic is the *safer* shape: split across three
+  approvals it would be three human decisions for one reviewable unit, and declining the second would
+  strand a half-built branch. The files travel **inside** the approval, so what the operator reads is what
+  gets committed — no second fetch between decision and write. The agent never assembles a file list (this
+  model is worst at nested JSON): it writes with `file_write` as usual and the PR is built from
+  `run.producedFiles`, read back off disk. A `github_pr` with nothing saved is refused **before** an
+  approval is filed, with a message saying to save the work first — an empty PR should never reach the
+  inbox. **Branching model: one branch per PR, `bureau/<slug>`, and nothing deletes them** — that is
+  GitHub's "Automatically delete head branches" repo setting, the right owner for the decision. _Verified
+  live, 13 checks: a denied approval produces no branch and no PR; an approved one reports number, URL and
+  branch→base; the PR is filtered out of `read_issues`; an empty PR refuses and stays retryable._
 - **The failure paths, made loud** (2026-07-31) — an audit of every place Bureau stayed quiet when
   something went wrong. Each of these was one line of `catch {}` or one missing sibling call, and none
   of them broke a test, because nothing was watching.

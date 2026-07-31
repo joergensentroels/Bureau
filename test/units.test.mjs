@@ -42,6 +42,9 @@ eq("  curl → api_call", normalizeAction({ type: "propose_action", actionType: 
     eq(`  ${t} → github_issue (a post)`, norm(t), "github_issue");
   for (const t of ["github_comment", "issue_comment", "comment", "comment_issue", "reply_issue", "reply"])
     eq(`  ${t} → github_comment`, norm(t), "github_comment");
+  for (const t of ["github_pr", "pull_request", "pullrequest", "pr", "open_pr", "create_pr", "raise_pr", "merge_request"])
+    eq(`  ${t} → github_pr`, norm(t), "github_pr");
+  chk("  'pr' does not collide with the issue actions", !["github_issue", "github_comment", "read_issues"].includes(norm("pr")));
   // The dangerous confusions, asserted as NOT happening rather than left to inspection of the lists.
   chk("  plural 'issues' never becomes the singular post action", norm("issues") !== "github_issue");
   chk("  singular 'issue' never becomes the read action", norm("issue") !== "read_issues");

@@ -79,6 +79,30 @@ credentials (Bureau never sees them) and returns only the result, which the agen
 untrusted external data**. Bureau opens no outbound MCP connections. When MCP is unconfigured on the
 host, the capability is dormant (never advertised to agents).
 
+## GitHub pull requests (`github_pr`)
+
+`github_pr` opens a PR containing the deliverables the run already saved. **One approval does the whole
+thing** — create a branch, commit the files onto it, open the PR — which makes it the widest single action
+Bureau has, and the reason it is **hard-floored**. A PR both commits content and requests review from
+humans who get notified; the notification half decides it, same as issues.
+
+Atomic is the safer shape, not the riskier one. Split across three approvals it would be three decisions
+for one reviewable unit, and declining the second would strand a half-built branch. Here the **files are
+carried inside the approval**, so what the operator reads is exactly what gets committed, with no second
+fetch between the decision and the write — and declining leaves the repository untouched (verified: a
+denied approval produces no branch and no PR).
+
+The agent never assembles a file list. It writes its document with `file_write` as usual, and the PR is
+built from `run.producedFiles`, read back off disk at approval time. A `github_pr` with nothing saved yet
+is refused **before** an approval is filed, with a message telling the agent to save the work first — an
+empty PR should never reach the operator's inbox at all.
+
+**Branching model:** one fresh branch per PR, `bureau/<slug>`, sanitised for git's ref rules (no spaces,
+`..`, `~^:?*[\`, leading/trailing dots or dashes **per segment** — a leading dash is a valid ref but makes
+`git checkout` parse it as a flag). **Nothing deletes these branches.** That is GitHub's *"Automatically
+delete head branches"* repo setting, which does it on merge and is the right owner for the decision;
+Bureau does not prune refs it may not have created. Enable it on repos where agents open PRs.
+
 ## GitHub issues (`read_issues`, `github_issue`, `github_comment`)
 
 Agents can work a real GitHub backlog: read the repo's open issues, open new ones, and comment. The token
