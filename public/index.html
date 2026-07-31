@@ -333,7 +333,7 @@
   <span class="tag" id="tagline">agent orchestrator</span>
   <button class="wsswitch" id="wsBtn" title="Switch workspace / company"><span id="wsName">Default</span> <span style="opacity:.6">▾</span></button>
   <span class="tag" id="roleBadge" style="display:none">👁 read-only</span>
-  <span class="tag" id="authWarn" style="display:none" title="Bureau is not accepting this browser's token, so live polling has paused to avoid hammering the server. Reload and enter the operator token.">⚠ not signed in</span>
+  <span class="tag" id="authWarn" style="display:none;cursor:pointer" title="Bureau is not accepting this browser's token, so live polling has paused. Click to enter the operator token.">⚠ not signed in — sign in</span>
   <span class="tag" id="remoteBadge" style="display:none" title="BUREAU_REMOTE is set: actions that always need a human (shell, api_call, email, repo creation, external MCP calls, over-ceiling purchases) cannot be approved from here. Decide those in Latch/Compass on the trusted host. Rejecting anything still works.">🔒 remote mode</span>
   <div class="spacer"></div>
   <div class="toggle themeswitch"><button data-theme-btn="ops">Ops</button><button data-theme-btn="pixel">Tycoon</button></div>
@@ -523,7 +523,7 @@ function authStalled(v){
   if(v===AUTH_STALLED) return;
   AUTH_STALLED=v;
   if(v) _stallProbeAt=Date.now();
-  const b=$("#authWarn"); if(b) b.style.display=v?"":"none";
+  const b=$("#authWarn"); if(b){ b.style.display=v?"":"none"; b.onclick=signIn; }
 }
 // Wrap a poller so it goes quiet while stalled, apart from one probe per STALL_PROBE_MS (shared across
 // all pollers, so it really is one request a minute, not one per poller).
@@ -1001,12 +1001,55 @@ async function setCompanyBudget(){
   await api("POST","/api/company/budget",{funds});
   ORG=await api("GET","/api/org"); updateEconomy(); loadPurchases();
 }
+// Sign in from anywhere: prompt for the token, then re-read everything. Previously the ONLY route to this
+// prompt was an accidental 401 inside api(), so a dismissed prompt left the page permanently signed out
+// with no control to click — the "not signed in" badge's own tooltip told you to reload, which is a
+// workaround written into help text instead of a fix.
+async function signIn(){
+  if(!promptToken()) return;
+  authStalled(false);                      // let the pollers run again immediately
+  ORG = await api("GET","/api/org");
+  await loadRole();
+  render(); loadGoals?.(); updateEconomy();
+}
 function render(){
   const app=$("#app");
   $("#budget").textContent=(ORG.budget?.tokens||0).toLocaleString();
   updateEconomy();
+  // "Could not READ the org" is NOT "this is a brand-new company". A 401 body is {error,hint} with no
+  // `agents`, and treating that as first-run rendered the onboarding wizard over a live company — which
+  // reads as "my 12 agents and 28 deliverables are gone" and invites you to type across them. Any real org
+  // always carries an agents array (the server normalises it), so that is the discriminator.
+  if(!Array.isArray(ORG.agents)){ renderSignedOut(app, ORG); return; }
   if(!ORG.ceo){ renderOnboarding(app); return; }
   renderMain(app);
+}
+
+// The signed-out screen. Says what is actually wrong, does not imply anything was lost, and gives you the
+// button. Distinguishes a rejected token from a throttled address, because the fix differs: one is "paste
+// it again", the other is "wait, or authenticate once from the host".
+function renderSignedOut(app, res){
+  // `.` not a space: the server's code is `too_many_auth_failures` and its hint is "too many rejected
+  // credentials", so match both spellings rather than only the prose one.
+  const throttled = /too.many|refusing new credential/i.test(String(res?.error||"")+" "+String(res?.hint||""));
+  app.innerHTML="";
+  const ov=el("div","overlay"); const box=el("div","onb");
+  box.innerHTML=`
+    <h1>Not signed in</h1>
+    <p>Bureau can't read this company yet — ${throttled
+      ? "this address has had too many rejected tokens, so new attempts are being refused for a few minutes."
+      : "the browser is holding no valid operator token."}
+    <b>Nothing has been lost:</b> your agents, deliverables and history are all on the host, unchanged. This
+    screen is only what Bureau shows when it cannot read.</p>
+    <p class="dim" style="font-size:12px">The operator token is the same one Latch uses — <code>operatorToken</code> in
+    <code>openclaw-command-center/data/auth.json</code>. Paste it exactly: a trailing space or newline will fail.</p>
+    <div class="row" style="gap:10px;margin-top:14px">
+      <button class="primary" id="soSignIn">Sign in</button>
+      <button id="soReload">Reload</button>
+    </div>`;
+  ov.appendChild(box); app.appendChild(ov);
+  box.querySelector("#soSignIn").onclick=signIn;
+  box.querySelector("#soReload").onclick=()=>location.reload();
 }
 
 function renderOnboarding(app){
