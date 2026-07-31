@@ -22,11 +22,37 @@ unattended service, in rough order of what would actually hurt:
     `systemprofile\AppData\Local\Ollama\server.log`). A silent session-0 CPU fallback would make every local
     run slow with nothing reporting it. `boot.log` now captures Ollama's stderr, which is where it states its
     GPU decision — so the next boot should answer this for free.
-  - **Nothing prunes GitHub refs for closed-not-merged PRs.** `deleteBranchOnMerge` only fires on merge.
-  - **No operator-token rotation procedure.** The token is shell access on this host; there is no documented
-    way to roll it.
   - **Anthropic's OpenAI-compatible endpoint as Latch's `fallback`** — the recommended alternative to wiring a
-    Claude subscription seat into Bureau (which stays declined). Still unwired.
+    Claude subscription seat into Bureau (which stays declined). **No code needed; it is configuration, and it
+    needs a key only you can enter.** Verified 2026-07-31 that the transport already matches: Latch POSTs to
+    `${baseUrl}/chat/completions` with `authorization: Bearer <apiKey>`, which is exactly what Anthropic's
+    compat layer expects. Add to the `fallback` block of `openclaw-command-center/data/llm-provider.json`:
+
+    ```json
+    "fallback": { "provider": "openai-compatible",
+                  "baseUrl": "https://api.anthropic.com/v1",
+                  "model": "claude-sonnet-5",
+                  "apiKey": "<your Anthropic API key>" }
+    ```
+
+    Two things to know before doing it: this **replaces** the current Kimi/Moonshot fallback (there is one
+    fallback slot), and `LLM_FALLBACK_*` environment variables override the file. Restart Latch afterwards.
+    Write the file **without a BOM** — see the BOM note below; PowerShell's `Set-Content` adds one.
+
+Closed on 2026-07-31:
+
+  - ~~Nothing prunes GitHub refs for closed-not-merged PRs.~~ `GET /api/github/branches` now reports
+    `prunable` + `reason` per branch and a `prunableCount`. Deliberately a **read**: the operator sweeps with
+    the existing `POST /api/github/delete-branch`, because deleting a ref is outward-facing and awkward to
+    undo, and a scheduled job quietly deleting branches is not something anyone asked for. The rule is
+    narrow on purpose — a branch qualifies only if a pull request actually *finished* on it, so
+    work-in-progress with no PR yet is never swept. Decision extracted to `github.mjs` and unit-tested
+    (`npm test` → `test/github-prune.mjs`) because `prunable: true` cannot be observed from outside without
+    creating and closing a real PR; the live endpoint was confirmed 200-with-correct-shape against the
+    sandbox, where every branch is the default one.
+  - ~~No operator-token rotation procedure.~~ `Rotate-OperatorToken.ps1` + the checklist in SECURITY.md. The
+    trap it exists to prevent: Bureau caches the token at boot, so rotating the file without restarting
+    Bureau leaves the old token working.
 
 **In flight — Parallel execution.** Stage 1 shipped (2026-07-23, commit `6dbe3a9`): opt-in
 `run.parallel` / **⚡ parallel reports** toggle runs a manager's sibling reports concurrently through

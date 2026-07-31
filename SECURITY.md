@@ -315,6 +315,31 @@ _Verified end-to-end over `tailscale serve` (2026-07-25): HTTPS with a valid cer
 header survives the proxy, the read-only token reads but cannot write, and the SSE live feed streams
 incrementally rather than being buffered (a real run arrived in 7 chunks with gaps up to 22s)._
 
+## Rotating the operator token
+
+`openclaw-command-center\Rotate-OperatorToken.ps1` (`-WhatIf` to see it without touching anything). It backs
+up `auth.json` first, preserves `agentToken`/`draftToken`, records `rotatedAt`, writes atomically, and
+verifies the temp file parses **before** it becomes `auth.json` — the recovery path for a broken `auth.json`
+is the authentication it just broke.
+
+**Rotating the file is only half of it.** Bureau reads Latch's `auth.json` once, at boot, and caches the
+token in memory, so until Bureau restarts the OLD token still authenticates against `:4173` — you would
+have every reason to believe you had rotated and would not have. The script prints the full checklist; the
+parts people miss:
+
+- restart **both** Latch and Bureau (elevated — they run as SYSTEM);
+- re-enter the token in every browser that holds one (Bureau's UI keeps it in `localStorage.bureau_token`
+  and does not clear it on a 401, it just re-prompts) — including every device used over the tailnet;
+- `OPERATOR_TOKEN` in the environment **overrides the file entirely**; if it is set anywhere, rotating
+  `auth.json` changes nothing;
+- verify the OLD token now gets 401, not merely that the new one gets 200. Expect 429s if you retry from
+  one address — that is the failed-auth damper working, not a rotation failure;
+- delete the backup once the new token is confirmed, or it is a live credential in the data directory.
+
+The script is deliberately pure ASCII. PowerShell 5.1 reads a BOM-less `.ps1` as CP1252, so a UTF-8 em-dash
+decodes to three characters ending in `0x94` — a right double quote — which closes whatever string it is in
+and spills the rest of the line out as code. The first version printed `-ForegroundColor Red` as text.
+
 ## Backups contain credentials
 
 `tools/backup.mjs` snapshots Latch's `auth.json` (the operator token — which **is** shell access on this
