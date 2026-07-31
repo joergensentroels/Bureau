@@ -66,54 +66,82 @@ if (-not $isAdmin -and -not $WhatIfPreference) {
 # The check that actually matters is the PROCESS OWNER. If node is owned by SYSTEM, the task started it; if
 # it is owned by troel, the Startup shortcut did, and the reboot proved nothing.
 if ($Verify) {
-  $ok = $true
+  # THREE outcomes, not two. The first version tracked only pass/fail and printed "ALL GOOD" while every
+  # process-owner line was a warning — a green verdict that contradicted its own checks, in the script whose
+  # only job is to say whether this worked. Before a reboot, processes owned by a logged-on user are EXPECTED,
+  # so that is neither a pass nor a failure: it is NOT YET PROVEN. Conflating "nothing is broken" with
+  # "the thing I was built to demonstrate has been demonstrated" is how a checklist becomes decoration.
+  $fail = @(); $unproven = @()
   Write-Host "--- tasks ---"
   $found = Get-ScheduledTask "$prefix*" -ErrorAction SilentlyContinue
-  if (-not $found) { Write-Host "  none visible. Either they are not installed, or this shell is not elevated." -ForegroundColor Red; $ok = $false }
+  if (-not $found) { Write-Host "  none visible. Either they are not installed, or this shell is not elevated." -ForegroundColor Red; $fail += "no tasks visible" }
+  if ($found.Count -lt 3) { $fail += "expected 3 tasks, found $($found.Count)" }
   foreach ($t in $found) {
     $i = $t | Get-ScheduledTaskInfo
     # LastTaskResult 267009 = "currently running", which is the healthy steady state for a server.
     $res = switch ($i.LastTaskResult) { 0 { "ok" } 267009 { "running" } 267011 { "not yet run" } default { "result=$($i.LastTaskResult)" } }
     Write-Host ("  {0,-20} {1,-8} as={2,-8} lastRun={3,-9} {4}" -f $t.TaskName, $t.State, $t.Principal.UserId,
       $(if ($i.LastRunTime.Year -gt 1999) { $i.LastRunTime.ToString("HH:mm:ss") } else { "never" }), $res)
+    if ($i.LastRunTime.Year -le 1999) { $unproven += "$($t.TaskName) has never run" }
+    if ($t.State -eq "Disabled") { $fail += "$($t.TaskName) is disabled" }
   }
   Write-Host "`n--- who owns the running processes? (SYSTEM = the task started it; you = the Startup shortcut did) ---"
   foreach ($port in 11434, 8787, 4173) {
     $conn = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $conn) { Write-Host ("  :{0,-6} NOT LISTENING" -f $port) -ForegroundColor Red; $ok = $false; continue }
+    if (-not $conn) { Write-Host ("  :{0,-6} NOT LISTENING" -f $port) -ForegroundColor Red; $fail += "port $port not listening"; continue }
     $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$($conn.OwningProcess)" -ErrorAction SilentlyContinue
     $owner = try { $o = Invoke-CimMethod -InputObject $proc -MethodName GetOwner; "$($o.Domain)\$($o.User)" } catch { "?" }
     $isSystem = $owner -match "SYSTEM"
     Write-Host ("  :{0,-6} pid={1,-7} {2,-14} owner={3}" -f $port, $conn.OwningProcess, $proc.Name, $owner) -ForegroundColor $(if ($isSystem) { "Green" } else { "Yellow" })
-    if (-not $isSystem) { Write-Host "         ^ started by a logged-on user, not the boot task" -ForegroundColor Yellow }
+    # Not a failure BEFORE a reboot — it is the expected state, and precisely what a reboot is meant to change.
+    if (-not $isSystem) { Write-Host "         ^ started by a logged-on user, not the boot task" -ForegroundColor Yellow; $unproven += "port $port is owned by $owner, not SYSTEM" }
   }
   Write-Host "`n--- the two things a SYSTEM account gets wrong by default ---"
   try {
     $tags = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/tags" -TimeoutSec 10
     $names = ($tags.models | ForEach-Object { $_.name }) -join ", "
     if ($tags.models.Count -gt 0) { Write-Host "  OLLAMA_MODELS resolved: $($tags.models.Count) model(s) - $names" -ForegroundColor Green }
-    else { Write-Host "  Ollama is up but reports NO models - OLLAMA_MODELS is wrong for this account" -ForegroundColor Red; $ok = $false }
-  } catch { Write-Host "  could not reach Ollama: $($_.Exception.Message)" -ForegroundColor Red; $ok = $false }
+    else { Write-Host "  Ollama is up but reports NO models - OLLAMA_MODELS is wrong for this account" -ForegroundColor Red; $fail += "Ollama reports no models" }
+  } catch { Write-Host "  could not reach Ollama: $($_.Exception.Message)" -ForegroundColor Red; $fail += "Ollama unreachable" }
   try {
     $ps = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/ps" -TimeoutSec 10
-    if (-not $ps.models -or $ps.models.Count -eq 0) { Write-Host "  no model loaded right now, so GPU use is unknown - run something, then re-check /api/ps" -ForegroundColor DarkYellow }
+    if (-not $ps.models -or $ps.models.Count -eq 0) {
+      Write-Host "  no model loaded right now, so GPU use is unknown - run something, then re-check /api/ps" -ForegroundColor DarkYellow
+      $unproven += "GPU use unverified (no model loaded)"
+    }
     else { foreach ($m in $ps.models) {
         $vram = [int64]$m.size_vram
         Write-Host ("  {0}: size_vram={1:N0} bytes -> {2}" -f $m.name, $vram, $(if ($vram -gt 0) { "ON GPU" } else { "CPU ONLY (session-0 GPU problem)" })) -ForegroundColor $(if ($vram -gt 0) { "Green" } else { "Red" })
-        if ($vram -le 0) { $ok = $false }
+        if ($vram -le 0) { $fail += "$($m.name) is on CPU only" }
     } }
-  } catch { Write-Host "  /api/ps unavailable: $($_.Exception.Message)" -ForegroundColor DarkYellow }
+  } catch { Write-Host "  /api/ps unavailable: $($_.Exception.Message)" -ForegroundColor DarkYellow; $unproven += "GPU use unverified (/api/ps unavailable)" }
   $authPath = Join-Path $latch "data\auth.json"
   try {
     $t = (Get-Content $authPath -Raw | ConvertFrom-Json).operatorToken
     $w = Invoke-RestMethod -Uri "http://127.0.0.1:4173/api/whoami" -Headers @{ Authorization = "Bearer $t" } -TimeoutSec 10
     Write-Host "  LATCH_DATA resolved: Bureau authenticated (role=$($w.role), remote=$($w.remote))" -ForegroundColor Green
     if (-not $w.remote) { Write-Host "         ^ remote guard is OFF while the tailnet serves this port" -ForegroundColor Yellow }
-  } catch { Write-Host "  Bureau did not authenticate - LATCH_DATA likely wrong for the account it runs as" -ForegroundColor Red; $ok = $false }
+  } catch { Write-Host "  Bureau did not authenticate - LATCH_DATA likely wrong for the account it runs as" -ForegroundColor Red; $fail += "Bureau did not authenticate" }
+
   Write-Host ""
-  if ($ok) { Write-Host "ALL GOOD. Once you have rebooted and seen this pass, delete the Startup shortcuts." -ForegroundColor Green }
-  else { Write-Host "NOT all good - see the red lines above. -Uninstall reverts to the Startup shortcuts." -ForegroundColor Red }
-  exit $(if ($ok) { 0 } else { 1 })
+  if ($fail.Count) {
+    Write-Host "FAILED - these are real problems:" -ForegroundColor Red
+    $fail | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
+    Write-Host "`n-Uninstall reverts to the Startup shortcuts." -ForegroundColor Red
+    exit 1
+  }
+  if ($unproven.Count) {
+    Write-Host "NOT YET PROVEN - nothing is broken, but the boot path has not been demonstrated:" -ForegroundColor Yellow
+    $unproven | ForEach-Object { Write-Host "  - $_" -ForegroundColor Yellow }
+    Write-Host "`nThis is the expected state BEFORE a reboot: the tasks exist and are Ready, but the running" -ForegroundColor Yellow
+    Write-Host "processes are still the ones your logon started. REBOOT, then run -Verify again." -ForegroundColor Yellow
+    Write-Host "Do NOT delete the Startup shortcuts until every process shows owner=SYSTEM." -ForegroundColor Yellow
+    exit 0   # not an error - just not evidence yet
+  }
+  Write-Host "PROVEN - all three run as SYSTEM after boot, models and token resolved." -ForegroundColor Green
+  Write-Host "Safe to delete the Startup shortcuts now:" -ForegroundColor Green
+  Write-Host "  Remove-Item `"$([Environment]::GetFolderPath('Startup'))\Start Bureau.lnk`",`"$([Environment]::GetFolderPath('Startup'))\Start Latch.lnk`",`"$([Environment]::GetFolderPath('Startup'))\Ollama.lnk`""
+  exit 0
 }
 
 if ($Uninstall) {
