@@ -9,7 +9,7 @@ import {
   approvalActType, remoteBlocksApproval, REMOTE_MODE,
   packVec, unpackVec, cosine, rrfFuse, memoryKey, memoryText,
   objectiveSignature, dedupeMemories, deliverableEmbedText, deliverableTitle,
-  chunkDocument, deliverableChunks,
+  chunkDocument, deliverableChunks, modelUnreachable,
 } from "../server.mjs";
 
 let pass = 0, fail = 0;
@@ -215,6 +215,18 @@ eq("  empty title → null", normPlanItem({ title: "  " }), null);
 eq("  valid status honored", normPlanItem({ title: "T", status: "doing" }).status, "doing");
 eq("  bad status → todo", normPlanItem({ title: "T", status: "nonsense" }).status, "todo");
 chk("  owner defaults from arg", normPlanItem({ title: "T" }, "agent_9").agentId === "agent_9");
+
+// A run where EVERY model call failed did no work. Before this predicate existed, such a run reported
+// verdict "none" and the delegation safety net wrote its own failure placeholders into the inbox as a
+// draft reading "The team completed the assigned tasks." — on a run that used zero tokens. The guard has
+// to be exact in BOTH directions: too loose and one flaky call condemns a run that actually delivered.
+console.log("# modelUnreachable — every call failed vs. some calls failed");
+chk("  no calls at all → not unreachable (nothing was attempted)", modelUnreachable({}) === false);
+chk("  all calls failed → unreachable", modelUnreachable({ llmFail: 5, llmOk: 0 }) === true);
+chk("  one success among failures → NOT unreachable (ordinary flakiness)", modelUnreachable({ llmFail: 9, llmOk: 1 }) === false);
+chk("  all calls succeeded → not unreachable", modelUnreachable({ llmFail: 0, llmOk: 4 }) === false);
+chk("  a single failure and nothing else → unreachable", modelUnreachable({ llmFail: 1 }) === true);
+chk("  undefined run → not unreachable (never condemn on missing data)", modelUnreachable(undefined) === false);
 
 // makeSemaphore is async, so run it in a top-level await block before the summary prints.
 await (async () => {

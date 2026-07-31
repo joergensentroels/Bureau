@@ -568,6 +568,14 @@ async function latchHealth() {
   } catch (e) { return { ok: false, latchUrl: LATCH_URL, pending: 0, reason: e.message }; }
 }
 
+// Per-run tally of whether the language model is answering at all. A run where EVERY call failed did no
+// work: it is an infrastructure failure (Ollama down, model not pulled, Latch unreachable), not a work
+// outcome, and reporting it as a finished run with a deliverable is a lie about what happened.
+function noteLlm(run, ok) {
+  if (!run) return;
+  if (ok) run.llmOk = (run.llmOk || 0) + 1; else run.llmFail = (run.llmFail || 0) + 1;
+}
+export function modelUnreachable(run) { return (run?.llmFail || 0) > 0 && (run?.llmOk || 0) === 0; }
 export async function askLlm(messages, opts = {}) {
   // Default 0.3 for creative/agent work; callers wanting stable structured output pass a lower
   // temperature (the gate/JSON calls use near-0 via askJsonReliable). ?? so an explicit 0 is honored.
@@ -1693,8 +1701,8 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
     let raw;
     const usePaid = canUsePaid();
     const meta = {};
-    try { raw = await askLlm(history, { maxTokens: 1000, routingPreference: usePaid ? "external" : "local", ...(usePaid && paidTier.model ? { model: paidTier.model } : {}), meta }); }
-    catch (e) { emit(run, "error", { agent: who, depth, message: e.message }); break; }
+    try { raw = await askLlm(history, { maxTokens: 1000, routingPreference: usePaid ? "external" : "local", ...(usePaid && paidTier.model ? { model: paidTier.model } : {}), meta }); noteLlm(run, true); }
+    catch (e) { noteLlm(run, false); emit(run, "error", { agent: who, depth, message: e.message }); break; }
     const callTokens = estTokens(history) + Math.ceil((raw.length) / 4);
     tokens += callTokens;
     if (meta.paid) {
@@ -2261,8 +2269,14 @@ async function delegate(run, org, managerName, managerId, reports, objective, pr
     { role: "user", content: `Objective: ${objective}\n\nCompleted work:\n${completed.map((c) => `- ${c.agent} (${c.task}): ${c.product}`).join("\n\n")}` },
   ];
   let report = "";
-  try { report = await askLlm(synthMsgs); const t = estTokens(synthMsgs) + Math.ceil(report.length / 4); tokens += t; addTally(tally, managerId, t); }
-  catch { report = "The team completed the assigned tasks."; }
+  // This fallback used to read "The team completed the assigned tasks." — a sentence ASSERTING success,
+  // written by Bureau itself on the path where the model call failed. Measured with the model
+  // unreachable: it became the run's product, was emitted as the manager's report, and got written into
+  // a deliverable that sat in the inbox claiming the work was done, on a run that used zero tokens. The
+  // same fabrication the turn loop guards against a few hundred lines up ("the weak local model tends to
+  // 'finish' claiming it did work it never did") — implemented here on purpose.
+  try { report = await askLlm(synthMsgs); noteLlm(run, true); const t = estTokens(synthMsgs) + Math.ceil(report.length / 4); tokens += t; addTally(tally, managerId, t); }
+  catch (e) { noteLlm(run, false); report = `Could not summarise the team's work — the model call failed (${e.message}). The individual results below are unchanged; this summary is missing, not empty.`; }
   emit(run, "report", { manager: managerName, depth, text: report.trim() });
   const body = completed.map((c) => `## ${c.agent} — ${c.task}\n\n${c.product}`).join("\n\n");
   return { product: report.trim(), tokens, body };
@@ -2331,7 +2345,8 @@ async function askJsonReliable(msgs, budgets = [1200, 3200], opts = {}) {
   for (const maxTokens of budgets) {
     let raw = "";
     const meta = {};
-    try { raw = await askLlm(msgs, { maxTokens, temperature, ...(route.paid ? { routingPreference: "external", model: route.model } : {}), meta }); } catch { break; }
+    try { raw = await askLlm(msgs, { maxTokens, temperature, ...(route.paid ? { routingPreference: "external", model: route.model } : {}), meta }); noteLlm(opts.run, true); }
+    catch { noteLlm(opts.run, false); break; }
     if (meta.paid) route.book(meta.usage?.total_tokens || (estTokens(msgs) + Math.ceil(raw.length / 4)), meta.model);
     tokens += estTokens(msgs) + Math.ceil(raw.length / 4);
     if (raw) lastRaw = raw;
@@ -2582,6 +2597,13 @@ async function runGated(run, worker, persistExtra, perAgentTally) {
     objective = `${run.objective}\n\nA QA verifier reviewed the work and these acceptance criteria are NOT yet met. Fix each one and update/save the SAME existing deliverable (use the same filename to overwrite it — do NOT create a new file):\n${unmet.map((c) => `- ${c.text}${c.note ? ` — ${c.note}` : ""}`).join("\n")}`;
     emit(run, "remediate", { attempt, unmet: unmet.map((c) => c.text) });
   }
+  // If the model never answered once, nothing below is a real result. Report it as the infrastructure
+  // failure it is rather than a run with verdict "none" — which reads, next to a file_write the safety
+  // net fabricated, as a job quietly done.
+  if (modelUnreachable(run)) {
+    await failRun(run, `the language model never answered — ${run.llmFail} call(s) failed and none succeeded, so this run did no work. Check that Ollama is running and the model is pulled.`, { ...persistExtra });
+    return { verdict: "error", tokens };
+  }
   const unmet = run.criteria.filter((c) => c.status === "unmet");
   const open = run.criteria.filter((c) => c.status === "open");
   const met = run.criteria.filter((c) => c.status === "met").length;
@@ -2633,7 +2655,10 @@ async function runDelegation(run) {
     finally { MEETING.clear(); }
     // Safety net: if the objective wanted a written deliverable but no agent saved a file,
     // save the team's combined work so the inbox always reflects what the company produced.
-    if (expectsDeliverable(run.objective) && !run.wroteFile && (result.body || result.product)) {
+    // The safety net exists so a written deliverable is never lost. It must not INVENT one: with the
+    // model unreachable, `result.product`/`body` are only Bureau's own failure placeholders, and this
+    // wrote them into the inbox as a draft — an audited file_write, ok=true, on a run that used 0 tokens.
+    if (expectsDeliverable(run.objective) && !run.wroteFile && (result.body || result.product) && !modelUnreachable(run)) {
       const r = await writeDraft(run.objective.split(/\s+/).slice(0, 6).join(" "), `# ${run.objective}\n\n${result.product}\n\n---\n\n${result.body}`);
       if (r.ok) { emitResult(run, { agent: "Manager", depth: 0, actionType: "file_write", url: `drafts/${r.name}`, ok: true, bytes: r.bytes, error: "", decidedBy: "auto" }); if (!run.producedFiles.includes(r.name)) run.producedFiles.push(r.name); }
     }

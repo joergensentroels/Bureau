@@ -65,6 +65,7 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
 | `DELETE /api/deliverables/:name` — validation, not-found, traversal neutralised | api (happy path live) |
 | Inbound triggers — unknown/disabled token → 404, token shape, list auth | api (guards live) |
 | Failed-run accounting — abnormal exits audited with a reason, counted, listed in `/api/runs` | workspaces |
+| `modelUnreachable` — all-failed vs. one-success-among-failures, both directions | units |
 | Notification webhook — `/api/notify/test`, dead endpoint → 502 + audit row, HTTP 500 ≠ delivered | workspaces |
 | `run_failed` push on the failure path (it used to push nothing) | workspaces |
 | `/stop` on an unknown run → 404 (it used to confirm `ok:true`) | robustness |
@@ -92,6 +93,14 @@ _Done 2026-07-31: the page boots with no JS errors; unauthenticated, it correctl
 while keeping `👁 read-only` and `🔒 remote mode` hidden; and the **poller gate holds** — six boot requests
 and then silence, where the 2s/7s/12s pollers would otherwise have kept firing (they were measured at
 ~83 requests/minute before that fix)._
+
+**What Bureau produces when the model is unreachable** (needs a spawned server + a live one; verified
+2026-07-31, 9 checks). Scripted because it needs a second Bureau pointed at a dead `LATCH_URL` alongside
+a healthy one. Measured before fixing: the run reported verdict `none`, wrote an audited `file_write`
+with `ok=true`, and left a draft in the inbox reading _"The team completed the assigned tasks."_ — on a
+run that used **zero tokens**. Now it fails with the cause in the audit row and writes nothing. The
+control half matters as much: the same guard must not fire on a healthy run, so the script also runs one
+against the real model and asserts `verdict != error`, real tokens, and a deliverable.
 
 **The scheduler, observed firing for the first time** (needs a live server + model; verified 2026-07-31,
 10 checks). It runs on a 60s timer and had never been seen working — because it *couldn't* be: no API
