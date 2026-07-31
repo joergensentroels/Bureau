@@ -32,22 +32,27 @@ cross-sibling handoff, so siblings can duplicate reasoning the sequential path w
     concurrency yields 0.92x locally, ordering it more cleverly cannot help locally either. Stage 2 only
     pays off where the underlying calls actually overlap, i.e. the paid tier. Still gated on measuring
     whether a `dependsOn` field regresses decompose reliability (already the flakiest JSON call).
-  - **Paid tier measured 2026-07-31 (`--paid`, one pair, $0.25) — parallel looks like a real ~2.4x win
-    there, but the single pair is CONTAMINATED and wants repeating.**
-    - sequential 1165.9s vs parallel 494.2s, same 4 sub-tasks both, concurrency confirmed (1 vs 3
-      dispatched within a second) → **2.36x**, against 0.92x locally. Directionally exactly what theory
-      predicts: external calls don't share one process, so overlapping them actually overlaps.
-    - **First useful fact: a paid sub-task takes ~300s against ~30s locally (~10x).** That, not the
-      concurrency, is why the local measurement found nothing to win.
-    - **The confound:** the parallel run hit `"The engine is currently overloaded, please try again
-      later"` from Moonshot. A failed paid call can fall back to the ~10x faster local model, which would
-      flatter the parallel side. So 2.36x is an upper bound, not a measurement.
-    - **Second useful fact, operational:** firing 3 concurrent Kimi requests is enough to trip a provider
-      overload. Anyone turning on parallel + paid should expect that, and `ORCH_MAX_PARALLEL` is the dial.
-    - **Cost model correction:** billed paid tokens ran ~1.75x the run's own token figure (68,674 vs
-      39,199), because each turn resends the growing history. Budget ~$0.14/run, not the ~$0.07 a naive
-      token count suggests.
-    - To settle it: 3 more pairs (~$0.75, ~90 min) and discard any pair that logs a provider error.
+  - **PAID TIER SETTLED 2026-07-31 — parallel is worth ~1.7x there (range 1.57–1.73x), against 0.92x
+    locally. Total cost of the measurement: $1.48 over 5 pairs.**
+    - **The answer:** 3 matched pairs (equal sub-task counts, no provider error, no cap hit) gave
+      1.57x and 1.73x on 4-sub-task runs, plus 2.29x on an 8-sub-task run whose sequential arm hit the
+      spend cap and is therefore excluded. **Quote ~1.6–1.7x.** The median of per-pair ratios is the right
+      statistic here, not the ratio of medians — with n=3 the latter degenerated into echoing one pair.
+    - **The first, exciting 2.36x was contaminated** by a Moonshot overload error letting part of the
+      parallel run fall back to the ~10x faster local model. Repeating it under a strict filter cut it to
+      ~1.7x. Worth remembering next time a single flattering pair shows up.
+    - **Why paid differs from local at all: a paid sub-task takes ~300s against ~30s (~10x).** Locally
+      there is simply no latency to hide, which is why blanket concurrency measured 0.92x there.
+    - **Cost is roughly a wash, NOT a penalty** — and this corrects an earlier claim of "+26%" made from a
+      single pair. Across pairs, parallel ran +26%, −11% and −20% on spend: no reliable direction. The
+      no-cross-sibling-handoff design should cost extra tokens in principle, but it does not show up
+      consistently at this sample size.
+    - **Operational:** 3 concurrent Kimi requests is enough to trip `"The engine is currently
+      overloaded"`. `ORCH_MAX_PARALLEL` is the dial; consider 2 for paid-heavy work.
+    - **Cost model:** billed paid tokens run ~1.75–2x the run's own token figure, because every turn
+      resends the growing history. Budget **~$0.15/run** for a 4-sub-task company run.
+    - **So: enable `parallel` for paid-heavy runs, leave it off for local ones.** That is now measured
+      rather than assumed, in both directions.
 
 **The eval gate is currently RED, and deliberately left that way.** `node eval/run-eval.mjs --baseline`
 (8 reps, 2026-07-31) reports `criteria.singleShotRate: 100% → 78%`, past the 15% tolerance. Decompose

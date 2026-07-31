@@ -31,6 +31,12 @@ const KEEP = process.argv.includes("--keep");
 // half-paid and its timing meaningless. It is a runaway stop, not a budget.
 const CAP_PER_RUN = Number(arg("--cap", 0.25));
 const AGENT_BUDGET = Number(arg("--agent-budget", 0.5));
+// Retry until enough COMPARABLE pairs exist, because decompose is nondeterministic: a pair can come back
+// with 1 sub-task (nothing to parallelise) or with mismatched counts (unequal work). Both bounds exist so
+// "until" cannot mean "indefinitely": attempts, and — with --paid — recorded dollars.
+const TARGET_PAIRS = Number(arg("--pairs", 3));
+const MAX_ATTEMPTS = Number(arg("--max-attempts", 8));
+const SPEND_CEILING = Number(arg("--spend-ceiling", 2.5));
 const OBJECTIVE = arg("--objective",
   "Produce a short internal brief on how the company should handle customer feedback: gather input from the relevant teams, then combine it into one document.");
 
@@ -119,7 +125,7 @@ const fmt = (n, d = 1) => Number(n).toFixed(d);
   const created = await api("POST", "/api/workspaces", { name: "Parallel Eval" });
   WS = created.j.id;
   if (!WS) { console.error("could not create a workspace — is Bureau running with the right token?"); process.exit(2); }
-  console.log(`throwaway workspace: ${WS}\nobjective: ${OBJECTIVE.slice(0, 80)}…\nruns per mode: ${RUNS}\n`);
+  console.log(`throwaway workspace: ${WS}\nobjective: ${OBJECTIVE.slice(0, 80)}…\ntarget: ${TARGET_PAIRS} usable pair(s), up to ${MAX_ATTEMPTS} attempts\n`);
   try {
     if (PAID) {
       // Refuse to start rather than quietly measure local runs and label them "paid".
@@ -130,7 +136,11 @@ const fmt = (n, d = 1) => Number(n).toFixed(d);
       if (Number(back.maxPaidUsdPerRun) !== CAP_PER_RUN) { console.error(`spend cap did not stick (${JSON.stringify(back)}) — refusing to run unbounded`); process.exit(2); }
       console.log(`PAID MODE — model ${h.paid.model} via ${h.paid.provider}`);
       console.log(`  ceilings: $${CAP_PER_RUN}/run (server-side) and $${AGENT_BUDGET}/agent, workspace-scoped`);
-      console.log(`  worst case this session: ${RUNS * 2} runs x $${CAP_PER_RUN} = $${(RUNS * 2 * CAP_PER_RUN).toFixed(2)}\n`);
+      // State the bound that ACTUALLY binds. The per-run cap x attempts is the wrong figure: the spend
+      // ceiling is checked before each pair, so the true worst case is the ceiling plus at most one
+      // pair's overshoot (a pair begun just under it can still finish).
+      console.log(`  stops at whichever comes first: ${TARGET_PAIRS} usable pairs · ${MAX_ATTEMPTS} attempts · $${SPEND_CEILING} recorded spend`);
+      console.log(`  worst case ≈ $${(SPEND_CEILING + 2 * CAP_PER_RUN).toFixed(2)} (the ceiling is checked BETWEEN pairs, so one pair can overshoot it)\n`);
     }
     await api("POST", "/api/company", { name: "Speedco" });
     // A manager with several reports — parallelism only exists where a manager has siblings to dispatch.
@@ -146,13 +156,43 @@ const fmt = (n, d = 1) => Number(n).toFixed(d);
     console.log(`hired: Mara + 3 reports${PAID ? ` (each funded $${fund})` : ""}\n`);
 
     const results = { sequential: [], parallel: [] };
-    // Alternate modes so any drift in machine load is shared between them rather than biasing one.
-    for (let i = 0; i < RUNS; i++) {
-      for (const mode of ["sequential", "parallel"]) {
-        process.stdout.write(`  run ${i + 1} ${mode.padEnd(10)} … `);
+    const pairs = [];
+    let spent = 0;
+    // Usability is a property of the PAIR, not of a run. A sequential run is only a valid control for the
+    // parallel run it is compared against, so both halves have to be sound AND comparable.
+    //
+    // The <2 sub-task rule is the one that only became obvious from real data: decompose sometimes emits a
+    // single task, and a run with one sub-task cannot exhibit concurrency at all — it is not a slow
+    // parallel run, it is a run with nothing to parallelise. Pooling those drags any speedup toward 1.0x
+    // and looks like evidence against parallelism when it is really an absence of evidence.
+    const rejectReason = (s, p) => {
+      if (!s || !p) return "a run failed to start";
+      if (s.timedOut || p.timedOut) return "a run was cancelled, so its spend and timing are unaccounted";
+      if (s.note || p.note) return `provider error (${(s.note || p.note).slice(0, 60)}) — a failed paid call can fall back to the ~10x faster local model`;
+      if (s.subtasks < 2 || p.subtasks < 2) return `nothing to parallelise (${s.subtasks} vs ${p.subtasks} sub-tasks; need >= 2)`;
+      if (s.subtasks !== p.subtasks) return `unequal work (${s.subtasks} vs ${p.subtasks} sub-tasks) — decompose variance, the confound that invalidated the July measurement`;
+      // A run that exhausted the per-run spend cap finished its tail on the LOCAL model, which is ~10x
+      // faster — so its wall-clock is a paid/local mixture, not a paid measurement. This condition was
+      // already detected and warned about per-run, but not enforced here, so a contaminated pair was
+      // still counted as usable. Detecting a contaminant and then pooling it anyway is the same mistake
+      // as printing a warning nobody acts on.
+      if (PAID && (s.usd >= CAP_PER_RUN || p.usd >= CAP_PER_RUN))
+        return `a run hit the $${CAP_PER_RUN} per-run cap ($${Math.max(s.usd, p.usd).toFixed(4)}), so its tail ran on the local model and the timing is a paid/local mixture`;
+      return "";
+    };
+    // Keep going until enough USABLE pairs exist, bounded by attempts and by spend so "until" can never
+    // mean "indefinitely" with someone's money.
+    while (pairs.filter((x) => x.usable).length < TARGET_PAIRS && pairs.length < MAX_ATTEMPTS) {
+      if (PAID && spent >= SPEND_CEILING) { console.log(`\nSTOPPING EARLY: spend ceiling $${SPEND_CEILING} reached ($${spent.toFixed(4)} recorded).`); break; }
+      const attempt = pairs.length + 1;
+      const got = {};
+      for (const mode of ["sequential", "parallel"]) {   // alternate so load drift hits both arms
+        process.stdout.write(`  pair ${attempt} ${mode.padEnd(10)} … `);
         try {
           const r = await timedRun(mode === "parallel");
+          got[mode] = r;
           results[mode].push(r);
+          spent += r.usd || 0;
           console.log(`${fmt(r.secs)}s  assigned=${r.subtasks} planned=${r.planned} batches=${r.batches}` +
             `  dispatched-at-once=${r.burst == null ? "n/a" : r.burst}  tokens=${r.tokens}` +
             // Only a CANCELLED run has no accounting: spend lands in the `budget` event, which a stopped
@@ -168,15 +208,64 @@ const fmt = (n, d = 1) => Number(n).toFixed(d);
           if (r.subtasks === 0) console.log(`      events: ${Object.entries(r.types).map(([k, v]) => `${k}:${v}`).join(" ")}`);
         } catch (e) { console.log("FAILED: " + e.message); }
       }
+      const why = rejectReason(got.sequential, got.parallel);
+      pairs.push({ s: got.sequential, p: got.parallel, usable: !why, why });
+      const nUsable = pairs.filter((x) => x.usable).length;
+      console.log(why ? `    ✗ pair ${attempt} REJECTED — ${why}` : `    ✓ pair ${attempt} usable (${got.sequential.subtasks} sub-tasks each)`);
+      console.log(`    progress: ${nUsable}/${TARGET_PAIRS} usable · ${pairs.length}/${MAX_ATTEMPTS} attempts` + (PAID ? ` · $${spent.toFixed(4)} spent of $${SPEND_CEILING} ceiling` : ""));
     }
 
-    console.log("\n──────── results ────────");
+    // ---- the answer, computed ONLY from usable pairs ----
+    const usable = pairs.filter((x) => x.usable);
+    console.log(`\n════════ USABLE PAIRS: ${usable.length}/${TARGET_PAIRS} (from ${pairs.length} attempts) ════════`);
+    if (usable.length) {
+      for (const [i, u] of usable.entries())
+        console.log(`  pair ${i + 1}: ${fmt(u.s.secs)}s sequential vs ${fmt(u.p.secs)}s parallel  (${u.s.subtasks} sub-tasks, ${fmt(u.s.secs / u.p.secs, 2)}x)`);
+      // For MATCHED pairs the right statistic is the median of the per-pair ratios, not the ratio of the
+      // two medians: those medians can come from different pairs, which throws away the pairing that the
+      // whole design exists to preserve. (With n=3 the ratio-of-medians degenerated into simply echoing
+      // one pair's ratio.) Both are printed, ratio-of-ratios first.
+      const ratios = usable.map((u) => u.s.secs / u.p.secs);
+      const mSeq = median(usable.map((u) => u.s.secs)), mPar = median(usable.map((u) => u.p.secs));
+      console.log(`\n  >>> SPEEDUP: ${fmt(median(ratios), 2)}x  — median of per-pair ratios (n=${usable.length}), range ${fmt(Math.min(...ratios), 2)}–${fmt(Math.max(...ratios), 2)}x`);
+      console.log(`      (ratio of medians, for reference: ${fmt(mSeq / mPar, 2)}x — sequential ${fmt(mSeq)}s vs parallel ${fmt(mPar)}s)`);
+      // Cost is the other half of the tradeoff and moves independently of speed.
+      const costs = usable.map((u) => (u.p.usd || 0) / (u.s.usd || 1));
+      if (PAID) console.log(`      cost of parallel vs sequential: ${usable.map((u, i) => `pair${i + 1} ${fmt(100 * costs[i] - 100, 0)}%`).join(", ")} (median ${fmt(100 * median(costs) - 100, 0)}%)`);
+      if (usable.length < TARGET_PAIRS) console.log(`  ⚠ fewer than the ${TARGET_PAIRS} pairs asked for — treat this as provisional.`);
+    } else {
+      console.log("  ⚠ NO usable pairs. Quote nothing from the per-mode aggregates below; they pool runs that are not comparable.");
+    }
+    if (pairs.some((x) => !x.usable)) {
+      console.log("\n  rejected pairs and why:");
+      pairs.filter((x) => !x.usable).forEach((x, i) => console.log(`    - ${x.why}`));
+    }
+
+    console.log("\n──────── all runs pooled (for reference only — includes non-comparable runs) ────────");
     for (const mode of ["sequential", "parallel"]) {
       const rs = results[mode];
       if (!rs.length) { console.log(`${mode}: no successful runs`); continue; }
       const secs = rs.map((r) => r.secs), subs = rs.map((r) => r.subtasks);
       const perTask = rs.filter((r) => r.subtasks > 0).map((r) => r.secs / r.subtasks);
       console.log(`${mode.padEnd(11)} median ${fmt(median(secs))}s  (range ${fmt(Math.min(...secs))}–${fmt(Math.max(...secs))})  subtasks median ${median(subs)}  sec/subtask median ${perTask.length ? fmt(median(perTask)) : "n/a"}`);
+    }
+    // A run that logged a provider error may have fallen back to the ~10x faster local model, so it
+    // cannot be pooled with clean runs. Discarding those is part of the protocol, not a judgement call
+    // made afterwards — so the harness does it here rather than leaving it to whoever reads the output.
+    const clean = (rs) => rs.filter((r) => !r.note && !r.timedOut);
+    const cs = clean(results.sequential), cp = clean(results.parallel);
+    if (PAID) {
+      // Kept only as a cross-check on the pooled data. This block predates the pair logic and used to be
+      // labelled "the number to quote" — which was wrong once pairing existed: it pools runs from
+      // DIFFERENT pairs, so unequal sub-task counts and cap-hit runs leak straight back in. On this run it
+      // read 1.98x against the matched-pair answer of 1.73x, purely from that pooling. The matched-pair
+      // block above is authoritative; if the two disagree, believe the pairs.
+      console.log(`\n──────── pooled cross-check (NOT the answer — mixes runs across pairs) ────────`);
+      console.log(`  sequential: ${cs.length}/${results.sequential.length} error-free · parallel: ${cp.length}/${results.parallel.length}`);
+      if (cs.length && cp.length) {
+        const cSeq = median(cs.map((r) => r.secs)), cPar = median(cp.map((r) => r.secs));
+        console.log(`  ratio of pooled medians: ${fmt(cSeq / cPar, 2)}x  (${fmt(cSeq)}s vs ${fmt(cPar)}s) — expect this to overstate; quote the matched-pair figure`);
+      }
     }
     const sq = results.sequential, pl = results.parallel;
     if (sq.length && pl.length) {
