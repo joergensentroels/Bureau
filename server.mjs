@@ -47,6 +47,7 @@ const profilesDir = (ws = currentWs()) => ws === "default" ? _PROFILES_DEFAULT :
 const draftsDir = (ws = currentWs()) => ws === "default" ? _DRAFTS_DEFAULT : path.join(HERE, `drafts-${ws}`);
 const versionsDir = (ws = currentWs()) => path.join(draftsDir(ws), ".versions");   // prior versions of each deliverable (name.<ts>)
 const VERSION_KEEP = Math.max(1, Number(process.env.BUREAU_VERSION_KEEP) || 20);   // per-document archive cap — enforced on DISK as well as in metadata
+const AGENT_MEMORY_KEEP = 8;   // entries retained per agent — DISTINCT objectives, not raw rows (see persistRun)
 // Split a document's version list into what to keep and what to delete. Pure, and exported, because the
 // off-by-one is the whole risk: `drop` must be exactly the entries `keep` no longer contains, or the
 // unlink loop below either leaks files forever (too few) or deletes archives still listed (too many).
@@ -2089,7 +2090,16 @@ async function persistRun(objective, tokens, extra, perAgent, memoryEntries, pai
     }
     for (const e of (memoryEntries || [])) {                             // agents remember what they did
       const a = org.agents.find((x) => x.id === e.agentId);
-      if (a) { a.memory = [{ at: e.at, objective: e.objective, summary: e.summary, files: e.files || [] }, ...(a.memory || [])].slice(0, 8); }
+      // Dedupe at WRITE time, not only at recall. This was a blind prepend into a cap of 8, so repeats
+      // of ONE objective evicted distinct history: measured on the live corpus, five of one agent's
+      // eight slots held the same e2e objective and its whole real history from three prior weeks was
+      // gone. Recall-time dedupe — added for exactly this symptom — collapses duplicates in the
+      // ranking but cannot recover what the cap already discarded. Same preference logic both places:
+      // keep the copy that carries a summary, then the newer one.
+      if (a) {
+        const merged = [{ at: e.at, objective: e.objective, summary: e.summary, files: e.files || [] }, ...(a.memory || [])];
+        a.memory = dedupeMemories(merged).slice(0, AGENT_MEMORY_KEEP);
+      }
     }
     org.activity.unshift({ objective, tokens, at: Date.now(), ...extra });
     org.activity = org.activity.slice(0, 50);

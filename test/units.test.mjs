@@ -216,6 +216,31 @@ eq("  valid status honored", normPlanItem({ title: "T", status: "doing" }).statu
 eq("  bad status → todo", normPlanItem({ title: "T", status: "nonsense" }).status, "todo");
 chk("  owner defaults from arg", normPlanItem({ title: "T" }, "agent_9").agentId === "agent_9");
 
+// The per-agent memory cap keeps 8 entries. persistRun used to blind-prepend, so repeats of ONE
+// objective ate the slots and evicted distinct history — measured live: 5 of one agent's 8 rows were the
+// same e2e objective and three weeks of real work was gone. persistRun now runs the same dedupe the
+// ranker uses BEFORE truncating, so the cap holds 8 distinct objectives rather than 8 rows.
+console.log("# per-agent memory retention — duplicates must not evict distinct history");
+{
+  const KEEP = 8;
+  const dup = (n, at) => ({ at, objective: "Save a one-paragraph welcome note for a new customer named Sam.", summary: `run ${n}` });
+  const distinct = (i) => ({ at: 100 + i, objective: `Distinct task number ${i} about topic ${i}.`, summary: `did ${i}` });
+  // Five repeats of one objective arriving on top of four distinct memories.
+  const incoming = [dup(5, 205), dup(4, 204), dup(3, 203), dup(2, 202), dup(1, 201)];
+  const history = [distinct(4), distinct(3), distinct(2), distinct(1)];
+  const blind = [...incoming, ...history].slice(0, KEEP);
+  chk("  the old blind prepend loses distinct history (this is the bug, asserted)", blind.filter((m) => /Distinct/.test(m.objective)).length === 3);
+  const fixed = dedupeMemories([...incoming, ...history]).slice(0, KEEP);
+  chk("  after write-time dedupe all four distinct memories survive", fixed.filter((m) => /Distinct/.test(m.objective)).length === 4);
+  chk("  the five repeats collapse to one slot", fixed.filter((m) => /welcome note/.test(m.objective)).length === 1);
+  chk("  and the whole history fits inside the cap", fixed.length === 5 && fixed.length <= KEEP);
+  // A summary-less repeat must not displace the attempt that actually produced work.
+  const withWork = { at: 300, objective: "Write the quarterly brief.", summary: "Saved brief.md with three sections." };
+  const stopped = { at: 400, objective: "Write the quarterly brief.", summary: "(stopped without a summary)" };
+  const merged = dedupeMemories([stopped, withWork]);
+  chk("  a later STOPPED run does not overwrite the attempt that did the work", merged.length === 1 && /Saved brief/.test(merged[0].summary));
+}
+
 // Version metadata was capped at 20 while the .versions DIRECTORY was never pruned, so archives past the
 // cap became files nothing listed and nothing deleted (measured: 116 on disk, 10 listed). Now the same
 // split drives both, which makes the off-by-one the entire risk: `drop` too small leaks forever, too

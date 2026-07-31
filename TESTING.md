@@ -96,6 +96,14 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
 
 ## Intentionally not auto-tested (accounted for — audit allowlist)
 
+**The recall eval's absolute numbers move when the corpus does — read the variant ORDERING.** Memory
+recall@3 read 10/12 on 2026-07-30 and 8/12 on 2026-07-31 with the ranker untouched. Cause: every live
+`e2e-autonomy` run writes real memory entries against one agent, `agent.memory` keeps only 8, and the
+labelled queries' targets had been evicted. The ordering — hybrid ≫ lexical (8/12 vs 5/12), weighting
+vectors no better — was identical, and that ordering is what the eval exists to gate. **Before reading a
+delta as a regression, check whether the corpus still contains what the labels point at**
+(`GET /api/memory?q=`, or list `agent.memory` per agent).
+
 **Retrieval quality is measured, not asserted** (`eval/recall-eval.mjs`, needs a live server + embedder):
 recall@3 over 12 labelled queries against the live corpus. It exists because a single bad-looking query
 is a terrible reason to change a ranker — every "obvious" improvement to the fusion measured the same or

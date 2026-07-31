@@ -14,6 +14,15 @@
 //               destroying, and the archive name is printed, so nothing becomes unrecoverable.
 //               (This used to read "there is no delete endpoint for deliverables, so it cannot remove
 //               them" — true when written, and quietly false from the moment that endpoint landed.)
+//   CANNOT undo — the memory slots it consumes. Every scenario is a real run, and each one writes an
+//               entry into the agent-under-test's memory, which keeps only the last 8. Nothing in the
+//               API can restore an evicted entry. Measured 2026-07-31: repeated e2e runs had filled
+//               ALL EIGHT of Ada's slots with this test's objectives and pushed out three weeks of
+//               real work, which moved memory recall@3 from 10/12 to 8/12 with the ranker untouched.
+//               persistRun now de-duplicates before truncating, so the identical objective can only
+//               take ONE slot instead of five — but the cost is 2–3 slots per run, not zero. Run this
+//               against a throwaway company if the corpus matters, and re-run eval/recall-eval.mjs
+//               afterwards knowing the corpus moved.
 //
 // A note on the model: qwen3 decides which action to propose, and it does not always choose the one a
 // scenario needs. Scenarios retry a bounded number of times to obtain their precondition and report
