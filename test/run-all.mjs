@@ -26,7 +26,14 @@ function run(file) {
     child.stdout.on("data", (d) => (out += d));
     child.stderr.on("data", (d) => (out += d));
     child.on("close", (code) => {
-      const summary = (out.split("\n").reverse().find((l) => /passed|PASS|FAIL/.test(l)) || "").trim();
+      // Match the summary LINE SHAPE the suites actually print, not any line that happens to contain
+      // "PASS"/"FAIL" — an assertion message reading "a FAILED run now pushes …" hijacked this and got
+      // reported as the suite result. Fall back to the loose match so a suite with a different shape
+      // still shows something rather than a blank.
+      const lines = out.split("\n").map((l) => l.trim()).reverse();
+      const summary = lines.find((l) => /^(ALL PASS|FAILURES)/.test(l))
+        || lines.find((l) => /\d+ passed/.test(l))
+        || lines.find((l) => /passed|PASS|FAIL/.test(l)) || "";
       resolve({ file, code, summary, out });
     });
   });

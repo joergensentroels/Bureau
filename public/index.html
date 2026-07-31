@@ -614,6 +614,15 @@ async function refreshInbox(){
 }
 let _lastApprovals=null;
 function notifyEnabled(){ return localStorage.getItem("bureau_notify")==="1" && "Notification" in window && Notification.permission==="granted"; }
+// A configured webhook used to look identical whether it was delivering or had been failing for a week.
+// This line says which — "not tested yet" is an honest state, not a blank.
+function notifyStateLine(d){
+  if(!d) return `Not tested yet — a saved URL is not evidence it works. Press Test.`;
+  const when=new Date(d.at).toLocaleTimeString();
+  if(d.ok) return `<span style="color:var(--ok)">✓ delivered</span> at ${when}${d.ms?` (${d.ms}ms)`:""}`;
+  const n=d.consecutiveFails>1?` — ${d.consecutiveFails} in a row`:"";
+  return `<span style="color:var(--danger)">✗ last delivery FAILED</span> at ${when} — ${esc(String(d.error||"unknown").slice(0,120))}${n}`;
+}
 function maybeNotify(approvals){
   if(_lastApprovals===null){ _lastApprovals=approvals; return; }   // set a baseline on the first poll, don't alert
   if(notifyEnabled() && approvals>_lastApprovals){
@@ -671,7 +680,9 @@ async function openGuardrails(){
       <div><label>Auto-approve purchases under ($ — 0 = off)</label><input id="gAuto" type="number" min="0" step="1" value="${g.autoApproveUnderUsd||0}"></div>
       <div><label>Max real actions per run (0 = unlimited)</label><input id="gCap" type="number" min="0" max="100" step="1" value="${g.maxActionsPerRun||0}"></div>
       <div><label>Max paid-model spend per run ($ — 0 = unlimited)</label><input id="gPaid" type="number" min="0" step="0.01" value="${g.maxPaidUsdPerRun||0}"></div>
-      <div><label>Notification webhook <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">— optional; POSTed on run-done &amp; needs-approval</span></label><input id="gWebhook" type="text" placeholder="https://hooks.slack.com/… (blank = none)" value="${esc(nt.webhook||"")}"></div>
+      <div><label>Notification webhook <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">— optional; POSTed on run-done, run-failed &amp; needs-approval</span></label>
+        <div class="row" style="gap:6px;align-items:center"><input id="gWebhook" type="text" placeholder="https://hooks.slack.com/… (blank = none)" value="${esc(nt.webhook||"")}" style="flex:1"><button id="gWhTest" title="Send a test event now and show what the endpoint actually answered">Test</button></div>
+        <div id="gWhState" class="dim" style="font-size:11px;margin-top:4px">${notifyStateLine(nt.lastDelivery)}</div></div>
     </div>
     <div class="dim" style="font-size:11px;margin-top:8px">Purchases over the threshold always require your decision in Latch — even on auto-approve or scheduled runs. Which action types each agent may use is set per-agent (open an agent → Advanced).</div>
     <div class="row" style="justify-content:flex-end;gap:10px;margin-top:12px"><button class="primary" id="gs">Save limits</button></div>
@@ -716,6 +727,21 @@ async function openGuardrails(){
     await api("POST","/api/guardrails",{ autoApproveUnderUsd:parseFloat(wrap.querySelector("#gAuto").value)||0, maxActionsPerRun:parseInt(wrap.querySelector("#gCap").value)||0, maxPaidUsdPerRun:parseFloat(wrap.querySelector("#gPaid").value)||0 });
     await api("POST","/api/notify",{ webhook: wrap.querySelector("#gWebhook").value.trim() });
     const b=wrap.querySelector("#gs"); const t=b.textContent; b.textContent="Saved ✓"; setTimeout(()=>{ b.textContent=t; },1200);
+  };
+  // Saving a URL is not evidence it works. Test saves first, then reports what the endpoint answered.
+  wrap.querySelector("#gWhTest").onclick=async()=>{
+    const btn=wrap.querySelector("#gWhTest"), out=wrap.querySelector("#gWhState");
+    btn.disabled=true; btn.textContent="Testing…";
+    try{
+      await api("POST","/api/notify",{ webhook: wrap.querySelector("#gWebhook").value.trim() });
+      // api() resolves for non-2xx too, so read the payload rather than trusting that no throw = success.
+      const r=await api("POST","/api/notify/test",{});
+      out.innerHTML = r && r.ok
+        ? notifyStateLine({ at:Date.now(), ok:true, status:r.status, error:"", ms:r.ms })
+        : notifyStateLine({ at:Date.now(), ok:false, status:(r&&r.status)||0, error:(r&&(r.error||r.raw))||"no response" });
+    }catch(e){
+      out.innerHTML=`<span style="color:var(--danger)">✗ test failed — ${esc(String(e&&e.message||e).slice(0,140))}</span>`;
+    }finally{ btn.disabled=false; btn.textContent="Test"; }
   };
   wrap.querySelector("#ghSave").onclick=async()=>{
     await api("POST","/api/integrations",{ github:{ owner: wrap.querySelector("#ghOwner").value.trim(), repo: wrap.querySelector("#ghRepo").value.trim() } });

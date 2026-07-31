@@ -4,6 +4,7 @@
 //   start:  BUREAU_PORT=4174 node server.mjs
 //   run:    BUREAU_PORT=4174 node test/workspaces.test.mjs
 import { readFileSync } from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 const PORT = process.env.BUREAU_PORT || 4174;
@@ -78,6 +79,49 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // /stop used to answer {ok:true} for any id at all, including one that never existed.
   ok((await api("POST", "/api/run/nope_run/stop", {}, b.id)).status === 404, "stop: unknown run → 404 (it used to claim ok:true)");
+
+  // ---- the notification webhook, the one path whose whole job is to reach an absent operator -------
+  // It was fire-and-forget in the strongest sense: `.catch(() => {})` around a fetch whose response was
+  // never read. Measured before changing — a webhook on a closed port stayed completely silent (0 audit
+  // rows, /api/notify still reporting the URL as if healthy) and an HTTP 500 was indistinguishable from
+  // success. Uses a throwaway workspace so the real default webhook is never touched.
+  const hits = [];
+  let sinkMode = "ok";
+  const sink = http.createServer((rq, rs) => {
+    let buf = ""; rq.on("data", (d) => (buf += d));
+    rq.on("end", () => { try { hits.push(JSON.parse(buf || "{}")); } catch { hits.push({}); }
+      if (sinkMode === "500") { rs.writeHead(500); rs.end("no"); } else { rs.writeHead(200); rs.end("{}"); } });
+  });
+  await new Promise((r) => sink.listen(0, "127.0.0.1", r));
+  const SINK = `http://127.0.0.1:${sink.address().port}/hook`;
+  try {
+    ok((await api("POST", "/api/notify/test", {}, b.id)).status === 400, "notify: test with no webhook configured → 400, not a silent no-op");
+    await api("POST", "/api/notify", { webhook: SINK }, b.id);
+    const t1 = await api("POST", "/api/notify/test", {}, b.id);
+    ok(t1.status === 200 && t1.j.ok === true, "notify: test reports a real success");
+    ok(hits.length === 1 && hits[0].event === "test", "notify: and the endpoint actually received the test event");
+    ok((await api("GET", "/api/notify", null, b.id)).j.lastDelivery?.ok === true, "notify: GET reports the last delivery outcome");
+
+    await api("POST", "/api/notify", { webhook: "http://127.0.0.1:1/gone" }, b.id);
+    const t2 = await api("POST", "/api/notify/test", {}, b.id);
+    ok(t2.status === 502 && t2.j.ok === false, "notify: an unreachable endpoint reports 502, not success");
+    ok((await api("GET", "/api/notify", null, b.id)).j.lastDelivery?.ok === false, "notify: a failing webhook no longer looks identical to a healthy one");
+    const nrows = ((await api("GET", "/api/audit", null, b.id)).j.audit || []).filter((x) => x.kind === "notify");
+    ok(nrows.some((r) => !r.ok), "notify: the failure is queryable as a kind=\"notify\" audit row (there were none at all before)");
+
+    sinkMode = "500"; hits.length = 0;
+    await api("POST", "/api/notify", { webhook: SINK }, b.id);
+    const t3 = await api("POST", "/api/notify/test", {}, b.id);
+    ok(hits.length === 1 && t3.j.ok === false && /HTTP 500/.test(t3.j.error || ""), "notify: HTTP 500 is a failed delivery, not a delivered one");
+
+    // The completion path always pushed run_done; failure pushed nothing — the event you'd most want.
+    sinkMode = "ok"; hits.length = 0;
+    await api("POST", "/api/notify", { webhook: SINK }, b.id);
+    await api("POST", "/api/run", { mode: "company", objective: "Write a status note.", autoApprove: true }, b.id);
+    for (let i = 0; i < 40 && !hits.length; i++) await sleep(150);
+    ok(hits.length === 1 && hits[0].event === "run_failed", "notify: a FAILED run now pushes run_failed (it used to push nothing)");
+    ok(/no agents|no roster/i.test(hits[0]?.error || ""), "notify: and the push carries the reason it failed");
+  } finally { sink.close(); await api("POST", "/api/notify", { webhook: "" }, b.id); }
 
   // Deletion must be THOROUGH. The UI promises "all its data (agents, deliverables, history)", and
   // embeddings were silently exempt: that table postdates the delete handler, so a deleted company left

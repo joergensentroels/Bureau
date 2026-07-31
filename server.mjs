@@ -379,16 +379,47 @@ function logAudit(entry) {
   return Promise.resolve();
 }
 // Optional outgoing webhook for external push (Slack/email relay/etc.). User-configured URL, so
-// this is not model-controlled; fire-and-forget with a short timeout. No-op if unset.
+// this is not model-controlled. No-op if unset.
+//
+// This used to be fire-and-forget in the strongest sense: `.catch(() => {})` around a fetch whose
+// response was never inspected. Measured — a webhook pointed at a closed port stayed completely
+// silent (0 audit rows, /api/notify still reporting the URL as if healthy), and an endpoint answering
+// HTTP 500 was indistinguishable from success. For the ONE feature whose entire job is to reach an
+// operator who isn't at the machine, "we tried and won't say whether it worked" is the wrong default.
+// Failures are now audited and warned; the last outcome is readable via GET /api/notify.
+const notifyState = new Map();   // ws -> { at, ok, status, error, consecutiveFails } (this process only)
+function notifyOutcome(ws) { return notifyState.get(ws) || null; }
+async function deliverWebhook(url, event, payload) {
+  const started = Date.now();
+  const ctl = new AbortController();
+  const to = setTimeout(() => ctl.abort(), 5000);
+  try {
+    const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ event, at: Date.now(), ...payload }), signal: ctl.signal });
+    // A 500 from a Slack relay is a failed notification, not a delivered one.
+    return { ok: r.ok, status: r.status, error: r.ok ? "" : `endpoint answered HTTP ${r.status}`, ms: Date.now() - started };
+  } catch (e) {
+    const aborted = e?.name === "AbortError";
+    return { ok: false, status: 0, error: aborted ? "timed out after 5s" : (e?.message || String(e)), ms: Date.now() - started };
+  } finally { clearTimeout(to); }
+}
 async function fireWebhook(event, payload) {
   let url = "";
   try { url = (await readOrg()).notify?.webhook || ""; } catch { return; }
   if (!/^https?:\/\//i.test(url)) return;
-  try {
-    const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 5000);
-    await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ event, at: Date.now(), ...payload }), signal: ctl.signal }).catch(() => {});
-    clearTimeout(to);
-  } catch {}
+  const ws = currentWs();
+  const r = await deliverWebhook(url, event, payload);
+  const prev = notifyState.get(ws);
+  const fails = r.ok ? 0 : ((prev?.consecutiveFails || 0) + 1);
+  notifyState.set(ws, { at: Date.now(), ok: r.ok, status: r.status, error: r.error, consecutiveFails: fails });
+  // Audit every failure, and the first success after one — a healthy webhook stays quiet, a broken one
+  // is queryable (`/api/audit?kind=notify`) instead of leaving the operator to wonder why it went quiet.
+  if (!r.ok) {
+    console.warn(`⚠  notification webhook FAILED (${event}): ${r.error} — ${fails} consecutive failure(s)`);
+    logAudit({ kind: "notify", actionType: event, url, ok: false, error: r.error.slice(0, 200), decision: "auto" });
+  } else if (prev && !prev.ok) {
+    console.log(`✓ notification webhook recovered (${event})`);
+    logAudit({ kind: "notify", actionType: event, url, ok: true, error: "", decision: "auto" });
+  }
 }
 // Emit a real-action result to the run stream AND record it in the audit log (one provenance row
 // per action the company actually took, with how it was decided).
@@ -2646,6 +2677,9 @@ async function failRun(run, message, extra = {}) {
   logAudit({ kind: "run", runId: run.id, agent: extra.agent || "", objective: run.objective, tokens, costUsd,
     verdict: "error", error: msg, decision: run.autoApprove ? "auto" : "you" });
   finishRun(run, { verdict: "error", error: msg });
+  // The completion path has always pushed run_done; failure pushed nothing — so the notification you
+  // would most want while away from the machine was the one event that never sent.
+  fireWebhook("run_failed", { objective: run.objective, agent: extra.agent || "", error: msg, tokens });
 }
 
 // Create a run object and kick it off. Returns { run, done } where done resolves when it finishes.
@@ -3085,16 +3119,29 @@ const server = createServer(async (req, res) => {
       const org = await readOrg();
       return send(res, 200, org.guardrails || {});
     }
-    // Notification webhook (optional external push).
+    // Notification webhook (optional external push). `lastDelivery` is what this process last saw —
+    // without it, a webhook that has been silently failing for a week looks identical to a healthy one.
     if (p === "/api/notify" && req.method === "GET") {
-      return send(res, 200, (await readOrg()).notify || {});
+      return send(res, 200, { ...((await readOrg()).notify || {}), lastDelivery: notifyOutcome(currentWs()) });
     }
     if (p === "/api/notify" && req.method === "POST") {
       const body = await readBody(req);
       const url = String(body.webhook || "").trim().slice(0, 500);
       if (url && !/^https?:\/\//i.test(url)) return send(res, 400, { error: "webhook must be an http(s) URL" });
       const org = await updateOrg((o) => { o.notify.webhook = url; });
-      return send(res, 200, org.notify);
+      return send(res, 200, { ...org.notify, lastDelivery: notifyOutcome(currentWs()) });
+    }
+    // Send a test event and report what really happened. Without this the only way to learn whether a
+    // webhook works was to wait for a real run to finish and hope something arrived — the same
+    // "unverifiable by construction" trap the scheduler had before nextRunAt became settable.
+    // No new reach: saving a URL already makes the server POST to it, and this is operator-only.
+    if (p === "/api/notify/test" && req.method === "POST") {
+      const url = String((await readOrg()).notify?.webhook || "");
+      if (!/^https?:\/\//i.test(url)) return send(res, 400, { error: "no webhook configured — save an http(s) URL first" });
+      const r = await deliverWebhook(url, "test", { note: "Test delivery from Bureau. If you can read this, notifications work." });
+      logAudit({ kind: "notify", actionType: "test", url, ok: r.ok, error: r.error.slice(0, 200), decision: "you" });
+      notifyState.set(currentWs(), { at: Date.now(), ok: r.ok, status: r.status, error: r.error, consecutiveFails: r.ok ? 0 : 1 });
+      return send(res, r.ok ? 200 : 502, { ok: r.ok, status: r.status, error: r.error, ms: r.ms, url });
     }
     if (p === "/api/guardrails" && req.method === "POST") {
       const body = await readBody(req);
