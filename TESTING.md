@@ -138,15 +138,24 @@ while keeping `👁 read-only` and `🔒 remote mode` hidden; and the **poller g
 and then silence, where the 2s/7s/12s pollers would otherwise have kept firing (they were measured at
 ~83 requests/minute before that fix)._
 
-**GitHub issues — Latch side verified, the GitHub round-trip is NOT** (needs a live Latch; verified
-2026-07-31, 17 checks). Covered: the read endpoint's auth (401 twice), a repo name that sanitises to
-nothing (400), both approval types accepted and sitting **pending** rather than auto-approved, their fields
-surviving sanitisation, and label capping. Every approval it creates is denied in a `finally` block and the
-script asserts zero left pending. **Not covered: any actual call to GitHub.** The stored token lacks Issues
-permission, so the read returns `502` carrying GitHub's own `403: Resource not accessible by personal access
-token`. Re-run this once the token has **Issues: Read and write** and the read branch will assert real
-issues instead. _The failure being legible at all is the point: an empty issue list would have looked like
-"no work to do."_
+**GitHub issues — verified end to end** (needs a live Latch + a permitted token; 2026-07-31). Two scripts:
+`verify-gh-issues` (17 checks — auth 401 twice, a repo name that sanitises to nothing → 400, both approval
+types pending rather than auto-approved, fields surviving sanitisation, label caps, every approval denied
+in a `finally` and zero left pending) and `verify-gh-roundtrip` (15 checks against the real
+`bureauProjects/sandbox`: an issue really appears with title/body/labels/author, **a create approval that
+is DENIED posts nothing**, a comment posts and the count rises, and a wrong issue number fails with
+`No issue #999999` and returns the approval to **pending** so it is retryable).
+
+_Three harness bugs cost a false alarm here, all the same root cause — assuming an API shape instead of
+checking one. Worth knowing before writing the next one: **GitHub's issues LIST is eventually consistent**
+(reading it immediately after a successful create returns an empty array while the issue demonstrably
+exists), **`GET /api/approvals/:id` does not exist in Latch** (only PATCH and DELETE — read state via
+`/api/state` and find by id, which is what Bureau's own `latchApproval()` does), and a repo configured as
+`sandbox` answers as `Sandbox` in URLs, so never compare repo names case-sensitively._
+
+_Artifact: issue #1 in `bureauProjects/sandbox` is a deliberate verification artifact; the round-trip
+script comments on it rather than opening more. Latch has no close-issue capability, so the script does not
+claim to tidy it up._
 
 **Version archives — no orphans, nothing unreachable** (needs a live server + model; verified 2026-07-31,
 8 checks). Measured on the real corpus first: **116 archive files on disk, 10 listed by any endpoint.**

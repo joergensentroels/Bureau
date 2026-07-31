@@ -246,11 +246,14 @@ assertions across 7 suites + a live `--e2e`; see `test/README.md`).
   and nothing recalls that, which is why `email_draft` is floored too. Bureau and Latch enforce it
   independently. Issue text is **untrusted third-party input**, framed for the model the same way
   `mcp_call` results are, and the real containment is that every action an injected instruction could ask
-  for is itself gated. _Verified live on the Latch side, 17 checks (auth, validation, both approval types
-  pending rather than auto-approved, fields surviving sanitisation, label caps, zero leaked approvals).
-  **The GitHub round-trip is NOT yet verified**: the configured token lacks Issues permission, so the read
-  returns 502 carrying GitHub's own `403 Resource not accessible`. Add **Issues: Read and write** to the PAT
-  and re-run `verify-gh-issues`. Pull requests are the natural next increment on the same plumbing._
+  for is itself gated. _Verified end to end, 32 checks across two scripts: the Latch side (auth, validation,
+  both approval types pending rather than auto-approved, sanitisation, label caps, zero leaked approvals)
+  and the real round-trip against `bureauProjects/sandbox` — an issue appears with title/body/labels/author,
+  a DENIED create approval posts nothing, a comment posts and the count rises, and a bad issue number fails
+  with `No issue #999999` and returns to pending so it is retryable. `GET /api/github/doctor` was added
+  along the way because `/api/github/config` reported `ready: true` while every issue call 403'd — `ready`
+  only ever meant "a URL and token are present". Pull requests are the natural next increment on the same
+  plumbing; they need a branching model decided first._
 - **The failure paths, made loud** (2026-07-31) — an audit of every place Bureau stayed quiet when
   something went wrong. Each of these was one line of `catch {}` or one missing sibling call, and none
   of them broke a test, because nothing was watching.
