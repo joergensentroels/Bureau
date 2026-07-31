@@ -37,11 +37,18 @@ $tasks   = @("$prefix`Ollama", "$prefix`Latch", "$prefix`Bureau")
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin -and -not $WhatIfPreference) {
+  # Print the invocation that WORKS. This used to print `.\Install-Autostart.ps1`, which is exactly the
+  # form that fails on this machine (LocalMachine policy is Restricted) — a failure message handing back
+  # the broken command. The header comment had the right form, but nobody reads a header while looking at
+  # an error.
+  $self = $MyInvocation.MyCommand.Path
   Write-Host "This needs an elevated shell (SYSTEM tasks and boot triggers are admin-only)." -ForegroundColor Yellow
-  Write-Host "Right-click PowerShell -> Run as administrator, then:" -ForegroundColor Yellow
-  Write-Host "  cd `"$here`"; .\Install-Autostart.ps1"
+  Write-Host "Right-click PowerShell -> Run as administrator, then paste:" -ForegroundColor Yellow
+  Write-Host "  powershell -NoProfile -ExecutionPolicy Bypass -File `"$self`""
   Write-Host ""
-  Write-Host "Or preview without elevation:  .\Install-Autostart.ps1 -WhatIf"
+  Write-Host "Preview without elevation:" -ForegroundColor DarkGray
+  Write-Host "  powershell -NoProfile -ExecutionPolicy Bypass -File `"$self`" -WhatIf" -ForegroundColor DarkGray
+  Write-Host "(-ExecutionPolicy is per-process; it does not change this machine's policy.)" -ForegroundColor DarkGray
   exit 1
 }
 
