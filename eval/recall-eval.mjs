@@ -110,24 +110,46 @@ const VARIANTS = {
   const vecs = new Map();
   for (const d of docs) vecs.set(d._key, await embed(`${d.objective}\n${d.summary}`.trim()));
 
-  const score = {}, misses = {};
+  // A label whose target is no longer IN the corpus scores as a miss for every variant — which reads
+  // exactly like a ranker failure and is nothing of the kind: there is nothing to retrieve. This cost a
+  // real investigation on 2026-07-31, when memory recall dropped 10/12 → 8/12 with the ranker untouched
+  // because the per-agent memory cap had evicted what four labels pointed at. The eval could have said
+  // so. Report both denominators so the headline can never quietly change meaning.
+  const absent = LABELS.filter(([, want]) => !docs.some((d) => want.test(d.objective)));
+  const live = LABELS.filter(([, want]) => docs.some((d) => want.test(d.objective)));
+
+  const score = {}, misses = {}, liveScore = {};
   for (const [q, want] of LABELS) {
     const qv = await embed(q);
     const lex = rankByRelevance(q, docs, (it) => `${it.objective} ${it.summary}`, 10);
     const sem = docs.map((it) => ({ item: it, score: cosine(qv, vecs.get(it._key)) }))
       .filter((x) => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 10);
+    const isLive = live.some(([lq]) => lq === q);
     for (const [name, fn] of Object.entries(VARIANTS)) {
       const hit = fn(lex, sem).some((r) => want.test(r.item.objective));
       score[name] = (score[name] || 0) + (hit ? 1 : 0);
+      if (isLive) liveScore[name] = (liveScore[name] || 0) + (hit ? 1 : 0);
       if (!hit) (misses[name] = misses[name] || []).push(q);
     }
   }
 
   console.log(`\nrecall@3 over ${LABELS.length} labelled queries — corpus: ${docs.length} de-duplicated entries\n`);
-  for (const [name, n] of Object.entries(score).sort((a, b) => b[1] - a[1]))
-    console.log(`  ${String(n).padStart(2)}/${LABELS.length}  ${String(Math.round(100 * n / LABELS.length)).padStart(3)}%   ${name}`);
+  if (absent.length) {
+    console.log(`  ⚠ ${absent.length} label(s) have NO matching entry in the corpus at all. Every variant scores`);
+    console.log(`    them as misses, which is NOT a ranker result — there is nothing there to retrieve.`);
+    console.log(`    Either the work was evicted (agent.memory keeps 8 per agent) or the label is stale:`);
+    for (const [q, want] of absent) console.log(`      "${q}"  wants ${want}`);
+    console.log(`    The "of ${live.length}" column below excludes them; the "of ${LABELS.length}" column does not.\n`);
+  }
+  const pct = (n, d) => `${String(Math.round(100 * n / (d || 1))).padStart(3)}%`;
+  for (const [name, n] of Object.entries(score).sort((a, b) => b[1] - a[1])) {
+    const l = liveScore[name] || 0;
+    const col = absent.length ? `  ${String(l).padStart(2)}/${live.length} ${pct(l, live.length)} of the resolvable` : "";
+    console.log(`  ${String(n).padStart(2)}/${LABELS.length}  ${pct(n, LABELS.length)}${col}   ${name}`);
+  }
   const shipped = Object.keys(VARIANTS).find((k) => k.includes("SHIPPED"));
-  console.log(`\n${shipped} misses: ${(misses[shipped] || []).map((q) => `"${q}"`).join(", ") || "none"}`);
+  const shippedMisses = (misses[shipped] || []).filter((q) => live.some(([lq]) => lq === q));
+  console.log(`\n${shipped} misses (resolvable only): ${shippedMisses.map((q) => `"${q}"`).join(", ") || "none"}`);
   console.log("\nReminder: one-query differences are noise at this sample size. Act on gaps of several.");
 
   // ---------------- deliverable retrieval ----------------
@@ -180,22 +202,41 @@ const VARIANTS = {
     "RRF(term-counter, semantic)": (crude, bm, sem) => fuse([crude, sem], [1, 1]),
     "RRF(BM25, semantic)  <-- SHIPPED": (crude, bm, sem) => fuse([bm, sem], [1, 1]),
   };
+  // Same guard as the memory half: a document that has been deleted (or renamed) makes its label
+  // unscoreable, and silently counting that as a ranker miss is how a corpus change gets mistaken for a
+  // regression. Deliverables are deletable now, so this can happen by ordinary use.
+  const dabsent = DLABELS.filter(([, want]) => !docs2.some((d) => want.test(d.name)));
+  const dlive = DLABELS.filter(([, want]) => docs2.some((d) => want.test(d.name)));
+  const dliveScore = {};
   for (const [q, want] of DLABELS) {
     const qv = await embed(q);
     const crude = retiredTermCounter(q, docs2, 10);
     const bm = rankByRelevance(q, docs2, (d) => `${d.name.replace(/[-_.]+/g, " ")} ${d.content}`, 10);
     const sem = docs2.map((d) => ({ item: d, score: bestPassage(qv, d.name) })).filter((x) => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 10);
+    const isLive = dlive.some(([lq]) => lq === q);
     for (const [name, fn] of Object.entries(DVARIANTS)) {
       const hit = fn(crude, bm, sem).some((r) => want.test(r.item.name));
       dscore[name] = (dscore[name] || 0) + (hit ? 1 : 0);
+      if (isLive) dliveScore[name] = (dliveScore[name] || 0) + (hit ? 1 : 0);
       if (!hit) (dmiss[name] = dmiss[name] || []).push(q);
     }
   }
   console.log(`\n\nDELIVERABLE retrieval — recall@3 over ${DLABELS.length} labelled queries (${docs2.length} documents)\n`);
-  for (const [name, n] of Object.entries(dscore).sort((a, b) => b[1] - a[1]))
-    console.log(`  ${String(n).padStart(2)}/${DLABELS.length}  ${String(Math.round(100 * n / DLABELS.length)).padStart(3)}%   ${name}`);
+  if (dabsent.length) {
+    console.log(`  ⚠ ${dabsent.length} label(s) name a document that is not in the corpus — deleted, renamed, or`);
+    console.log(`    never written. Scored as misses by every variant, which is not a ranker result:`);
+    for (const [q, want] of dabsent) console.log(`      "${q}"  wants ${want}`);
+    console.log(`    The "of ${dlive.length}" column excludes them.\n`);
+  }
+  const dpct = (n, d) => `${String(Math.round(100 * n / (d || 1))).padStart(3)}%`;
+  for (const [name, n] of Object.entries(dscore).sort((a, b) => b[1] - a[1])) {
+    const l = dliveScore[name] || 0;
+    const col = dabsent.length ? `  ${String(l).padStart(2)}/${dlive.length} ${dpct(l, dlive.length)} of the resolvable` : "";
+    console.log(`  ${String(n).padStart(2)}/${DLABELS.length}  ${dpct(n, DLABELS.length)}${col}   ${name}`);
+  }
   const dshipped = Object.keys(DVARIANTS).find((k) => k.includes("SHIPPED"));
-  console.log(`\n${dshipped} misses: ${(dmiss[dshipped] || []).map((q) => `"${q}"`).join(", ") || "none"}`);
+  const dshippedMisses = (dmiss[dshipped] || []).filter((q) => dlive.some(([lq]) => lq === q));
+  console.log(`\n${dshipped} misses (resolvable only): ${dshippedMisses.map((q) => `"${q}"`).join(", ") || "none"}`);
   const best = Object.entries(dscore).sort((a, b) => b[1] - a[1])[0];
   console.log(`best: ${best[0]} — misses: ${(dmiss[best[0]] || []).map((q) => `"${q}"`).join(", ") || "none"}`);
 })();
