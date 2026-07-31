@@ -61,15 +61,24 @@ const latchApi = async (m, p, body) => {
   } catch (e) { return { status: 0, j: { error: e.message } }; }
 };
 const ghArtifacts = [];   // { url, owner, repo } for every PR S4 really opened
+const startedRuns = [];   // every runId this test began — teardown must STOP them, see below
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const pass = [], fail = [];
 const ok = (c, m) => (c ? pass : fail).push(m);
 const evCounts = (evs) => { const c = {}; for (const e of evs) c[e.type] = (c[e.type] || 0) + 1; return JSON.stringify(c); };
 
 // Stream a run's SSE events; auto-approve the plan gate so an attended run proceeds to work.
+//
+// On TIMEOUT this stops the run. That was the teardown gap: giving up on the stream did not stop the run,
+// so a scenario that timed out (or exhausted its retries) left a run still executing on the server. It
+// then filed approvals AFTER teardown had already taken its id-diff, which is how two "Commit hello.md"
+// approvals sat in the operator's real Latch inbox for hours despite a teardown that believed it had
+// denied everything the test caused. Abandoning a stream is not abandoning the work behind it.
 async function runAndStream(spec, onEvent, ms = 160000) {
   const { j } = await api("POST", "/api/run", spec);
   const runId = j.runId; if (!runId) throw new Error("no runId: " + JSON.stringify(j));
+  startedRuns.push(runId);
   const res = await fetch(`${B}/api/run/${runId}/stream`, { headers: { ...AUTH } });
   const dec = new TextDecoder(); let buf = ""; const events = []; const started = Date.now();
   for await (const chunk of res.body) {
@@ -82,7 +91,10 @@ async function runAndStream(spec, onEvent, ms = 160000) {
       if (onEvent) await onEvent(ev, runId);
       if (ev.type === "done") return { runId, events };
     }
-    if (Date.now() - started > ms) return { runId, events, timedOut: true };
+    if (Date.now() - started > ms) {
+      await api("POST", `/api/run/${runId}/stop`, {});   // stop the WORK, not just the watching
+      return { runId, events, timedOut: true };
+    }
   }
   return { runId, events };
 }
@@ -260,8 +272,28 @@ const deliverableNames = async () => new Set((((await api("GET", "/api/deliverab
 
   // ---- teardown: restore what we changed, and remove what we created ----
   await reset();
-  const leftPending = [...(await pendingIds())].filter((id) => !baselinePending.has(id));
-  for (const id of leftPending) await api("POST", `/api/approvals/${id}/decide`, { decision: "denied", note: "e2e teardown: test artifact" });
+
+  // STOP every run this test started before diffing. A run left executing keeps proposing actions, and an
+  // approval filed one second after the diff is an approval that sits in the operator's real inbox
+  // indefinitely. Stopping is idempotent and a 404 just means it already finished and was pruned.
+  let stopped = 0;
+  for (const id of startedRuns) {
+    const r = await api("POST", `/api/run/${id}/stop`, {});
+    if (r.status === 200 && r.j?.stopped) stopped++;
+  }
+  // Then sweep TWICE with a pause. A run stops cooperatively — it checks `run.stopped` between turns — so
+  // an action already in flight when we asked can still file its approval a moment later. One diff catches
+  // what exists now; the second catches what was mid-flight. Reported separately so a straggler is visible
+  // rather than looking like the first pass simply worked.
+  const denyNew = async () => {
+    const left = [...(await pendingIds())].filter((id) => !baselinePending.has(id));
+    for (const id of left) await api("POST", `/api/approvals/${id}/decide`, { decision: "denied", note: "e2e teardown: test artifact" });
+    return left.length;
+  };
+  const firstPass = await denyNew();
+  await sleep(4000);
+  const stragglers = await denyNew();
+  const leftPending = { length: firstPass + stragglers };   // keep the summary line's shape below
   // Name-diff against the startup baseline, so this can only remove documents this run created.
   const newDrafts = [...(await deliverableNames())].filter((n) => !baselineDrafts.has(n));
   // Close every PR S4 opened, and delete its head branch. This is why the GitHub scenario could not exist
@@ -293,7 +325,12 @@ const deliverableNames = async () => new Set((((await api("GET", "/api/deliverab
   pass.forEach((m) => console.log("  ✓ " + m));
   fail.forEach((m) => console.log("  ✗ " + m));
   skipped.forEach((m) => console.log("  ~ " + m));
-  console.log(`\nteardown: policies cleared, tier restored, ${leftPending.length} approval(s) this test caused were denied.`);
+  console.log(`\nteardown: policies cleared, tier restored, ${stopped} run(s) stopped, ${leftPending.length} approval(s) this test caused were denied${stragglers ? ` (${stragglers} of them filed AFTER the first sweep — that is the gap this pass exists to catch)` : ""}.`);
+  // Prove it rather than assert it: a teardown that says "cleaned up" while leaving approvals behind is
+  // how three of these ended up in the operator's inbox unnoticed for hours.
+  const stillMine = [...(await pendingIds())].filter((id) => !baselinePending.has(id));
+  if (stillMine.length) console.log(`  ⚠ ${stillMine.length} approval(s) STILL pending — deny by hand: ${stillMine.join(", ")}`);
+  else console.log("  verified: no approval this test caused is still pending.");
   if (archived.length) console.log(`  archived the ${archived.length} deliverable(s) this run created (recoverable):\n    ${archived.join("\n    ")}`);
   else if (!stuck.length) console.log("  no new deliverables to remove.");
   if (ghClosed.length) console.log(`  GitHub: ${ghClosed.join("; ")}`);

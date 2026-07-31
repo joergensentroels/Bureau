@@ -47,6 +47,13 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
   - Scenarios that need the model to propose a specific action **retry up to 3×** and report
     **INCONCLUSIVE**, not failed, if it never does — exit code stays 0. A live suite that goes red
     because a nondeterministic model picked a different tool teaches people to ignore it.
+  - **It stops every run it started before tidying up.** `runAndStream` timing out used to walk away from a
+    run that kept executing, proposing actions and filing approvals *after* teardown took its id-diff —
+    which left real approvals in the operator's Latch inbox for hours while the teardown reported success.
+    A timeout now stops the run, teardown stops them all again, and it sweeps **twice** with a pause
+    (stopping is cooperative, so an in-flight action can still file one). Stragglers are counted separately,
+    and a final re-diff prints `verified: no approval this test caused is still pending` or names the ids.
+    _Abandoning a stream is not abandoning the work behind it._
   - Teardown restores the policies and tier it changed, denies **only** approvals that appeared during
     the run, and removes **only** deliverables that appeared during the run — both diffed against a
     startup baseline, so it can never touch something it didn't cause. `DELETE` archives into
