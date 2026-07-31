@@ -9,8 +9,11 @@
 //   restores  — the policies it adds, and the agent tier it changes
 //   resolves  — any Latch approval that became pending during the run (denied, by id-diff against a
 //               baseline taken at startup, so it can never touch an approval it did not cause)
-//   LEAVES    — the deliverables the runs write into drafts/. There is no delete endpoint for
-//               deliverables, so it cannot remove them; they are listed at the end so you can.
+//   removes   — the deliverables its runs wrote, by NAME-diff against a startup baseline, so it can
+//               only touch documents it created. DELETE archives into .versions/ rather than
+//               destroying, and the archive name is printed, so nothing becomes unrecoverable.
+//               (This used to read "there is no delete endpoint for deliverables, so it cannot remove
+//               them" — true when written, and quietly false from the moment that endpoint landed.)
 //
 // A note on the model: qwen3 decides which action to propose, and it does not always choose the one a
 // scenario needs. Scenarios retry a bounded number of times to obtain their precondition and report
@@ -146,20 +149,28 @@ const deliverableNames = async () => new Set((((await api("GET", "/api/deliverab
     ok(!r3.events.some((e) => e.type === "propose" && isWrite(e.data.actionType)), "S3: blocked before an approval was filed");
   }
 
-  // ---- teardown: restore what we changed, resolve what we caused, report what we cannot remove ----
+  // ---- teardown: restore what we changed, and remove what we created ----
   await reset();
   const leftPending = [...(await pendingIds())].filter((id) => !baselinePending.has(id));
   for (const id of leftPending) await api("POST", `/api/approvals/${id}/decide`, { decision: "denied", note: "e2e teardown: test artifact" });
+  // Name-diff against the startup baseline, so this can only remove documents this run created.
   const newDrafts = [...(await deliverableNames())].filter((n) => !baselineDrafts.has(n));
+  const archived = [], stuck = [];
+  for (const n of newDrafts) {
+    const r = await api("DELETE", "/api/deliverables/" + encodeURIComponent(n));
+    if (r.status === 200 && r.j.ok) archived.push(`${n} → .versions/${r.j.archivedAs}`);
+    else stuck.push(`${n} (DELETE returned ${r.status}${r.j.error ? `: ${r.j.error}` : ""})`);
+  }
 
   console.log(`\n===== ${fail.length ? "FAILURES ✗" : "ALL PASS ✓"} — ${pass.length} passed, ${fail.length} failed, ${skipped.length} inconclusive =====`);
   pass.forEach((m) => console.log("  ✓ " + m));
   fail.forEach((m) => console.log("  ✗ " + m));
   skipped.forEach((m) => console.log("  ~ " + m));
   console.log(`\nteardown: policies cleared, tier restored, ${leftPending.length} approval(s) this test caused were denied.`);
-  console.log(newDrafts.length
-    ? `LEFT BEHIND (no delete endpoint for deliverables — remove by hand if unwanted):\n  ${newDrafts.join("\n  ")}`
-    : "no new deliverables left behind.");
+  if (archived.length) console.log(`  archived the ${archived.length} deliverable(s) this run created (recoverable):\n    ${archived.join("\n    ")}`);
+  else if (!stuck.length) console.log("  no new deliverables to remove.");
+  // Report rather than swallow: a teardown that half-worked must not read as a clean one.
+  if (stuck.length) console.log(`  ⚠ COULD NOT REMOVE — delete by hand:\n    ${stuck.join("\n    ")}`);
   // Inconclusive is NOT failure: the model choosing a different action says nothing about the product.
   process.exit(fail.length ? 1 : 0);
 })().catch((e) => { console.error("HARNESS ERROR:", e); process.exit(2); });

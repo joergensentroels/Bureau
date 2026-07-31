@@ -37,10 +37,19 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
   - Scenarios that need the model to propose a specific action **retry up to 3×** and report
     **INCONCLUSIVE**, not failed, if it never does — exit code stays 0. A live suite that goes red
     because a nondeterministic model picked a different tool teaches people to ignore it.
-  - Teardown restores the policies and tier it changed, and denies **only** approvals that appeared
-    during the run (diffed against a startup baseline, so it can never resolve one it didn't cause).
-    It **cannot** remove the deliverables its runs write — there is no delete endpoint — so it prints
-    them by name instead of claiming to have cleaned up.
+  - Teardown restores the policies and tier it changed, denies **only** approvals that appeared during
+    the run, and removes **only** deliverables that appeared during the run — both diffed against a
+    startup baseline, so it can never touch something it didn't cause. `DELETE` archives into
+    `.versions/` and the archive name is printed, so nothing it removes is unrecoverable. Anything it
+    fails to remove is reported loudly rather than folded into a clean-looking summary.
+    _Until 2026-07-31 this read "it cannot remove the deliverables its runs write — there is no delete
+    endpoint". That was accurate when written and silently became false the moment the endpoint landed:
+    a documented limitation is a claim, and claims go stale._
+  - **The removal branch has not been observed firing.** S2 writes a deterministic filename, so once
+    that document exists it is in every later run's startup baseline and no run can produce one the
+    diff calls new — meaning the old "LEFT BEHIND" notice only ever fired on the very first e2e run.
+    To exercise removal for real, delete the e2e's output document first (note that this changes the
+    retrieval corpus `eval/recall-eval.mjs` measures, so re-baseline it in the same session).
 
 ## Coverage of the 2026-07 feature + security work
 
