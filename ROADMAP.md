@@ -32,9 +32,22 @@ cross-sibling handoff, so siblings can duplicate reasoning the sequential path w
     concurrency yields 0.92x locally, ordering it more cleverly cannot help locally either. Stage 2 only
     pays off where the underlying calls actually overlap, i.e. the paid tier. Still gated on measuring
     whether a `dependsOn` field regresses decompose reliability (already the flakiest JSON call).
-  - **The paid-tier measurement is the one real unknown** — overlapping slow Kimi calls (~120s each) is
-    the case parallel was built for, and it is untested because it spends real money. Needs an explicit
-    go-ahead; `eval/parallel-eval.mjs` is ready to run against it.
+  - **Paid tier measured 2026-07-31 (`--paid`, one pair, $0.25) — parallel looks like a real ~2.4x win
+    there, but the single pair is CONTAMINATED and wants repeating.**
+    - sequential 1165.9s vs parallel 494.2s, same 4 sub-tasks both, concurrency confirmed (1 vs 3
+      dispatched within a second) → **2.36x**, against 0.92x locally. Directionally exactly what theory
+      predicts: external calls don't share one process, so overlapping them actually overlaps.
+    - **First useful fact: a paid sub-task takes ~300s against ~30s locally (~10x).** That, not the
+      concurrency, is why the local measurement found nothing to win.
+    - **The confound:** the parallel run hit `"The engine is currently overloaded, please try again
+      later"` from Moonshot. A failed paid call can fall back to the ~10x faster local model, which would
+      flatter the parallel side. So 2.36x is an upper bound, not a measurement.
+    - **Second useful fact, operational:** firing 3 concurrent Kimi requests is enough to trip a provider
+      overload. Anyone turning on parallel + paid should expect that, and `ORCH_MAX_PARALLEL` is the dial.
+    - **Cost model correction:** billed paid tokens ran ~1.75x the run's own token figure (68,674 vs
+      39,199), because each turn resends the growing history. Budget ~$0.14/run, not the ~$0.07 a naive
+      token count suggests.
+    - To settle it: 3 more pairs (~$0.75, ~90 min) and discard any pair that logs a provider error.
 
 **The eval gate is currently RED, and deliberately left that way.** `node eval/run-eval.mjs --baseline`
 (8 reps, 2026-07-31) reports `criteria.singleShotRate: 100% → 78%`, past the 15% tolerance. Decompose
