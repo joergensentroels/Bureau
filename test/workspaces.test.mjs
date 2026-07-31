@@ -49,11 +49,20 @@ const orgOf = async (ws) => (await api("GET", "/api/org", null, ws)).j;
   // unknown workspace header falls back to default (never a phantom company)
   ok((await orgOf("no-such-ws-xyz")).agents.length === dAgents, "unknown workspace id falls back to default");
 
-  // delete both throwaways
-  await api("DELETE", "/api/workspaces/" + a.id);
+  // Deletion must be THOROUGH. The UI promises "all its data (agents, deliverables, history)", and
+  // embeddings were silently exempt: that table postdates the delete handler, so a deleted company left
+  // its vectors in the DB — where semantic recall reads them. Assert the response reports the sweep and
+  // that a re-created workspace of the same name starts genuinely empty.
+  const delA = await api("DELETE", "/api/workspaces/" + a.id);
+  ok(delA.status === 200 && delA.j.ok === true, "delete returns ok");
+  ok(typeof delA.j.stoppedRuns === "number", "delete reports how many in-flight runs it stopped (they used to keep writing after deletion)");
   await api("DELETE", "/api/workspaces/" + b.id);
   const list = (await api("GET", "/api/workspaces")).j.workspaces.map((w) => w.id);
   ok(!list.includes(a.id) && !list.includes(b.id), "both throwaway workspaces removed from the registry");
+  // Can't be asserted by querying the deleted id — that falls back to `default` (see the assertion
+  // above), so it would read the default workspace's rows. The delete reports its own sweep instead.
+  ok(delA.j.removed && typeof delA.j.removed.embeddingRows === "number", "delete reports embedding rows swept (this table was silently exempt before)");
+  ok(delA.j.removed && typeof delA.j.removed.auditRows === "number", "delete reports audit rows swept");
   ok((await api("DELETE", "/api/workspaces/default")).status === 400, "the default workspace cannot be deleted");
 
   const end = await orgOf("default");

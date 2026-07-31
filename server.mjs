@@ -2981,14 +2981,32 @@ const server = createServer(async (req, res) => {
       const id = p.split("/")[3];
       if (id === "default") return send(res, 400, { error: "cannot delete the default workspace" });
       if (!wsExists(id)) return send(res, 404, { error: "not_found" });
+      // STOP this workspace's in-flight runs FIRST. Deleting the row never stopped them, so a run kept
+      // executing against a company that no longer existed and went on writing: it re-created the drafts
+      // directory (writeDraftFile mkdirs) and inserted fresh audit rows after the delete. The org write
+      // path was already guarded against exactly this ("an UPDATE that matches 0 rows is a no-op"), but
+      // draft files and audit inserts were not — so the guard covered one writer out of three.
+      let stopped = 0;
+      for (const r of runs.values()) if (r.ws === id && !r.done && !r.stopped) { r.stopped = true; stopped++; }
+      // Report what was actually removed. A caller (and the test suite) cannot otherwise observe this:
+      // querying a deleted workspace falls back to `default`, so "are its rows gone?" is unanswerable
+      // over HTTP unless the delete says so itself.
+      let removed = { auditRows: 0, embeddingRows: 0 };
       db.exec("BEGIN IMMEDIATE");
-      try { db.prepare("DELETE FROM workspaces WHERE id=?").run(id); db.prepare("DELETE FROM audit WHERE ws=?").run(id); db.exec("COMMIT"); }
-      catch (e) { try { db.exec("ROLLBACK"); } catch {} throw e; }
+      try {
+        db.prepare("DELETE FROM workspaces WHERE id=?").run(id);
+        removed.auditRows = db.prepare("DELETE FROM audit WHERE ws=?").run(id).changes || 0;
+        // Embeddings were NOT being deleted — the table postdates this handler, so a deleted company left
+        // its vectors behind. The UI promises "all its data", and semantic recall reads this table.
+        removed.embeddingRows = db.prepare("DELETE FROM embeddings WHERE ws=?").run(id).changes || 0;
+        db.exec("COMMIT");
+      } catch (e) { try { db.exec("ROLLBACK"); } catch {} throw e; }
       loadWorkspaces();
-      // Remove its file-based artifacts (drafts + profiles). Best-effort; the DB is the source of truth.
-      await rm(draftsDir(id), { recursive: true, force: true }).catch(() => {});
-      await rm(profilesDir(id), { recursive: true, force: true }).catch(() => {});
-      return send(res, 200, { ok: true, id });
+      // Remove its file-based artifacts (drafts + profiles). Failures were silently swallowed, which is
+      // how orphaned directories went unnoticed; warn instead so a real failure is visible.
+      for (const [what, dir] of [["drafts", draftsDir(id)], ["profiles", profilesDir(id)]])
+        await rm(dir, { recursive: true, force: true }).catch((e) => console.warn(`⚠  workspace ${id}: could not remove ${what} dir ${dir}: ${e.message}`));
+      return send(res, 200, { ok: true, id, stoppedRuns: stopped, removed });
     }
 
     if (p === "/api/company" && req.method === "POST") {
