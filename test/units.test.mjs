@@ -10,7 +10,7 @@ import {
   packVec, unpackVec, cosine, rrfFuse, memoryKey, memoryText,
   objectiveSignature, dedupeMemories, deliverableEmbedText, deliverableTitle,
   chunkDocument, deliverableChunks, modelUnreachable, trimVersions, clientKey, isLoopback,
-  startLogTee,
+  startLogTee, webhookBody,
 } from "../server.mjs";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -589,6 +589,39 @@ console.log("# hybrid recall — vectors fused with BM25, degrading safely");
   eq("  no vecOf → lexical", recallSharedMemory(org, "revenue analysis", 2, "", { queryVec: [0, 1] })[0].agentName, "Ada");
   eq("  vectors all missing → lexical", recallSharedMemory(org, "revenue analysis", 2, "", { queryVec: [0, 1], vecOf: () => undefined })[0].agentName, "Ada");
   eq("  excludeAgentId still drops the asker", recallSharedMemory(org, "revenue analysis", 2, "a1").filter((r) => r.agentName === "Ada").length, 0);
+}
+
+console.log("# webhookBody — Discord/Slack reject bare JSON, so the body is shaped per destination");
+{
+  const failed = { objective: "Ship the quarterly report", agent: "Ada", error: "model unreachable", tokens: 1234 };
+
+  // Discord 400s on a body with no `content`/`embeds`. This is the whole reason the function exists.
+  const d = webhookBody("https://discord.com/api/webhooks/123/abc", "run_failed", failed);
+  eq("  discord: wraps in content", Object.keys(d), ["content"]);
+  chk("  discord: names the event", d.content.startsWith("[Bureau] run_failed"));
+  chk("  discord: the REASON comes before the objective (a truncated phone alert still says why)",
+    d.content.indexOf("error:") < d.content.indexOf("objective:"));
+
+  const s = webhookBody("https://hooks.slack.com/services/T/B/x", "run_failed", failed);
+  eq("  slack: wraps in text", Object.keys(s), ["text"]);
+  chk("  slack: same one-liner", s.text.startsWith("[Bureau] run_failed"));
+
+  // Backwards compatibility is the risk here: an existing generic consumer must see exactly what it saw
+  // before. Pinning `now` keeps the comparison exact.
+  eq("  other hosts: untouched generic JSON",
+    webhookBody("https://example.com/hook", "run_done", { objective: "x", verdict: "pass" }, 99),
+    { event: "run_done", at: 99, objective: "x", verdict: "pass" });
+  eq("  an unparseable url falls back to generic rather than throwing",
+    webhookBody("not-a-url", "run_done", { verdict: "pass" }, 99),
+    { event: "run_done", at: 99, verdict: "pass" });
+  chk("  a discord LOOKALIKE host is not treated as discord",
+    !!webhookBody("https://discord.com.evil.test/hook", "run_done", {}, 99).event);
+
+  // Discord hard-limits content to 2000 chars and 400s past it, so an enormous objective must not
+  // silently break the alarm.
+  const huge = webhookBody("https://discord.com/api/webhooks/1/2", "run_done", { objective: "y".repeat(5000) });
+  chk("  discord: content stays under the 2000-char limit", huge.content.length <= 1900);
+  chk("  discord: the objective itself is capped", huge.content.includes("y".repeat(300)) && !huge.content.includes("y".repeat(301)));
 }
 
 console.log(`\n${fail === 0 ? "ALL PASS ✓" : "FAILURES ✗"} — ${pass} passed, ${fail} failed`);

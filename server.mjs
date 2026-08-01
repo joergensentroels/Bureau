@@ -499,12 +499,38 @@ function logAudit(entry) {
 // Failures are now audited and warned; the last outcome is readable via GET /api/notify.
 const notifyState = new Map();   // ws -> { at, ok, status, error, consecutiveFails } (this process only)
 function notifyOutcome(ws) { return notifyState.get(ws) || null; }
+// Shape the body for the endpoint that will actually receive it.
+//
+// Why this exists: Bureau posts its own JSON, and the two sinks an operator is most likely to reach for
+// REJECT that outright — Discord answers 400 unless the body carries `content`/`embeds`, Slack the same
+// without `text`. So "paste your Discord webhook here" produced a channel that failed every delivery,
+// which is worse than having none: you believe you have an alarm and you do not. Every other host keeps
+// the original generic JSON, so existing consumers are untouched.
+export function webhookBody(url, event, payload, now = Date.now()) {
+  const host = (() => { try { return new URL(url).hostname.toLowerCase(); } catch { return ""; } })();
+  const isDiscord = host === "discord.com" || host === "discordapp.com" || host.endsWith(".discord.com");
+  const isSlack = host === "hooks.slack.com";
+  if (!isDiscord && !isSlack) return { event, at: now, ...payload };
+
+  // Field order is deliberate: the event and the REASON come first, so a phone notification that
+  // truncates still shows why you are being woken.
+  const bits = [];
+  if (payload?.error) bits.push(`error: ${payload.error}`);
+  if (payload?.verdict) bits.push(`verdict: ${payload.verdict}`);
+  if (payload?.agent) bits.push(`agent: ${payload.agent}`);
+  if (payload?.objective) bits.push(`objective: ${String(payload.objective).slice(0, 300)}`);
+  if (payload?.tokens) bits.push(`tokens: ${payload.tokens}`);
+  const text = `[Bureau] ${event}${bits.length ? " — " + bits.join(" · ") : ""}`;
+  // Discord hard-limits content to 2000 chars and 400s past it. Truncate both the same way.
+  return isDiscord ? { content: text.slice(0, 1900) } : { text: text.slice(0, 1900) };
+}
+
 async function deliverWebhook(url, event, payload) {
   const started = Date.now();
   const ctl = new AbortController();
   const to = setTimeout(() => ctl.abort(), 5000);
   try {
-    const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ event, at: Date.now(), ...payload }), signal: ctl.signal });
+    const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(webhookBody(url, event, payload)), signal: ctl.signal });
     // A 500 from a Slack relay is a failed notification, not a delivered one.
     return { ok: r.ok, status: r.status, error: r.ok ? "" : `endpoint answered HTTP ${r.status}`, ms: Date.now() - started };
   } catch (e) {
