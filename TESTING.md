@@ -11,7 +11,22 @@ node eval/recall-eval.mjs         # recall@3 of memory retrieval, shipped ranker
 node eval/parallel-eval.mjs       # sequential-vs-parallel delegation A/B, repeated runs (live, ~4min/pair)
 node tools/backup.mjs             # verified snapshot of Bureau + Latch state; --list, --keep N, --root
 node tools/restore-drill.mjs      # restore the newest snapshot and boot a REAL Latch on it (live)
+.\Install-Heartbeat.ps1 -Verify   # the dead-man's switch, against the REAL Bureau/Ollama/watcher
 ```
+
+`tools/heartbeat.mjs` is covered by `heartbeat.test.mjs` in the pure set, but **only its four failure paths
+and its exit-code contract** — Bureau down, model dead behind an open port, watcher unreachable, no URL
+configured. The exit code is the entire interface the scheduled task reads, and it broke once: calling
+`process.exit()` after a `fetch` trips a libuv assertion on Windows and returns `0xC0000409`, so a *healthy*
+machine reported a crash to the scheduler. The test asserts 0/1/2 explicitly for that reason.
+
+**The healthy path is deliberately NOT in the suite.** It needs a live Bureau, a live Ollama and a real
+watcher — and under `run-all --serve` the throwaway server generates its own operator token while the
+heartbeat resolves one from Latch's `auth.json`, so an auto-detected healthy assertion would fail for a
+purely environmental reason (the shape of red that teaches people to ignore a suite). Set `HEARTBEAT_LIVE=1`
+to force it locally; the real proof is `.\Install-Heartbeat.ps1 -Verify`, which exercises the whole chain and
+prints what each exit code means. Note the test always reports to a **local sink**, never the production ping
+URL: marking the machine healthy on evidence a test invented is the exact failure this tool exists to prevent.
 
 `tools/backup.mjs` verifies every artifact as it writes it (opens the vacuumed SQLite copy and queries it,
 gunzips and parses `db.json.gz`, parses each config), records the verdicts in `manifest.json`, and renames

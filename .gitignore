@@ -17,6 +17,11 @@ drafts-*/
 agent-profiles/
 agent-profiles-*/
 
+# The dead-man's switch's ping URL. A healthchecks-style ping URL is a BEARER SECRET: anyone holding it
+# can forge liveness, which means the alarm you are relying on goes quiet without ever firing. The tools
+# (tools/heartbeat.mjs, Install-Heartbeat.ps1) are tracked; the URL they read is not.
+heartbeat.local.json
+
 # Prototype / scratch pages
 public/_*.html
 
