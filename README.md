@@ -165,6 +165,32 @@ guard in a start script or service definition so it is the default and disabling
 to type — `Start-Bureau.ps1` in this repo is the Windows version of that, and `-Local` is the opt-out.
 A safety posture that vanishes on restart without telling you is worse than no posture at all.
 
+## The UI, and the part I parked
+
+The company view is the one I'm happy with. Team, runs, spend, and every agent with the traits that
+shape how they work.
+
+![Bureau's tycoon view: company stats, most active agents, and the org as hireable cards](docs/tycoon.png)
+
+The idea underneath all of this was Theme Hospital. Not a dashboard, a place. A company you watch
+running, with staff walking between rooms doing the work, where you can see at a glance that Reception
+is idle and Product is buried. There is an isometric office in here that does part of that: a room per
+department, staff standing in them, rooms you can drag around to lay out the floor. It's composited
+from Kenney's Furniture Kit sprites (CC0).
+
+![Bureau's isometric office: a room per department with staff sprites standing in them](docs/office.png)
+
+That's where I stopped, because I'm not great at working with UI yet, and I could feel it becoming the
+thing I spent all my time on instead of the parts that make it safe. The bones work. What's missing is
+a designer's eye: rooms sit too far apart with dead space between them, nothing moves, and none of the
+state an agent is actually in — thinking, blocked, waiting on your approval — shows up in the room.
+Making an agent visibly walk to a meeting would do more for understanding a run than any log line.
+
+**If that sounds fun, I'd genuinely welcome the help.** It's self-contained: the office lives in
+`officeHTML()` and the isometric drawing helpers in `public/index.html`, and it touches none of the
+approval or credential logic, so you can't break the safety properties by working on it. Open an issue
+or just have a go and send a PR.
+
 ## Known limits
 
 Stated up front rather than left to be discovered:
