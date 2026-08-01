@@ -146,8 +146,13 @@ if ($Verify) {
         $gen = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:11434/api/generate" -Body $body `
                  -ContentType "application/json" -TimeoutSec 180
         $secs = ((Get-Date) - $t0).TotalSeconds
+        # Print tok/s ONLY when the sample can support it. The probe prompt yields ~2 tokens, where fixed
+        # overhead dominates the per-token math: the same run measured 44 tok/s here against 122-124 on
+        # real generations, which reads as a 3x regression and is nothing of the kind. A decorative number
+        # that will be misread is worse than no number - this check is "does it work", not a benchmark.
         $tps = if ($gen.eval_count -and $gen.eval_duration) { $gen.eval_count / ($gen.eval_duration / 1e9) } else { 0 }
-        Write-Host ("  INFERENCE WORKS: {0} tokens in {1:N1}s wall ({2:N0} tok/s generate)" -f $gen.eval_count, $secs, $tps) -ForegroundColor Green
+        $rate = if ($gen.eval_count -ge 20) { "{0:N0} tok/s" -f $tps } else { "too few tokens to time - this is a liveness check, not a benchmark" }
+        Write-Host ("  INFERENCE WORKS: {0} tokens in {1:N1}s wall ({2})" -f $gen.eval_count, $secs, $rate) -ForegroundColor Green
 
         # Now that a model IS resident, size_vram means something.
         try {
