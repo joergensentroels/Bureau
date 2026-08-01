@@ -80,12 +80,35 @@ ok("bureau down: posted to /fail", !!received[0]?.path.endsWith("/fail"), receiv
 ok("bureau down: carries the reason, not just a status", /unreachable|timeout|ECONN/i.test(received[0]?.body || ""), received[0]?.body);
 
 // --- model dead behind an open port (the trap this tool exists for) ---------
+//
+// BUREAU_URL is stubbed, not left at its default. Overriding only OLLAMA_URL made this scenario talk to
+// whatever real Bureau happened to be on :4173 — which passes on the author's machine and fails
+// everywhere else: a fresh clone has no resolvable operator token, so /api/health answers 401 and the
+// reported reason becomes "bureau auth rejected" instead of naming the model. Caught by cloning the repo
+// into a temp directory and running the suite as a stranger would.
+//
+// The irony is the point: the comment above explains that the HEALTHY path is opt-in precisely so the
+// suite never reddens for environmental reasons, and then the scenario below depended on the environment
+// anyway. Care applied to one path, not to its neighbour.
+//
+// Stubbing Bureau also sharpens the test: the only dead thing is now the model, which is what the
+// scenario claims to be about.
+const bureauStub = createServer((req, res) => {
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(JSON.stringify({ ok: true, model: "stub-model:test" }));
+});
+await new Promise((r2) => bureauStub.listen(0, "127.0.0.1", r2));
+const BUREAU_STUB = `http://127.0.0.1:${bureauStub.address().port}`;
+
 received.length = 0;
-r = await run({ OLLAMA_URL: `http://127.0.0.1:${PORT}` });
+// The sink answers 200 with "OK" to everything, so /api/generate returns a body with no token —
+// exactly the "port is open, model is dead" shape this tool exists to catch.
+r = await run({ BUREAU_URL: BUREAU_STUB, OLLAMA_URL: `http://127.0.0.1:${PORT}` });
 ok("model dead: exit 1 even though the port answered 200", r.code === 1, `got ${r.code} :: ${r.out}`);
 const failed = received.find((x) => x.path.endsWith("/fail"));
 ok("model dead: posted to /fail", !!failed, JSON.stringify(received.map((x) => x.path)));
 ok("model dead: reason mentions generate", /generate|no token/i.test(failed?.body || ""), failed?.body);
+bureauStub.close();
 
 // --- watcher unreachable ---------------------------------------------------
 r = await run({ HEALTHCHECK_URL: "http://127.0.0.1:9/ping" });
