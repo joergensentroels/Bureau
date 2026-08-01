@@ -191,9 +191,16 @@ $sysEnv = "`$env:LATCH_DATA='$latch\data'; `$env:OLLAMA_MODELS='$env:USERPROFILE
 # servers now tee their own stdout to a rotating log, so what is redirected here is only what an
 # in-process tee can never see:
 #
-#   stream 2 (errors)      PowerShell failures, and a native crash node dies too fast to log itself
-#   stream 6 (Write-Host)  the launcher's own messages — "Port 4173 is already served by pid ...", the
-#                          exact boot refusal you would otherwise have zero record of
+#   stream 2 (errors)   -> boot.err.log   PowerShell failures, and a native crash node dies too fast to log
+#   stream 6 (Write-Host) -> boot.log     the launcher's own messages, e.g. "Port 4173 is already served by
+#                                         pid ..." — the boot refusal you would otherwise have no record of
+#
+# TWO FILES, and this is not cosmetic. The first version sent both streams to ONE boot.log, and PowerShell
+# opens a redirection target per redirection: the second open fails with "The process cannot access the file
+# because it is being used by another process", the statement dies with exit 1, and that error goes to the
+# console — which a scheduled task discards. So both servers failed to start, leaving a 0-byte boot.log and
+# no trace anywhere. The change made to improve failure visibility is the one that broke the boot, silently.
+# (`6>&2` would be the obvious single-file fix and does NOT parse: PS 5.1 calls it "reserved for future use".)
 #
 # Stream 1 is deliberately NOT redirected: that is the servers' normal chatter, already captured WITH
 # rotation by the in-process tee, and duplicating it here would grow a second file without bound.
@@ -201,7 +208,7 @@ $sysEnv = "`$env:LATCH_DATA='$latch\data'; `$env:OLLAMA_MODELS='$env:USERPROFILE
 #
 # Rotated at task start rather than appended forever — one previous generation is kept, which is what
 # you want after a restart loop. SilentlyContinue because a locked log must never stop a server booting.
-$logRot = "if((Test-Path boot.log) -and (Get-Item boot.log).Length -gt 1mb){Move-Item boot.log boot.log.1 -Force -ErrorAction SilentlyContinue};"
+$logRot = "foreach(`$f in 'boot.log','boot.err.log'){if((Test-Path `$f) -and (Get-Item `$f).Length -gt 1mb){Move-Item `$f (`$f + '.1') -Force -ErrorAction SilentlyContinue}};"
 
 function New-BootTask {
   param([string]$Name, [string]$Command, [string]$WorkDir, [int]$DelaySeconds = 0)
@@ -209,7 +216,7 @@ function New-BootTask {
   # boot.log RELATIVE, resolved against -WorkingDirectory: this repo lives under "LLM server", and a
   # quoted absolute path nested inside an already-quoted -Command is how the MODULE_NOT_FOUND bug in
   # Start-Bureau.ps1 happened. Relative sidesteps the quoting entirely.
-  $inner = "$logRot $sysEnv $Command 2>>boot.log 6>>boot.log"
+  $inner = "$logRot $sysEnv $Command 2>>boot.err.log 6>>boot.log"
   $action  = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -ExecutionPolicy Bypass -Command `"$inner`"" -WorkingDirectory $WorkDir
   $trigger = New-ScheduledTaskTrigger -AtStartup
   if ($DelaySeconds -gt 0) { $trigger.Delay = "PT$($DelaySeconds)S" }   # crude ordering: Ollama, then Latch, then Bureau
@@ -267,12 +274,46 @@ New-BootTask -Name "$prefix`Bureau" -Command "& '$here\Start-Bureau.ps1' -Foregr
 New-DailyTask -Name "$prefix`Backup" -Command "& '$node' tools\backup.mjs" -WorkDir $here -At "03:30"
 
 if (-not $WhatIfPreference) {
-  Write-Host "`nRegistered. Verify without rebooting:"
-  Write-Host "  Get-ScheduledTask $prefix* | Select TaskName,State"
-  Write-Host "  Start-ScheduledTask $prefix`Bureau     # then check http://127.0.0.1:4173/api/whoami"
-  Write-Host "`nThe per-user Startup shortcuts still exist. Remove them once a real reboot proves these work,"
-  Write-Host "or you will get a second copy of each on interactive logon (the port guard refuses the duplicate,"
-  Write-Host "so it is noisy rather than harmful)."
+  # START THEM AND CHECK, rather than printing "registered" and hoping.
+  #
+  # An install that registers a task whose command line cannot run looks identical to a good one: four
+  # green "registered" lines. That happened - two redirections to one boot.log made both servers exit 1
+  # instantly, with the error going to a console the task discards - and it was only noticed because a
+  # human went looking. A registration is a claim; a listening port is evidence.
+  #
+  # Waiting for the port to FREE before starting matters too: Stop-ScheduledTask returns immediately while
+  # termination is asynchronous, and -MultipleInstances IgnoreNew silently drops a start that overlaps a
+  # still-dying instance.
+  Write-Host "`nStarting them now to prove the command lines actually run..." -ForegroundColor Cyan
+  $checks = @(@{ Task = "$prefix`Latch"; Port = 8787 }, @{ Task = "$prefix`Bureau"; Port = 4173 })
+  foreach ($c in $checks) { Stop-ScheduledTask -TaskName $c.Task -ErrorAction SilentlyContinue }
+  foreach ($c in $checks) {
+    $n = 0
+    while ((Get-NetTCPConnection -LocalPort $c.Port -State Listen -ErrorAction SilentlyContinue) -and $n -lt 30) { Start-Sleep -Milliseconds 500; $n++ }
+  }
+  $bad = @()
+  foreach ($c in $checks) {
+    Start-ScheduledTask -TaskName $c.Task
+    $n = 0
+    while (-not (Get-NetTCPConnection -LocalPort $c.Port -State Listen -ErrorAction SilentlyContinue) -and $n -lt 40) { Start-Sleep -Milliseconds 500; $n++ }
+    if (Get-NetTCPConnection -LocalPort $c.Port -State Listen -ErrorAction SilentlyContinue) {
+      Write-Host ("  OK   {0} is listening on :{1} after {2}s" -f $c.Task, $c.Port, [int]($n * 0.5)) -ForegroundColor Green
+    } else {
+      $res = (Get-ScheduledTask -TaskName $c.Task | Get-ScheduledTaskInfo).LastTaskResult
+      Write-Host ("  FAIL {0} did NOT bind :{1} (LastTaskResult={2})" -f $c.Task, $c.Port, $res) -ForegroundColor Red
+      $bad += $c.Task
+    }
+  }
+  if ($bad.Count) {
+    Write-Host "`n$($bad -join ' and ') failed to start. Look here, in this order:" -ForegroundColor Red
+    Write-Host "  1. boot.err.log / boot.log in the task's working directory (PowerShell-level failures)"
+    Write-Host "  2. bureau.log / latch.log (the server's own output, if it got far enough to start)"
+    Write-Host "  3. If ALL of those are empty, the command line itself failed before any redirect could"
+    Write-Host "     open - run the task's -Command string by hand in a console to see the real error."
+    exit 1
+  }
+  Write-Host "`nRegistered AND verified listening. Re-check any time with:"
+  Write-Host "  powershell -NoProfile -ExecutionPolicy Bypass -File `"$here\Install-Autostart.ps1`" -Verify   (elevated)"
   Write-Host "`nSTILL UNVERIFIED until you actually reboot: whether Ollama is happy under SYSTEM in session 0."
   Write-Host "GPU acceleration is the thing to check - if models get slow, run Ollama from the Startup folder"
   Write-Host "instead and leave only Latch+Bureau as tasks. Bureau degrades honestly when the model is gone."
