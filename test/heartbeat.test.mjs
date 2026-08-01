@@ -27,11 +27,17 @@ await new Promise((r) => sink.listen(0, "127.0.0.1", r));
 const PORT = sink.address().port;
 const SINK = `http://127.0.0.1:${PORT}/ping-test`;
 
+// HEARTBEAT_CONFIG points at a path that cannot exist, on EVERY run and not just the no-url case. On a
+// machine where the operator has actually installed the heartbeat, heartbeat.local.json holds the real
+// production ping URL, and any test that leaves HEALTHCHECK_URL unset would fall through to it and tell
+// the real watcher this machine is healthy. A test must never be able to forge liveness. This caught it.
+const NO_CONFIG = join(ROOT, "does-not-exist-heartbeat-config.json");
+
 const run = (env) =>
   new Promise((resolve) => {
     const p = spawn(process.execPath, ["tools/heartbeat.mjs"], {
       cwd: ROOT,
-      env: { ...process.env, HEALTHCHECK_URL: SINK, ...env },
+      env: { ...process.env, HEARTBEAT_CONFIG: NO_CONFIG, HEALTHCHECK_URL: SINK, ...env },
     });
     let out = "";
     p.stdout.on("data", (d) => (out += d));

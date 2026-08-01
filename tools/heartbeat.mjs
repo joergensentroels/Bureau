@@ -31,7 +31,11 @@ const log = (m) => console.log(`${stamp()} ${m}`);
 const readJson = (p) => { try { return JSON.parse(readFileSync(p, "utf8").replace(/^\uFEFF/, "")); } catch { return null; } };
 
 // --- config -----------------------------------------------------------------
-const local = readJson(join(ROOT, "heartbeat.local.json")) || {};
+// HEARTBEAT_CONFIG exists so a test can point the file lookup at nothing. Without it, a test that sets
+// HEALTHCHECK_URL="" to exercise the missing-config path falls through to the REAL installed config and
+// pings the operator's production watcher, reporting a machine healthy on evidence the test invented.
+// That is the precise failure this whole tool exists to prevent, and it shipped here once already.
+const local = readJson(process.env.HEARTBEAT_CONFIG || join(ROOT, "heartbeat.local.json")) || {};
 const HC_URL = (process.env.HEALTHCHECK_URL || local.url || "").trim();
 const BUREAU = process.env.BUREAU_URL || `http://127.0.0.1:${process.env.BUREAU_PORT || 4173}`;
 const OLLAMA = process.env.OLLAMA_URL || "http://127.0.0.1:11434";
