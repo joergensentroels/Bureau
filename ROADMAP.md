@@ -11,12 +11,13 @@ _Forward-looking only — the detail of what's shipped lives in the code, the te
 ## Next
 
 **No open work items.** The feature roadmap is done, and so is the operational-durability work that
-booting-at-startup created. Two standing observations rather than tasks:
+booting-at-startup created. One standing observation rather than a task:
 
   - **Off-machine backups are an operator decision, not a default.** `tools/backup.mjs` protects against a
     corrupt write, a bad migration, an accidental delete. It does **not** survive losing this disk, because
     the snapshots are on it. Fixing that means deciding where the operator token and the provider key are
     allowed to live; the tool deliberately refuses cloud-synced folders rather than quietly choosing for you.
+
 Closed on 2026-08-01:
 
   - ~~GPU under SYSTEM is unproven.~~ **PROVEN: session 0 does not cost the GPU.** `qwen3:8b` loaded on the
@@ -61,7 +62,7 @@ Closed on 2026-07-31:
     trap it exists to prevent: Bureau caches the token at boot, so rotating the file without restarting
     Bureau leaves the old token working.
 
-**In flight — Parallel execution.** Stage 1 shipped (2026-07-23, commit `6dbe3a9`): opt-in
+**In flight — Parallel execution.** Stage 1 shipped (2026-07-23, commit `a16fbb1`): opt-in
 `run.parallel` / **⚡ parallel reports** toggle runs a manager's sibling reports concurrently through
 a bounded semaphore (`ORCH_MAX_PARALLEL`, default 3), with no cross-sibling handoff — the manager's
 synthesis step integrates their work. Sequential stays the default. Live-verified 2026-07-23: a
@@ -122,7 +123,7 @@ cross-sibling handoff, so siblings can duplicate reasoning the sequential path w
     - **So: enable `parallel` for paid-heavy runs, leave it off for local ones.** That is now measured
       rather than assumed, in both directions.
 
-**The eval gate is GREEN — the red was machine load, not a regression (resolved 2026-07-31, `3ff52ab`).
+**The eval gate is GREEN — the red was machine load, not a regression (resolved 2026-07-31, `75c343c`).
 Do not re-baseline.** Three runs of `criteria.singleShotRate` on identical code and cases, hours apart:
 **78%** (n=32), **80%** (n=20, p50 9173ms), **100%** (n=60, p50 4227ms). The two low scores were taken
 while the test suite, the live e2e and a server restart competed for the same Ollama; the 100% run had the
@@ -320,7 +321,7 @@ assertions across 7 suites + a live `--e2e`; see `test/README.md`).
   MCP sockets. Discovery via Latch's `/api/mcp/servers`; dormant when MCP is unconfigured. _Verified:
   hard-floor unit tests, graceful-when-off. Full E2E needs an MCP server in Latch's `data/mcp.json`
   (operator setup)._
-- **Remote-access hardening** (2026-07-25, `1fab9db`) — groundwork for reaching Bureau from another
+- **Remote-access hardening** (2026-07-25, `0186733`) — groundwork for reaching Bureau from another
   machine. The insight driving it: the operator token can approve hard-floor approvals, so holding it is
   equivalent to shell access on the host — the hard floor stops a rogue agent, never a human with the
   token. So: **tokens are header-only** (`?token=` no longer authenticates anywhere, including the SSE
@@ -393,7 +394,7 @@ assertions across 7 suites + a live `--e2e`; see `test/README.md`).
 - **The failure paths, made loud** (2026-07-31) — an audit of every place Bureau stayed quiet when
   something went wrong. Each of these was one line of `catch {}` or one missing sibling call, and none
   of them broke a test, because nothing was watching.
-  - **A run that fails now leaves a record** (`f4558cf`). Measured: `POST /api/run` answered 201 with a
+  - **A run that fails now leaves a record** (`a35c151`). Measured: `POST /api/run` answered 201 with a
     runId and left **zero** durable trace — `/api/runs` empty, `/api/audit` empty, `budget.runs` still 0.
     Two one-call repros (company run with an empty roster; single run naming a deleted agent) did
     `emit(error); finishRun()` and skipped `persistRun` entirely. Worst on the unattended paths: a
@@ -403,14 +404,14 @@ assertions across 7 suites + a live `--e2e`; see `test/README.md`).
     dropping them would silently restore an agent's budget), run listed. The crash handler moved *inside*
     `wsStore.run` — hung outside it, the bookkeeping would have filed every workspace's failures under
     `default`. `/stop` on an unknown run 404s instead of confirming `ok:true`.
-  - **Notifications report their own failures** (`45a3d5e`). The one feature whose whole job is to reach
+  - **Notifications report their own failures** (`0ce29fb`). The one feature whose whole job is to reach
     an absent operator was fire-and-forget over a response nobody read. Measured: a closed port was
     completely silent (0 audit rows, `/api/notify` still showing the URL as healthy) and **HTTP 500
     counted as success**; a *failed* run pushed nothing at all. Now `res.ok` is checked, failures are
     warned and audited as `kind:"notify"` (a healthy webhook stays quiet — only failures and recoveries
     are logged), `lastDelivery` is readable, `run_failed` fires, and **`POST /api/notify/test`** plus a
     Test button let an operator confirm a URL instead of saving it and hoping.
-  - **An unreachable model is a failure, not a finished run** (`3860961`). With the model down and zero
+  - **An unreachable model is a failure, not a finished run** (`1cda7a5`). With the model down and zero
     tokens spent, a run reported verdict `none`, wrote an audited `file_write` with `ok=true`, and left a
     draft in the inbox reading _"The team completed the assigned tasks."_ — a sentence **Bureau** wrote,
     from a `catch` in the manager's synthesis fallback. That is precisely the fabrication the turn loop
@@ -419,7 +420,7 @@ assertions across 7 suites + a live `--e2e`; see `test/README.md`).
     one failed) fails the run with the cause; and the delegation safety net will not invent a deliverable
     out of Bureau's own placeholders. _Verified with a second Bureau on a dead `LATCH_URL` **and** a
     control run against the real model — a guard that condemns working runs would be worse than the bug._
-- **Version archives: no orphans, nothing unreachable** (2026-07-31, `7e59b29`) — measured the real
+- **Version archives: no orphans, nothing unreachable** (2026-07-31, `77112a0`) — measured the real
   corpus: **116 archive files on disk, 10 listed by any endpoint.** The DoD checklist is rewritten after
   every verify pass and is deliberately kept out of `org.deliverables`, so each rewrite archived a file
   with no org entry to list it from and nothing ever pruned `.versions/` — orphans from birth, one per
@@ -428,7 +429,7 @@ assertions across 7 suites + a live `--e2e`; see `test/README.md`).
   either leaks files or deletes an archive still listed); and the versions list reads the **directory**,
   which made all 116 reachable again and means a deleted document's archive is discoverable without
   having kept `archivedAs`. A failed archive write no longer loses the prior content silently.
-- **Memory de-duplicated at write time** (2026-07-31, `9b80669`) — `agent.memory` keeps 8 per agent and
+- **Memory de-duplicated at write time** (2026-07-31, `0066206`) — `agent.memory` keeps 8 per agent and
   `persistRun` blind-prepended, so repeats of one objective evicted distinct history: measured, **all
   eight** of one agent's slots held e2e test objectives and three weeks of real work was gone. Recall-time
   de-duplication existed for exactly this symptom but collapses duplicates in the *ranking* — it cannot
