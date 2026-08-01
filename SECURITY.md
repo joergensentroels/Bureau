@@ -160,29 +160,29 @@ a large purchase without you.
 
 | # | Severity | Finding | Status |
 |---|----------|---------|--------|
-| 1 | CRITICAL | No authentication on any endpoint | **FIXED** — operator-token gate on all `/api` + `/mcp` (`0311204`) |
+| 1 | CRITICAL | No authentication on any endpoint | **FIXED** — operator-token gate on all `/api` + `/mcp` (`4ada5bd`) |
 | 2 | CRITICAL | No Origin/CSRF check; Content-Type-agnostic body parse → drive-by from any visited site | **FIXED** — bearer-token requirement closes it (see above) |
 | 3 | HIGH | Security config (guardrail ceiling, policy `allow`, agent tier/allowlist) mutable unauthenticated → widen auto-approval | **MITIGATED** — now behind auth. _Future: treat config-mutation + steer as an operator-only role, distinct from a read/agent token._ |
 | 4 | HIGH | Unauthenticated `autoApprove` runs (`/api/run`, goals/plan/sops); triggers fire auto-approve | **MITIGATED** — run-start now behind auth; triggers keep their own per-token auth |
 | 5 | HIGH | `POST /api/run/:id/steer` injects text as trusted "CEO course correction" | **MITIGATED** — now behind auth. Residual (accepted): the *authenticated operator* can still steer, by design; steer text is deliberately high-trust framing, so only the operator should hold the token |
 | 6 | — | Hard floor `requiresCeoAlways` uneditable via API | **Positive control** — unchanged; caps blast radius of 3–5 |
 | 7 | MED | All company data readable + `/mcp` mirrors it | **MITIGATED** — now behind auth |
-| 8 | MED | SSRF guard correct & applied, but DNS-rebinding TOCTOU between the check and `fetch` | **FIXED for `web_research`** (`dd8c7c1`) — `fetchUrl` uses core http/https with a `pinnedLookup`: one resolution validates AND supplies the connect IP (no rebinding window); IP literals validated directly. `api_call` still uses `assertPublicHost`+`fetch` — accepted, since it's hard-floored (human-approved); pin it too as a follow-up. |
+| 8 | MED | SSRF guard correct & applied, but DNS-rebinding TOCTOU between the check and `fetch` | **FIXED for `web_research`** (`3252942`) — `fetchUrl` uses core http/https with a `pinnedLookup`: one resolution validates AND supplies the connect IP (no rebinding window); IP literals validated directly. `api_call` still uses `assertPublicHost`+`fetch` — accepted, since it's hard-floored (human-approved); pin it too as a follow-up. |
 | 9 | LOW | `ask_peer` well-contained (persona-only, local, no actions, no recursion); SOP runs don't bypass the approval gate | **Accepted** — no action needed |
-| 10 | LOW | Clickjacking: with the token now in the browser, a page could frame Bureau and trick authed clicks | **FIXED** (`dd8c7c1`) — `X-Frame-Options: DENY` + CSP `frame-ancestors 'none'` (plus `nosniff`, `no-referrer`) on every response |
+| 10 | LOW | Clickjacking: with the token now in the browser, a page could frame Bureau and trick authed clicks | **FIXED** (`3252942`) — `X-Frame-Options: DENY` + CSP `frame-ancestors 'none'` (plus `nosniff`, `no-referrer`) on every response |
 
 ## Hardening — all backlog items done
 
-- **DNS-rebinding pin (both outbound paths)** — `fetchUrl` (`dd8c7c1`) and `apiCall` (`f0c7c56`) use
+- **DNS-rebinding pin (both outbound paths)** — `fetchUrl` (`3252942`) and `apiCall` (`a073e99`) use
   core http/https with a validating `pinnedLookup`: one resolution validates *and* supplies the connect
   IP; IP literals validated directly. No rebinding window.
-- **Anti-clickjacking + nosniff headers** (`dd8c7c1`): `X-Frame-Options: DENY`, CSP `frame-ancestors
+- **Anti-clickjacking + nosniff headers** (`3252942`): `X-Frame-Options: DENY`, CSP `frame-ancestors
   'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` on every response.
-- **Off-loopback bind-guard** (`dd8c7c1`): `BUREAU_HOST` (default loopback); loud SECURITY warning if
+- **Off-loopback bind-guard** (`3252942`): `BUREAU_HOST` (default loopback); loud SECURITY warning if
   bound to a non-loopback interface.
-- **Server-side per-run paid ceiling** (`f0c7c56`): guardrail `maxPaidUsdPerRun` (0 = unlimited);
+- **Server-side per-run paid ceiling** (`a073e99`): guardrail `maxPaidUsdPerRun` (0 = unlimited);
   `canUsePaid` + `orchestrationRouting` fall back to local once the run's total paid spend reaches it.
-- **Role separation** (`f0c7c56`): a read-only token (Latch `agentToken` / `BUREAU_READ_TOKEN`) grants
+- **Role separation** (`a073e99`): a read-only token (Latch `agentToken` / `BUREAU_READ_TOKEN`) grants
   `readonly` — reads + read-only MCP tools only; mutations, run-starts, steer, config, and MCP
   `run_sop`/`start_run` require the operator token.
 
