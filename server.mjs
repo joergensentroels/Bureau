@@ -4515,5 +4515,21 @@ if (isMain) {
       server.listen(PORT, HOST, () => console.log(`Bureau on http://${HOST}:${PORT} (${WORKSPACES.length} workspace${WORKSPACES.length === 1 ? "" : "s"}, SQLite) — API + /mcp require the operator token (Authorization: Bearer <token>)`));
       setInterval(() => { tickSchedules().catch((e) => console.error("scheduler tick:", e.message)); }, 60000); // check due schedules every minute
     })
-    .catch((e) => { console.error("Could not load Latch operator token:", e.message); process.exit(1); });
+    // Say what is missing AND what to do about it. This is the first thing a newcomer sees, and until now
+    // it was a bare ENOENT on an auth.json they have never heard of — no mention that Latch is a separate
+    // service they must run, and no way to find it. Verified from a clean clone with no Latch present.
+    .catch((e) => {
+      console.error(`\nCould not load Latch's operator token: ${e.message}`);
+      // ASCII only in this block, unlike the rest of Bureau's console output. It is the FIRST thing a
+      // stranger sees, often on a default Windows console at codepage 437/1252, where a UTF-8 em-dash
+      // renders as mojibake. Elsewhere the audience is the operator's own configured terminal.
+      console.error(`\nBureau needs Latch running alongside it. Latch is the security boundary - it holds every`);
+      console.error(`credential and executes the risky actions; Bureau stores no secrets and cannot start without it.`);
+      console.error(`\n  1. Get Latch:   https://github.com/joergensentroels/Latch`);
+      console.error(`  2. Start it (it generates data/auth.json on first boot)`);
+      console.error(`  3. Point Bureau at it if it is not beside this repo:  LATCH_DATA=<path to Latch>/data`);
+      console.error(`\nLooked in: ${DATA_DIR}`);
+      console.error(`(Set LATCH_DATA to override. Default is ../openclaw-command-center/data via your home directory.)\n`);
+      process.exit(1);
+    });
 }
