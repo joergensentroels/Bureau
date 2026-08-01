@@ -10,34 +10,30 @@ _Forward-looking only — the detail of what's shipped lives in the code, the te
 
 ## Next
 
-**Open operational items (2026-07-31).** The feature roadmap is done; what remains is durability of an
-unattended service, in rough order of what would actually hurt:
+**No open work items.** The feature roadmap is done, and so is the operational-durability work that
+booting-at-startup created. Two standing observations rather than tasks:
 
-  - **Off-machine backups — an operator decision, not a default.** `tools/backup.mjs` protects against a
+  - **Off-machine backups are an operator decision, not a default.** `tools/backup.mjs` protects against a
     corrupt write, a bad migration, an accidental delete. It does **not** survive losing this disk, because
-    the snapshots are on it. Fixing that means deciding where the operator token and the Moonshot key are
+    the snapshots are on it. Fixing that means deciding where the operator token and the provider key are
     allowed to live; the tool deliberately refuses cloud-synced folders rather than quietly choosing for you.
-  - **GPU under SYSTEM is still unproven.** `size_vram` from `/api/ps` needs a model loaded to read, and the
-    SYSTEM-profile Ollama does not write a log where the user-profile one does (checked: no
+  - **GPU under SYSTEM is unproven, not broken.** `size_vram` from `/api/ps` needs a model loaded to read, and
+    the SYSTEM-profile Ollama writes no log where the user-profile one does (checked: no
     `systemprofile\AppData\Local\Ollama\server.log`). A silent session-0 CPU fallback would make every local
-    run slow with nothing reporting it. `boot.log` now captures Ollama's stderr, which is where it states its
-    GPU decision — so the next boot should answer this for free.
-  - **Anthropic's OpenAI-compatible endpoint as Latch's `fallback`** — the recommended alternative to wiring a
-    Claude subscription seat into Bureau (which stays declined). **No code needed; it is configuration, and it
-    needs a key only you can enter.** Verified 2026-07-31 that the transport already matches: Latch POSTs to
+    run slow with nothing reporting it. The boot tasks now capture Ollama's stderr, which is where it states
+    its GPU decision, so the next reboot answers this for free — no action needed to find out.
+
+Closed on 2026-08-01:
+
+  - ~~Anthropic's OpenAI-compatible endpoint as Latch's `fallback`.~~ **Declined by the operator, and the
+    reasoning is worth keeping.** It was only ever proposed as the legitimate substitute for wiring a Claude
+    *subscription seat* into Bureau (which stays declined — a seat is licensed for interactive human use, and
+    a 60s scheduler plus webhook triggers means nobody is driving). Once the seat is off the table, paying
+    per-token for a second paid fallback buys nothing over the Kimi/Moonshot one already configured: there is
+    a single fallback slot, and `orchestrationRouting` already sends only the JSON-critical calls to it.
+    Recorded because the *transport* question was settled and should not be re-investigated: Latch POSTs to
     `${baseUrl}/chat/completions` with `authorization: Bearer <apiKey>`, which is exactly what Anthropic's
-    compat layer expects. Add to the `fallback` block of `openclaw-command-center/data/llm-provider.json`:
-
-    ```json
-    "fallback": { "provider": "openai-compatible",
-                  "baseUrl": "https://api.anthropic.com/v1",
-                  "model": "claude-sonnet-5",
-                  "apiKey": "<your Anthropic API key>" }
-    ```
-
-    Two things to know before doing it: this **replaces** the current Kimi/Moonshot fallback (there is one
-    fallback slot), and `LLM_FALLBACK_*` environment variables override the file. Restart Latch afterwards.
-    Write the file **without a BOM** — see the BOM note below; PowerShell's `Set-Content` adds one.
+    compat layer expects, so it remains a pure config change if the calculus ever changes.
 
 Closed on 2026-07-31:
 
