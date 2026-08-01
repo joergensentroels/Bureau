@@ -71,7 +71,7 @@ if (-not $isAdmin -and -not $WhatIfPreference) {
 # — which is also why the install cannot be checked from an unprivileged session.
 #
 # The check that actually matters is the PROCESS OWNER. If node is owned by SYSTEM, the task started it; if
-# it is owned by troel, the Startup shortcut did, and the reboot proved nothing.
+# it is owned by your own account, the Startup shortcut did, and the reboot proved nothing.
 if ($Verify) {
   # THREE outcomes, not two. The first version tracked only pass/fail and printed "ALL GOOD" while every
   # process-owner line was a warning — a green verdict that contradicted its own checks, in the script whose

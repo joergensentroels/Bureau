@@ -1,5 +1,17 @@
 # Bureau — Security Model & Review
 
+## Reporting a Vulnerability
+
+Please report security vulnerabilities privately through **[GitHub Security Advisories](https://github.com/joergensentroels/Bureau/security/advisories/new)** rather than a public issue. This keeps the details private between you and the maintainer until a fix is ready.
+
+Include, if possible: the affected file/endpoint, a reproduction, and the impact you believe it has. There's no bug bounty here — this is a solo/community project — but every report will get a response and, once fixed, credit in the release notes if you'd like it.
+
+**Especially interested in:** anything that gets a hard-floored action (`shell`, `api_call`, `email_draft`, `github_repo`, `github_pr`, `mcp_call`, over-ceiling purchases) executed without a human decision; anything that lets Bureau approve its own Latch approval; and any path that reaches the API or `/mcp` without the operator token. Those three are the whole design, so a break in them matters more than its CVSS score suggests.
+
+**Note the trust split before reporting:** Bureau is the **control surface** and holds no credentials. [Latch](https://github.com/joergensentroels/Latch) is the **security boundary** that holds every API key, the GitHub token and the mailbox, and executes the risky actions — its `SECURITY.md` has its own advisory link, and a credential-handling issue probably belongs there rather than here.
+
+---
+
 _Last reviewed: 2026-07-23. Bureau is the **control surface**; Latch (openclaw-command-center) is the
 **credential-holding security boundary**. Read `openclaw-command-center/SECURITY.md` for the boundary
 that actually holds your API keys, GitHub token, and mailbox — Bureau holds none of those._

@@ -132,6 +132,10 @@ for it once and remembers it. Bureau binds loopback only.
 | `BUREAU_EMBED_MODEL` | `nomic-embed-text` | embedding model; recall falls back to BM25 if it's missing |
 | `BUREAU_TRIGGER_MIN_GAP_MS` | `15000` | minimum gap between two fires of one inbound trigger (retry-storm guard) |
 | `LATCH_DATA` | `…/openclaw-command-center/data` | where Latch's `auth.json` lives |
+| `BUREAU_LOG` | `<repo>/bureau.log` | stdout+stderr are teed here, size-rotated. `off` disables. Matters most when Bureau runs from a boot task, where a scheduled task captures no output at all |
+| `BUREAU_LOG_MAX` / `BUREAU_LOG_KEEP` | `5 MB` / `3` | rotation size and how many generations to keep |
+| `BUREAU_BACKUP_ROOT` / `BUREAU_BACKUP_KEEP` | `../_backups` / `14` | where `tools/backup.mjs` writes verified snapshots, and how many to retain. It **refuses** a root inside a git work tree or a cloud-synced folder — snapshots contain the operator token |
+| `BUREAU_VERSION_KEEP` | `20` | prior versions retained per deliverable |
 
 ## Security
 

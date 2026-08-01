@@ -82,9 +82,9 @@ if ($Foreground) {
   & node (Join-Path $here "server.mjs")
 } else {
   $log = Join-Path $here "bureau.log"
-  # `server.mjs` relative, NOT the absolute path: this repo lives under "Documents\LLM server", and
-  # Start-Process splits -ArgumentList on the space, so the absolute form launched node with
-  # "C:\Users\troel\Documents\LLM" and it died with MODULE_NOT_FOUND. -WorkingDirectory makes the relative
+  # `server.mjs` relative, NOT the absolute path: if the repo sits under a path containing a space (this
+  # one lives in "...\LLM server"), Start-Process splits -ArgumentList on that space, so the absolute form
+  # launched node with "<...>\LLM" and it died with MODULE_NOT_FOUND. -WorkingDirectory makes the relative
   # name unambiguous and sidesteps quoting entirely. (Redirect paths are values, not command lines, so
   # spaces are fine there.)
   $p = Start-Process -FilePath "node" -ArgumentList "server.mjs" `
