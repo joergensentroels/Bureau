@@ -22,11 +22,18 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File "<this path>"              # install (ELEVATED shell)
 #   powershell -NoProfile -ExecutionPolicy Bypass -File "<this path>" -WhatIf      # preview, change nothing
 #   powershell -NoProfile -ExecutionPolicy Bypass -File "<this path>" -Uninstall   # remove the tasks
+#   powershell -NoProfile -ExecutionPolicy Bypass -File "<this path>" -Verify      # post-reboot checklist
+#   powershell -NoProfile -ExecutionPolicy Bypass -File "<this path>" -Verify -Quick   # ...without loading a model
+#
+# -Verify GENERATES a token with the real model rather than pinging /api/tags. That distinction is the whole
+# point: on 2026-08-01 a rolled-back Ollama update deleted llama-server.exe, and the port, the task state and
+# the model list all stayed green while every inference returned 500 for nine hours. -Quick skips it when you
+# only want the structural checks and do not want to spend ~25s loading 5 GB into VRAM.
 #
 # The boot tasks this creates already pass -ExecutionPolicy Bypass themselves, so Restricted does not
 # affect them at startup — it only gets in the way of running this installer by hand.
 [CmdletBinding(SupportsShouldProcess = $true)]
-param([switch]$Uninstall, [switch]$Verify)
+param([switch]$Uninstall, [switch]$Verify, [switch]$Quick)
 
 $ErrorActionPreference = "Stop"
 $here    = Split-Path -Parent $MyInvocation.MyCommand.Path        # ...\bureau
@@ -105,18 +112,81 @@ if ($Verify) {
     if ($tags.models.Count -gt 0) { Write-Host "  OLLAMA_MODELS resolved: $($tags.models.Count) model(s) - $names" -ForegroundColor Green }
     else { Write-Host "  Ollama is up but reports NO models - OLLAMA_MODELS is wrong for this account" -ForegroundColor Red; $fail += "Ollama reports no models" }
   } catch { Write-Host "  could not reach Ollama: $($_.Exception.Message)" -ForegroundColor Red; $fail += "Ollama unreachable" }
-  try {
-    $ps = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/ps" -TimeoutSec 10
-    if (-not $ps.models -or $ps.models.Count -eq 0) {
-      Write-Host "  no model loaded right now, so GPU use is unknown - run something, then re-check /api/ps" -ForegroundColor DarkYellow
-      $unproven += "GPU use unverified (no model loaded)"
+  # ACTUALLY GENERATE SOMETHING. This is the check that would have caught the 2026-08-01 outage in seconds.
+  #
+  # A failed auto-update deleted lib\ollama\llama-server.exe while the server kept running. The port
+  # listened, the task said Running, /api/tags returned both models correctly - and every inference returned
+  # 500 for nine hours with nothing reporting it. Every check here pinged a port; none asked the service to
+  # do its job. A liveness probe that only proves a process is LISTENING cannot detect a service that has
+  # lost the ability to function.
+  #
+  # It also fixes the GPU check, which used to report "unknown" whenever nothing happened to be loaded -
+  # the common case, and an absence of evidence dressed up as a result. Generating loads the model, so
+  # size_vram is readable immediately afterwards by construction.
+  if ($Quick) {
+    Write-Host "  -Quick: skipped the inference probe (it loads the model, ~25s cold)" -ForegroundColor DarkYellow
+    $unproven += "inference not probed (-Quick)"
+  } else {
+    # The model Bureau actually routes to, not whatever happens to be first in the list.
+    $probeModel = ""
+    try {
+      $raw = [System.IO.File]::ReadAllText((Join-Path $latch "data\llm-provider.json")) -replace "^$([char]0xFEFF)", ""
+      $probeModel = ($raw | ConvertFrom-Json).model
+    } catch { }
+    if (-not $probeModel -and $tags -and $tags.models.Count -gt 0) { $probeModel = $tags.models[0].name }
+
+    if (-not $probeModel) {
+      Write-Host "  no model to probe with" -ForegroundColor Red; $fail += "no model available to probe"
+    } else {
+      Write-Host "  probing inference with $probeModel (loads it; up to ~30s cold)..." -ForegroundColor Cyan
+      $body = @{ model = $probeModel; prompt = "Reply with the single word: ok"; stream = $false;
+                 think = $false; options = @{ num_predict = 8 } } | ConvertTo-Json -Depth 4
+      try {
+        $t0 = Get-Date
+        $gen = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:11434/api/generate" -Body $body `
+                 -ContentType "application/json" -TimeoutSec 180
+        $secs = ((Get-Date) - $t0).TotalSeconds
+        $tps = if ($gen.eval_count -and $gen.eval_duration) { $gen.eval_count / ($gen.eval_duration / 1e9) } else { 0 }
+        Write-Host ("  INFERENCE WORKS: {0} tokens in {1:N1}s wall ({2:N0} tok/s generate)" -f $gen.eval_count, $secs, $tps) -ForegroundColor Green
+
+        # Now that a model IS resident, size_vram means something.
+        try {
+          $ps = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/ps" -TimeoutSec 10
+          foreach ($m in $ps.models) {
+            $vram = [int64]$m.size_vram; $tot = [int64]$m.size
+            $pct = if ($tot -gt 0) { 100.0 * $vram / $tot } else { 0 }
+            $verdict = if ($vram -le 0) { "CPU ONLY" } elseif ($pct -gt 95) { "FULLY ON GPU" } else { "PARTIAL OFFLOAD" }
+            Write-Host ("  {0}: {1:N2} of {2:N2} GB in VRAM ({3:N0}%) -> {4}" -f $m.name, ($vram/1GB), ($tot/1GB), $pct, $verdict) `
+              -ForegroundColor $(if ($vram -le 0) { "Red" } elseif ($pct -gt 95) { "Green" } else { "Yellow" })
+            if ($vram -le 0) { $fail += "$($m.name) is on CPU only" }
+          }
+          # Ollama probes the Ryzen's INTEGRATED graphics first and logs "AMD driver is too old" before
+          # selecting CUDA. Said here because reading that line as the answer inverts the conclusion.
+          if ($ps.models.Count -eq 0) { $unproven += "model unloaded before /api/ps could read it" }
+        } catch { $unproven += "GPU split unread (/api/ps: $($_.Exception.Message))" }
+      } catch {
+        # THE case this block exists for. Report the server's own message: "llama-server binary not found"
+        # is a broken install, not a configuration problem, and the two need different fixes.
+        # Three sources, in order, because none of them is reliable alone and an EMPTY diagnosis is the one
+        # outcome this check cannot afford. ErrorDetails.Message is where Invoke-RestMethod puts the response
+        # body in PS 5.1; the raw stream is often already consumed by the time we get here (a bare
+        # GetResponseStream().ReadToEnd() returned "" on a live 404, printing a failure with no reason);
+        # Exception.Message always exists as a last resort.
+        $detail = "$($_.ErrorDetails.Message)".Trim()
+        if (-not $detail) { try { $detail = (New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())).ReadToEnd().Trim() } catch { } }
+        if (-not $detail) { $detail = "$($_.Exception.Message)".Trim() }
+        if (-not $detail) { $detail = "(the server gave no reason at all)" }
+        Write-Host "  INFERENCE FAILED - the server is listening but cannot run a model:" -ForegroundColor Red
+        Write-Host ("    " + $detail.Substring(0, [Math]::Min(300, $detail.Length))) -ForegroundColor Red
+        if ($detail -match "llama-server") {
+          Write-Host "    That is a BROKEN INSTALL, almost certainly a rolled-back auto-update." -ForegroundColor Red
+          Write-Host "    Repair: Stop-ScheduledTask $prefix`Ollama (elevated), run OllamaSetup.exe UN-elevated," -ForegroundColor Red
+          Write-Host "    quit the tray icon, re-disable the Ollama.lnk it restores, Start-ScheduledTask." -ForegroundColor Red
+        }
+        $fail += "Ollama cannot run a model"
+      }
     }
-    else { foreach ($m in $ps.models) {
-        $vram = [int64]$m.size_vram
-        Write-Host ("  {0}: size_vram={1:N0} bytes -> {2}" -f $m.name, $vram, $(if ($vram -gt 0) { "ON GPU" } else { "CPU ONLY (session-0 GPU problem)" })) -ForegroundColor $(if ($vram -gt 0) { "Green" } else { "Red" })
-        if ($vram -le 0) { $fail += "$($m.name) is on CPU only" }
-    } }
-  } catch { Write-Host "  /api/ps unavailable: $($_.Exception.Message)" -ForegroundColor DarkYellow; $unproven += "GPU use unverified (/api/ps unavailable)" }
+  }
   $authPath = Join-Path $latch "data\auth.json"
   try {
     $t = (Get-Content $authPath -Raw | ConvertFrom-Json).operatorToken
@@ -140,9 +210,23 @@ if ($Verify) {
     Write-Host "Do NOT delete the Startup shortcuts until every process shows owner=SYSTEM." -ForegroundColor Yellow
     exit 0   # not an error - just not evidence yet
   }
-  Write-Host "PROVEN - all three run as SYSTEM after boot, models and token resolved." -ForegroundColor Green
-  Write-Host "Safe to delete the Startup shortcuts now:" -ForegroundColor Green
-  Write-Host "  Remove-Item `"$([Environment]::GetFolderPath('Startup'))\Start Bureau.lnk`",`"$([Environment]::GetFolderPath('Startup'))\Start Latch.lnk`",`"$([Environment]::GetFolderPath('Startup'))\Ollama.lnk`""
+  Write-Host "PROVEN - all three run as SYSTEM after boot, the model generates on the GPU, token resolved." -ForegroundColor Green
+  $su = [Environment]::GetFolderPath('Startup')
+  $live = Get-ChildItem $su -Filter "*.lnk" -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -in @("Start Bureau.lnk", "Start Latch.lnk", "Ollama.lnk") }
+  if ($live) {
+    # Ollama.lnk is NOT merely redundant like the other two - it is actively dangerous. It launches the tray
+    # app, which is the auto-updater, which cannot replace files held by a SYSTEM-owned server and rolls
+    # back BY UNINSTALLING. That is what deleted llama-server.exe on 2026-08-01. Every Ollama install puts
+    # this shortcut back, so this check runs every time rather than being a one-off cleanup instruction.
+    Write-Host "`nStartup shortcuts still present - disable them (rename, so it is reversible):" -ForegroundColor Yellow
+    foreach ($s in $live) {
+      $why = if ($s.Name -eq "Ollama.lnk") { "  <-- the auto-updater. It WILL break the install again." } else { "" }
+      Write-Host ("  Rename-Item `"{0}`" `"{1}.disabled`"{2}" -f $s.FullName, $s.Name, $why) -ForegroundColor $(if ($why) { "Red" } else { "Yellow" })
+    }
+  } else {
+    Write-Host "Startup folder is clear - nothing will duplicate or auto-update these at logon." -ForegroundColor Green
+  }
   exit 0
 }
 
