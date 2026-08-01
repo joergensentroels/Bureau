@@ -78,6 +78,14 @@ git config core.hooksPath .githooks
 coverage audit green — no new export or endpoint ships without a test or an entry in
 [TESTING.md](./TESTING.md) explaining why it's manual.
 
+**Anything in the pre-push/CI set must be hermetic.** CI has no Bureau, no Ollama, no
+Latch and no network — if a test needs one, stub it or point it at a closed port. The
+local hook cannot catch a violation, because a maintainer's machine is the one place
+the dependency is satisfied: a test that reached the default Bureau URL passed here
+and on every fresh clone that happened to have Bureau running, while turning CI red on
+every push for ninety minutes. Live-service tests belong in `e2e-autonomy.mjs`, which
+is `--e2e` only and outside both gates by design.
+
 ## Submitting a change
 
 1. Keep pull requests focused — one coherent change per PR.
