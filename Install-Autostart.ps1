@@ -314,7 +314,18 @@ if (-not $WhatIfPreference) {
   }
   Write-Host "`nRegistered AND verified listening. Re-check any time with:"
   Write-Host "  powershell -NoProfile -ExecutionPolicy Bypass -File `"$here\Install-Autostart.ps1`" -Verify   (elevated)"
-  Write-Host "`nSTILL UNVERIFIED until you actually reboot: whether Ollama is happy under SYSTEM in session 0."
-  Write-Host "GPU acceleration is the thing to check - if models get slow, run Ollama from the Startup folder"
-  Write-Host "instead and leave only Latch+Bureau as tasks. Bureau degrades honestly when the model is gone."
+  Write-Host "`nGPU under SYSTEM in session 0: PROVEN 2026-08-01. qwen3:8b loaded with size_vram = size" -ForegroundColor Green
+  Write-Host "(100% resident in VRAM, CUDA, ~75 tok/s warm). Session 0 does NOT cost you the GPU, so the old"
+  Write-Host "advice to move Ollama back to the Startup folder if models feel slow is withdrawn - see below."
+  Write-Host "`nKEEP THE OLLAMA TRAY APP OUT OF STARTUP." -ForegroundColor Yellow
+  Write-Host "The tray app is also the auto-updater, and it CANNOT coexist with Ollama running as a SYSTEM task."
+  Write-Host "On 2026-08-01 it destroyed the installation: the boot task had ollama.exe open, the updater could not"
+  Write-Host "replace a file held by a process it lacks the rights to stop (DeleteFile failed; code 5), and it"
+  Write-Host "rolled back BY UNINSTALLING - deleting lib\ollama\llama-server.exe. The server kept answering"
+  Write-Host "/api/tags from memory, so every health check looked fine while every inference returned 500."
+  Write-Host "`nSo updating Ollama is now a deliberate operator action, in this order:"
+  Write-Host "  Stop-ScheduledTask -TaskName $prefix`Ollama      # elevated: releases the lock on ollama.exe"
+  Write-Host "  & `"`$env:LOCALAPPDATA\Ollama\OllamaSetup.exe`"    # NOT elevated: Ollama installs per-user"
+  Write-Host "  # quit the tray icon it launches, and re-disable the Ollama.lnk the installer puts back"
+  Write-Host "  Start-ScheduledTask -TaskName $prefix`Ollama"
 }

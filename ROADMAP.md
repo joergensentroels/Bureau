@@ -17,13 +17,24 @@ booting-at-startup created. Two standing observations rather than tasks:
     corrupt write, a bad migration, an accidental delete. It does **not** survive losing this disk, because
     the snapshots are on it. Fixing that means deciding where the operator token and the provider key are
     allowed to live; the tool deliberately refuses cloud-synced folders rather than quietly choosing for you.
-  - **GPU under SYSTEM is unproven, not broken.** `size_vram` from `/api/ps` needs a model loaded to read, and
-    the SYSTEM-profile Ollama writes no log where the user-profile one does (checked: no
-    `systemprofile\AppData\Local\Ollama\server.log`). A silent session-0 CPU fallback would make every local
-    run slow with nothing reporting it. The boot tasks now capture Ollama's stderr, which is where it states
-    its GPU decision, so the next reboot answers this for free — no action needed to find out.
-
 Closed on 2026-08-01:
+
+  - ~~GPU under SYSTEM is unproven.~~ **PROVEN: session 0 does not cost the GPU.** `qwen3:8b` loaded on the
+    boot-task Ollama reports `size_vram` **equal to** `size` (5.20 GB, 100% resident, CUDA on the NVIDIA card
+    with 14.2 GiB free), generating ~75 tok/s warm — GPU-class; a CPU fallback on an 8B model is low single
+    digits. Two traps worth remembering. The `AMD driver is too old. Update your AMD driver to enable GPU
+    inference.` line in every server log is Ollama probing the Ryzen's **integrated** graphics and skipping
+    it before selecting CUDA — reading that as the answer inverts it. And the *cold* measurement looks
+    catastrophic (0.4 tok/s) because 23.8s of it is loading 5 GB into VRAM for a 2-token reply; only the warm
+    number means anything.
+  - ~~**Running Ollama as a SYSTEM task is safe.**~~ It is, but **only with the tray app out of Startup**, and
+    finding that out cost an outage. The tray app is also the auto-updater. With the boot task holding
+    `ollama.exe` open, the updater could not replace a file owned by a process it lacks the rights to stop
+    (`DeleteFile failed; code 5`), and it **rolled back by uninstalling** — deleting
+    `lib\ollama\llama-server.exe`. The running server kept answering `/api/tags` from memory, so `-Verify`,
+    the port checks and the model list all stayed green while **every inference returned 500**. A liveness
+    check that only proves a process is listening will not catch this; loading a model is the only check that
+    would have. Updating Ollama is now a deliberate operator action — the installer prints the order.
 
   - ~~Anthropic's OpenAI-compatible endpoint as Latch's `fallback`.~~ **Declined by the operator, and the
     reasoning is worth keeping.** It was only ever proposed as the legitimate substitute for wiring a Claude
