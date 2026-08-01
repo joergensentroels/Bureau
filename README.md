@@ -6,9 +6,17 @@ Bureau is a management-sim orchestrator: you define a CEO and hire agents into a
 give the company an objective, and watch it decompose the work, delegate down the org, do it, and QA
 its own output against an explicit definition of done — streamed live to a browser UI.
 
-Bureau is the **control surface**; **Latch** (the `openclaw-command-center` server) is the **security
-boundary**: it holds every credential (LLM keys, GitHub token, mailbox) and executes the risky actions.
-Bureau *proposes*; Latch *approves and does*. Bureau stores no secrets.
+Bureau is the **control surface**; **[Latch](https://github.com/joergensentroels/Latch)** (the
+`openclaw-command-center` server) is the **security boundary**: it holds every credential (LLM keys,
+GitHub token, mailbox) and executes the risky actions. Bureau *proposes*; Latch *approves and does*.
+Bureau stores no secrets.
+
+**Why the floor is the point.** Multi-agent orchestration mostly races toward more autonomy — human
+approval is a setting you switch off once you trust the system. Bureau goes the other way: the approval
+floor for `shell`, `api_call`, email, repo creation, over-ceiling purchases and external tool calls is
+**code, not configuration**. No autonomy tier, policy rule, `autoApprove` flag, or API request can lower
+it — and Bureau cannot lower it for itself, because it holds no credentials to act with in the first
+place. The hierarchy is the product; the floor is what makes it safe to leave running.
 
 > Single file, **zero dependencies** — Node built-ins only (`node:http`, `node:sqlite`, …).
 
@@ -96,9 +104,11 @@ SSRF-guarded web fetches — while everything credentialed or high-reach goes th
 
 **Prerequisites**
 - **Node 24+** (uses the built-in `node:sqlite`).
-- **Latch** (the `openclaw-command-center` server) running (default `http://127.0.0.1:8787`) with an operator
-  token — Bureau reads it from Latch's `data/auth.json` (or the `OPERATOR_TOKEN` env var) and uses it
-  both to reach Latch and to gate its own API.
+- **[Latch](https://github.com/joergensentroels/Latch)** running (default `http://127.0.0.1:8787`) with an
+  operator token. Bureau reads the token from Latch's `data/auth.json` (or the `OPERATOR_TOKEN` env var)
+  and uses it both to reach Latch and to gate its own API. Latch is a hard requirement, not an optional
+  backend — it holds the credentials and executes every risky action, so Bureau does nothing real without
+  it. Clone it as `openclaw-command-center` alongside Bureau, or point `LATCH_DATA` at wherever it lives.
 - A model provider configured in Latch: a **local** model (e.g. `qwen3:8b` via Ollama) and/or a **paid**
   provider (Moonshot/Kimi).
 
@@ -144,6 +154,37 @@ remote browser, and set **`BUREAU_REMOTE=1`** so Bureau refuses to approve anyth
 human (denying still works; you approve those in Compass). See
 **[SECURITY.md → Reaching Bureau from another machine](SECURITY.md#reaching-bureau-from-another-machine)**.
 
+**Persist that posture — don't rely on remembering it.** `BUREAU_REMOTE` lives in the environment of
+whatever shell starts the process, so if you expose Bureau permanently, starting it the obvious way
+(`node server.mjs`) silently gives you an *unguarded* control surface on a reachable hostname. Put the
+guard in a start script or service definition so it is the default and disabling it is the thing you have
+to type — `Start-Bureau.ps1` in this repo is the Windows version of that, and `-Local` is the opt-out.
+A safety posture that vanishes on restart without telling you is worse than no posture at all.
+
+## Known limits
+
+Stated up front rather than left to be discovered:
+
+- **Latch is not optional.** Bureau holds no credentials, so without Latch it can plan, delegate, write
+  drafts and fetch pages — and nothing else.
+- **One shared token store.** Bureau reuses Latch's operator token; rotating there rotates both. That's
+  deliberate (one operator identity for the control plane), but it means **`BUREAU_REMOTE=1` is defence in
+  depth, not a boundary** — anyone holding that token can approve directly in Latch wherever Latch is
+  reachable.
+- **No TLS of its own.** Bureau serves plain HTTP on loopback; confidentiality has to come from the
+  transport you put in front of it (mesh VPN or identity-gated tunnel).
+- **One endpoint is unauthenticated by design** — inbound webhook triggers, gated by an unguessable token
+  in the path, rate-limited, with the caller's payload treated as untrusted input and still clamped by the
+  hard floor.
+- **The failed-auth damper keys on client identity**, which behind NAT or a proxy that strips
+  `x-forwarded-for` collapses to one shared counter. It's an alarm, not a lock.
+- **Small local models are unreliable at strict JSON.** There's a retry ladder for it, and the
+  JSON-critical planning calls can be routed to a paid tier — but a fully local setup will occasionally
+  produce a weaker plan.
+
+Full threat model, review findings and accepted residuals:
+**[SECURITY.md](SECURITY.md)** · **[residual risks](SECURITY.md#residual-accepted)**.
+
 ## Testing
 
 ```sh
@@ -158,3 +199,8 @@ suites, the coverage ledger, and the "tested-or-documented" rule.
 - **[SECURITY.md](SECURITY.md)** — security model + review.
 - **[TESTING.md](TESTING.md)** — how tests run and what's covered.
 - **[GITHUB.md](GITHUB.md)** — one-time setup for GitHub publishing.
+
+## License
+
+**[AGPL-3.0-or-later](LICENSE).** Same license as [Latch](https://github.com/joergensentroels/Latch) —
+if you run a modified version as a network service, the modifications have to stay open too.
