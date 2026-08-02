@@ -15,7 +15,7 @@ const PORT = process.env.BUREAU_PORT || 4174;
 const wantE2E = process.argv.includes("--e2e");
 const wantServe = process.argv.includes("--serve");
 
-const PURE = ["decision.test.mjs", "units.test.mjs", "net.test.mjs", "heartbeat.test.mjs"];
+const PURE = ["decision.test.mjs", "units.test.mjs", "net.test.mjs", "heartbeat.test.mjs", "readme-demo.test.mjs"];
 const SERVER = ["api.test.mjs", "workspaces.test.mjs", "endpoints.test.mjs", "robustness.test.mjs"];
 const LIVE = ["e2e-autonomy.mjs"];
 
