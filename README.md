@@ -20,6 +20,54 @@ place. The hierarchy is the product; the floor is what makes it safe to leave ru
 
 > Single file, **zero dependencies** — Node built-ins only (`node:http`, `node:sqlite`, …).
 
+### Don't take that on faith — run it
+
+No Latch, no model, no network, no state. Works seconds after cloning:
+
+```console
+$ node tools/demo-floor.mjs
+
+Bureau — the hard floor is code, not configuration
+
+Sweeping every autonomy tier x policy effect x autoApprove, with a $1,000,000 spend ceiling.
+A hard-floored action must require a human in ALL of them.
+
+  action          configurations tried    auto-approved in
+  --------------------------------------------------------
+  shell           24                      0 — always asks a human
+  api_call        24                      0 — always asks a human
+  email_draft     24                      0 — always asks a human
+  github_repo     24                      0 — always asks a human
+  github_pr       24                      0 — always asks a human
+  github_issue    24                      0 — always asks a human
+  github_comment  24                      0 — always asks a human
+  mcp_call        24                      0 — always asks a human
+
+And the gate is not simply always closed:
+
+  web_search      auto-approved           run
+  file_write      auto-approved           run
+  ask_peer        auto-approved           run
+
+Purchases are floored by the ceiling you set, not by type:
+
+  $4 sticker pack (under the $10 ceiling)   auto-approved
+  $40 subscription (over it)                requires you
+
+201 decisions evaluated against the server's own decideApproval().
+
+The floor held in every configuration. No tier, policy or flag can lower it.
+```
+
+It sweeps **every** autonomy tier × policy effect × `autoApprove` combination against the same
+`decideApproval()` the server runs, and **exits non-zero if any hard-floored action is ever
+auto-approved** — so it is a proof and a regression test at once, and the claim above cannot go stale
+quietly. The second table matters as much as the first: the gate is selective, not a blanket refusal.
+
+And it cannot be lowered from outside either. The floor lives in `requiresCeoAlways()` in `server.mjs`,
+reachable from no API — and Bureau holds no credentials, so even an approval it wrongly granted itself
+would have nothing to execute with. Latch does the acting.
+
 ---
 
 ## How it works
