@@ -25,16 +25,31 @@ feature parity — the first two items are not features at all, and are the two 
      path was hand-verified on 2026-08-01 and is sound, but that is one path, checked once, and checking it
      produced a wrong conclusion first (an automated browser throws on `window.prompt`, which surfaced as a
      fake "Can't reach the Bureau server" bug — see the note in TESTING.md).
-  3. **MCP elicitation — expose the floor in the protocol's own vocabulary.** The MCP spec has a standard
-     mechanism for a server to pause and ask *the human*, which is what `requiresCeoAlways` already does.
-     Implementing it would let an external client (Claude Desktop) drive a Bureau run and receive the
-     approval prompt in its own UI, instead of the operator switching to Latch. This is the only item where
-     the feature and the pitch are the same sentence, and the space is racing the other way — everyone else
-     is removing human checkpoints. **Caveat: SEP-2322 (spec revision 2026-07-28) replaced server-initiated
-     requests with a `resultType: input_required` + `inputRequests` pattern, so prototype and expect rework
-     rather than building for keeps.** Bureau's `/mcp` is tools-only today, so nothing is broken meanwhile —
-     but it echoes back the client's requested `protocolVersion`, i.e. claims a revision it has not
-     implemented. That is a one-line honesty fix, not a roadmap item.
+  3. **MCP elicitation — scoped 2026-08-02, and it is NOT prototype-sized. Read this before starting.**
+     The idea stands: MCP has a standard mechanism for a server to pause and ask *the human*, which is what
+     `requiresCeoAlways` already does, and implementing it would let an external client (Claude Desktop)
+     drive a run and receive the approval prompt in its own UI. It remains the only item where the feature
+     and the pitch are the same sentence, while the rest of the space removes human checkpoints. But:
+     - **Elicitation requires an in-flight call, and Bureau's tools are fire-and-forget.** `beginRun()` is
+       synchronous: it registers the run, kicks execution off inside the workspace context, and returns.
+       `start_run` / `run_sop` therefore answer `{runId}` in milliseconds, while the approval need arises
+       minutes later with **nothing in flight to elicit within**. Making this work needs a blocking
+       `run_and_wait` variant holding an HTTP POST open for the length of a run — against the SSE-watch
+       design, and fragile to any client's timeout. That is a design change, not a prototype.
+     - **⚠ The obvious shortcut is a floor breach, and it looks like a feature.** "Just expose
+       `pending_approvals` + `decide_approval` as tools" reads as equivalent to deciding in Latch. It is
+       not: **MCP tools are invoked by the MODEL, not the human.** A `decide_approval` tool hands an LLM the
+       power to approve a hard-floored `shell` — the exact escalation `mcp_call` is hard-floored to prevent,
+       inverted and handed back. Reads are fine; **the decision must never be a tool.** Guarded now by
+       `test/mcp-floor.test.mjs`, which pins the tool list EXACTLY so adding any tool trips the test and
+       forces the question to be answered deliberately.
+     - **That asymmetry is the whole reason elicitation is the interesting mechanism:** it routes to the
+       *user*, a tool routes to the *model*. It is the only MCP-native way to do this without breaching the
+       floor — which makes it more valuable and strictly harder, not less.
+     - **Spec churn is real:** SEP-2322 (revision 2026-07-28) replaced server-initiated requests with a
+       `resultType: input_required` + `inputRequests` pattern. Bureau's `/mcp` is tools-only, so nothing is
+       broken meanwhile — but it echoes back the client's requested `protocolVersion`, i.e. claims a
+       revision it has not implemented. One-line honesty fix, not a roadmap item.
   4. **Land the 4water scheduling case.** Chosen on 2026-08-01 as Bureau's first real external case,
      explicitly *before* publishing — and publishing went first. The ordering slipped, so this is now the
      most valuable non-code item on the list: one real external deployment is worth more than three
