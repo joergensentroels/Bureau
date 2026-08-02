@@ -10,13 +10,60 @@ _Forward-looking only — the detail of what's shipped lives in the code, the te
 
 ## Next
 
-**No open work items.** The feature roadmap is done, and so is the operational-durability work that
-booting-at-startup created. One standing observation rather than a task:
+**The repo went public on 2026-08-01, which changed what "valuable" means.** The feature roadmap and the
+operational-durability work are both done. What follows is ordered for **legibility to strangers**, not
+feature parity — the first two items are not features at all, and are the two highest-value things here.
+
+  1. **A demo showing the hard floor actually firing.** An agent proposes `shell`, the floor refuses it at
+     trusted tier, the operator approves in Latch, it executes. Twenty seconds of asciinema or a GIF in the
+     README. Today the README *argues* the differentiator in prose, and so does every competitor's README;
+     nobody who watches the floor refuse an action needs the paragraph. Cheapest item on this list and the
+     one that most changes how a visitor reads the repo — it turns the central claim into evidence.
+  2. **Browser UI smoke coverage.** The UI is the largest untested surface (TESTING.md has said so all
+     along) and the first thing a visitor judges. A small Playwright pass — loads → sign in → org renders →
+     run feed streams → inbox — is where a stranger's first bug report otherwise comes from. The signed-out
+     path was hand-verified on 2026-08-01 and is sound, but that is one path, checked once, and checking it
+     produced a wrong conclusion first (an automated browser throws on `window.prompt`, which surfaced as a
+     fake "Can't reach the Bureau server" bug — see the note in TESTING.md).
+  3. **MCP elicitation — expose the floor in the protocol's own vocabulary.** The MCP spec has a standard
+     mechanism for a server to pause and ask *the human*, which is what `requiresCeoAlways` already does.
+     Implementing it would let an external client (Claude Desktop) drive a Bureau run and receive the
+     approval prompt in its own UI, instead of the operator switching to Latch. This is the only item where
+     the feature and the pitch are the same sentence, and the space is racing the other way — everyone else
+     is removing human checkpoints. **Caveat: SEP-2322 (spec revision 2026-07-28) replaced server-initiated
+     requests with a `resultType: input_required` + `inputRequests` pattern, so prototype and expect rework
+     rather than building for keeps.** Bureau's `/mcp` is tools-only today, so nothing is broken meanwhile —
+     but it echoes back the client's requested `protocolVersion`, i.e. claims a revision it has not
+     implemented. That is a one-line honesty fix, not a roadmap item.
+  4. **Land the 4water scheduling case.** Chosen on 2026-08-01 as Bureau's first real external case,
+     explicitly *before* publishing — and publishing went first. The ordering slipped, so this is now the
+     most valuable non-code item on the list: one real external deployment is worth more than three
+     features when the repo's job is to be evidence.
+  5. **Durable / resumable runs — on the list, deliberately not started.** Checkpointing so a crash resumes
+     mid-run is table stakes across LangGraph, CrewAI and AutoGen; Bureau has none, and a restart silently
+     loses in-flight runs. Coherent with the unattended-service work, and the honest counterweight is that
+     runs are minutes of local-model time, so the loss per crash is small. **Write the trigger down rather
+     than carry it as vague debt: build this when runs get long or paid-heavy enough that losing one costs
+     real money.**
+
+**Recommended against, with reasons** (so these do not come back as open questions):
+
+  - **Session-scoped authorization** ("approve this agent for the next 30 minutes") is a real 2026 pattern
+    and it directly weakens the thing the README calls the product. The floor is per-action on purpose.
+  - **LangGraph-style graph-API parity.** Competing on someone else's axis, where Bureau loses and gains
+    nothing. The hierarchy plus the floor is the product.
+
+**Standing observation rather than a task:**
 
   - **Off-machine backups are an operator decision, not a default.** `tools/backup.mjs` protects against a
     corrupt write, a bad migration, an accidental delete. It does **not** survive losing this disk, because
     the snapshots are on it. Fixing that means deciding where the operator token and the provider key are
     allowed to live; the tool deliberately refuses cloud-synced folders rather than quietly choosing for you.
+
+_Vocabulary worth knowing, since Bureau demonstrates several of these without using their names: **CIBA**
+is the standard term for out-of-band human approval (what Latch-on-a-phone is); the 2026 agent-identity
+landscape is MCP OAuth 2.1 under Linux Foundation governance, MCP-I / KYA-OS at DIF, Microsoft Entra Agent
+ID, and the CSA Agentic Trust Framework._
 
 Closed on 2026-08-01:
 
