@@ -175,9 +175,36 @@ is a terrible reason to change a ranker — every "obvious" improvement to the f
 worse. Re-run it before and after any change to `rankByRelevance`, the fusion weights, or the embedding
 model, in the same session, and compare the ordering rather than the absolute numbers.
 
-**The browser UI has no automated coverage.** It is syntax-checked by extracting the inline `<script>`
-and running `node --check` on it, which catches parse errors but not runtime ones. Anything behavioural
-there is verified by loading `http://127.0.0.1:4173/` in a browser and reading the console + network log.
+**The browser UI now has its first automated coverage — `ui.test.mjs`, in the pure set.** Until 2026-08-02
+this paragraph claimed the inline `<script>` "is syntax-checked by extracting it and running `node --check`",
+which had been done **by hand, once**: nothing automated it, and the sentence had quietly become a claim
+about a process that did not exist. _A documented practice is a claim, and claims go stale — the same trap
+recorded further down about a documented limitation that silently became false._ It is now true, and:
+
+- **Selector integrity.** Every *literal* `$("#id")` / `getElementById("id")` / `querySelector("#id")` must
+  resolve to an `id` defined somewhere in the file — static markup, a JS template string, or a `.id =`
+  assignment. 145 lookups against 191 ids, all resolving. This is the most likely way this UI breaks: a
+  misspelled selector throws nothing and fails no syntax check, the lookup just returns `null` and the
+  control is silently dead. Composed lookups (`$("#row-" + id)`) are skipped by construction rather than by
+  an exclusion list that would drift.
+- **The signed-out route is pinned** — `#app`, `#authWarn`, `renderSignedOut()`, and `signIn()` existing
+  exactly once — because that path has produced both a real bug (a first-run wizard rendering over a live
+  company) and a fake one (see below).
+
+**No browser is involved, deliberately.** A Playwright suite needs a live Bureau *and* a browser
+dependency, in a repo whose zero-dependency property is a design feature, and CI has neither — so it would
+have to live outside both gates like `e2e-autonomy`, and a ~150 MB Chromium download changes the
+clone-and-run story. That is an owner decision. Anything behavioural is still verified by loading
+`http://127.0.0.1:4173/` in a browser and reading the console + network log.
+
+⚠ **When you do that, know that an automated browser is not a browser.** On 2026-08-02 a driven browser
+threw `Error: prompt() is not supported` — and `window.prompt` is the *first* thing `api()` does on a 401.
+That exception escaped through `boot()`'s catch into `showReconnect()`, so the page displayed **"Can't reach
+the Bureau server"** while the server was answering 401 to every request. It looked exactly like a real
+defect — wrong diagnosis on the first screen, sign-in control hidden, pollers retrying — and several steps
+of reasoning were built on it before the premise was tested. Stub `window.prompt` to return `null` (a user
+pressing Cancel) and the UI is correct: `Not signed in`, a visible sign-in control, and zero background
+requests. **The instrument was broken, not the product.**
 _Done 2026-07-31: the page boots with no JS errors; unauthenticated, it correctly shows `⚠ not signed in`
 while keeping `👁 read-only` and `🔒 remote mode` hidden; and the **poller gate holds** — six boot requests
 and then silence, where the 2s/7s/12s pollers would otherwise have kept firing (they were measured at
