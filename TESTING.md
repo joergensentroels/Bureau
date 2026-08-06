@@ -743,3 +743,45 @@ questions** renders its empty state with the `+ Decision` and `Refresh` controls
 
 One thing only a look would show: each lens card prints its **entire** instruction, several over 200 characters, so
 eight of them make a very tall panel. Left as observed rather than changed — it is a presentation call.
+
+## The third gate: an excuse is a claim
+
+Bureau refuses an unproven **finding** (the probe gate) and an unstated **assumption** (the question queue). The
+missing third was an unexamined **exemption** — a reason for *not* checking something. It is the least likely claim
+to get a control, because its entire function is to close the question.
+
+It comes from a real failure in this work, caught by the operator rather than by any instrument. Two panels and
+about a dozen feed renderers went into `public/index.html` and **none were opened in a browser**, on the stated
+grounds that *"the authed UI needs the operator token, and putting it in a browser means putting it in the clear."*
+Said once, never revisited, and it silently licensed every subsequent skip across roughly ten commits. It was
+false: `bootServer()` in this repo's own `test/run-all.mjs` had always minted a **disposable** token, and the API
+suites had been using it the whole time. The escape hatch was in the same directory as the excuse.
+
+**`declined_check`** requires three fields and refuses without any of them: what was not checked, why, and **what
+would have to be true for it to become possible**. That third field is what makes the reason testable at all.
+
+Then the runner tries to **falsify it**. An excuse says "the operator token", not `OPERATOR_TOKEN`, so noun phrases
+are translated into identifier spellings — `operator_token`, `OPERATOR_TOKEN`, `operatorToken` — alongside anything
+already shaped like an identifier, a flag or a path, and each is searched for in the repository. Against the real
+excuse:
+
+```
+MY EXCUSE (should be contradicted)  3 hits  operator_token@eval/parallel-eval.mjs:43  OPERATOR_TOKEN@…  operatorToken@Install-Autostart.ps1:197
+a real blocker (should NOT be)      1 hit   paidProvider@eval/run-eval.mjs:36
+"the GPU has no room left"          0 hits
+```
+
+**Bare English words are deliberately not candidates.** Measured first: with them, "operator", "provider" and
+"replace" each hit anything, so a genuinely blocking excuse looked contradicted three times over — and a gate that
+fires on everything is a gate that gets routed around.
+
+The residual false-positive rate is real (one noisy hit above), so the gate **hands the evidence back once and then
+accepts a re-declaration.** It makes the agent look at the counter-evidence; it does not overrule the conclusion.
+Same philosophy as the hard floor: the decision stays where it belongs, the floor only guarantees the question gets
+asked.
+
+Recorded on the company at `GET /api/declined-checks`, because a skipped check mentioned only in a run summary is
+gone by the next commit — which is exactly how this one survived.
+
+**No UI panel in that commit, on purpose.** The lesson that produced this register was shipping UI unlooked-at, so
+the panel belongs in a commit that also runs `node test/run-all.mjs --ui` and looks at it.

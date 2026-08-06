@@ -17,6 +17,7 @@ import {
   executorProbeMs,
   repoPathSafe, readRepoFile, listRepoFiles, resolveRepoTarget, searchRepoFiles, repoOutline,
   normalizeQuestion, questionKey, recordQuestion, answerQuestion, systemPrompt, unqueuedAssumption, tierReason,
+  blockerCandidates, falsifyBlocker, normalizeDeclinedCheck, recordDeclinedCheck,
   buildUndecidedMsgs, normalizeUndecided, unaddressedUndecided, runInvestigateFlag,
 } from "../server.mjs";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
@@ -862,6 +863,62 @@ console.log("# the gate runs npm without a shell and without a .cmd");
     chk('  a path in "command" is not treated as a search term', src.includes('&& !resolveRepoTarget(all.files || [], term)'));
     chk('  either field may carry the path', src.includes('Either field may hold the path'));
     chk('  and a finish wrapped in propose_action is treated as a finish', src.includes('next.type = "finish";'));
+  }
+}
+console.log("# an excuse is a claim: the declined-check register");
+{
+  // Bureau already refuses an unproven FINDING and an unstated ASSUMPTION. This is the third thing: an unexamined
+  // EXEMPTION — a reason for not checking something, which is the least likely claim to get a control because its
+  // whole job is to close the question. It comes from a real failure: two panels and a dozen renderers shipped
+  // unlooked-at here on the grounds that "the authed UI needs the operator token", while the project's own test
+  // harness had always minted a disposable one. One grep would have shown it.
+  const good = { what: 'the Lenses panel renders', because: 'the authed UI needs the operator token', unblocked_by: 'a disposable token on a throwaway server' };
+  const no = (label, body, needle) => { const r = normalizeDeclinedCheck({ ...good, ...body }); chk('  ' + label, r.ok === false && (!needle || r.reason.includes(needle))); };
+  no('nothing named', { what: '' }, 'WHAT');
+  no('no reason given', { because: '' }, 'indistinguishable');
+  // The field that makes the exemption testable at all.
+  no('no statement of what would unblock it', { unblocked_by: '' }, 'never gets examined');
+  chk('  a complete declaration is accepted', normalizeDeclinedCheck(good).ok === true);
+  chk('  and it reads the action field names too', normalizeDeclinedCheck({ title: 'x', command: 'y', details: 'z' }).ok === true);
+
+  // The falsifier. An excuse says "the operator token", not OPERATOR_TOKEN, so noun phrases become identifier
+  // spellings — that translation is the whole trick.
+  const c = blockerCandidates(good.because);
+  chk('  it derives the snake_case spelling', c.includes('operator_token'));
+  chk('  the SCREAMING_SNAKE one', c.includes('OPERATOR_TOKEN'));
+  chk('  and the camelCase one', c.includes('operatorToken'));
+  chk('  it takes an explicit identifier as given', blockerCandidates('needs BUREAU_PORT set').includes('BUREAU_PORT'));
+  chk('  and a flag', blockerCandidates('only with --serve').includes('--serve'));
+  // The control that kept this gate usable: bare English words are NOT candidates. Measured — "operator",
+  // "provider" and "replace" each hit any codebase, so a genuinely blocking excuse looked contradicted three
+  // times over, and a gate that fires on everything gets routed around.
+  chk('  bare words are not candidates', !blockerCandidates('the operator must replace the provider').includes('operator'));
+  eq('  nothing in, nothing out', blockerCandidates('').length, 0);
+
+  {
+    // falsifyBlocker takes the search function, so the decision is testable without a repository.
+    const fake = async (repo, term) => term === 'OPERATOR_TOKEN'
+      ? { ok: true, hits: [{ file: 'test/run-all.mjs', line: 53, text: 'process.env.OPERATOR_TOKEN = "test_" + randomBytes(18)' }] }
+      : { ok: true, hits: [] };
+    const hits = await falsifyBlocker('any', good.because, fake);
+    eq('  the excuse that started this is contradicted, with a location', [hits.length, hits[0].at], [1, 'test/run-all.mjs:53']);
+    const clean = await falsifyBlocker('any', 'the GPU has no room for a larger window', fake);
+    eq('  while an excuse naming nothing in the repo stands', clean.length, 0);
+  }
+  {
+    const org = {};
+    const a = recordDeclinedCheck(org, { what: 'the Lenses panel renders', because: 'b', unblockedBy: 'c' }, 1000);
+    eq('  it is recorded on the COMPANY, not left in a summary', [a.added, org.declinedChecks.length], [true, 1]);
+    const b = recordDeclinedCheck(org, { what: 'the lenses panel renders', because: 'b', unblockedBy: 'c' }, 2000);
+    eq('  the same skip twice is one entry with a count', [b.added, b.declined.seen, org.declinedChecks.length], [false, 2, 1]);
+    const c2 = recordDeclinedCheck(org, { what: 'the questions panel renders', because: 'b', unblockedBy: 'c' }, 3000);
+    eq('  and a different skip is its own entry', [c2.added, org.declinedChecks.length], [true, 2]);
+  }
+  {
+    const src = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
+    chk('  the dispatch falsifies before recording', src.includes('falsifyBlocker(repo, shape.declined.because'));
+    chk('  hands the evidence back ONCE, rather than blocking forever', src.includes('run._declinedShown') && src.includes('shown.add(key)'));
+    chk('  and a review round is offered the action', src.includes('"ask_peer", "declined_check"'));
   }
 }
 console.log("# which model tier serves a turn, and why it is not the other one");

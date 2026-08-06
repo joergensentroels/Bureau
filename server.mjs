@@ -266,7 +266,7 @@ const TIERS = ["supervised", "trusted", "autonomous"];
 // allowlist: a browser holding the operator token can approve a repo-issues read from off-host. That is a
 // read of a repo the OPERATOR configured, not arbitrary reach, and remote mode is documented as defence in
 // depth rather than a boundary — but it is a widening, so it is written down here and in SECURITY.md.
-const SAFE_TIER_ACTIONS = new Set(["web_search", "web_research", "read_file", "read_issues", "file_write", "note", "ask_peer", "register_finding", "ask_stakeholder", "propose_lens", "read_repo"]);
+const SAFE_TIER_ACTIONS = new Set(["web_search", "web_research", "read_file", "read_issues", "file_write", "note", "ask_peer", "register_finding", "ask_stakeholder", "propose_lens", "read_repo", "declined_check"]);
 // register_finding is safe-tier deliberately: it takes no real-world action, runs only commands the project itself
 // ships (FINDING_CHECK_ALLOW), and does it in a throwaway worktree. Autonomy is the entire point of the action — a
 // gate that needs the CEO for every claim is a gate nobody runs.
@@ -972,7 +972,7 @@ async function fileApproval(agent, action, run = null) {
     });
     return json;
   }
-  const typeMap = { email_draft: "external_contact", note: "context_question", file_write: "context_question", read_file: "context_question", ask_peer: "context_question", ask_stakeholder: "context_question", propose_lens: "context_question", read_repo: "context_question" };
+  const typeMap = { email_draft: "external_contact", note: "context_question", file_write: "context_question", read_file: "context_question", ask_peer: "context_question", ask_stakeholder: "context_question", propose_lens: "context_question", read_repo: "context_question", declined_check: "context_question" };
   const { json } = await latch("POST", "/api/approvals", {
     type: typeMap[action.actionType] || "other",
     title: action.title || "Action requested",
@@ -1055,7 +1055,7 @@ function emit(run, type, data) {
 
 // The actions a hunting round can actually use. Everything else is noise in a phase that must not write, buy, send or
 // commit — and noise is not free when the context window is 4,096 tokens and the prompt is clipped from the front.
-const HUNT_ACTIONS = new Set(["read_repo", "register_finding", "ask_stakeholder", "note", "propose_lens", "ask_peer"]);
+const HUNT_ACTIONS = new Set(["read_repo", "register_finding", "ask_stakeholder", "note", "propose_lens", "ask_peer", "declined_check"]);
 
 // Which model tier will serve a turn, and — the useful half — why it is not the other one. Exported and pure so the
 // reasoning is testable without a provider, a budget or a model.
@@ -1132,6 +1132,7 @@ export function systemPrompt(org, agent, opts = {}) {
     "- plan_add: record a follow-up task you notice but shouldn't do right now into the company's persistent plan — title=the task, details=why/context. It is saved for a future run so nothing is lost. Runs instantly (no approval). Do NOT use it to defer the CURRENT objective.",
     "- register_finding: claim a DEFECT and prove it. title=the one-sentence claim, url=file:line, details=the defect class, command=the check that detects it (one of the project's own: npm test | npm run <script> | node --test [file] | node tools/<x>.mjs), fix={file,find,replace}=the change that makes the check pass. The runner verifies it ITSELF in a throwaway copy and requires three things: your check FAILS on the current code, PASSES with your fix, and FAILS AGAIN once the fix is reverted. A claim without that evidence is refused and you are told why, so do not register a hunch — register something you can make fail.",
     findingRepo(org) ? "- read_repo: read the source of the repository under investigation. title=the PATH, relative to the repo root, and nothing else — \"src/db.mjs\", not a description of what you are doing. Leave title blank (or name a directory) to LIST what is in the repository; a path that does not exist also returns the listing, so start there and read exact paths from it rather than guessing. Put a TERM in \"command\" to search instead of read: it greps the whole file (or the whole repository if you give no path) and returns every matching line with its number — use that whenever you want to claim something is MISSING, because a read can be cut off and a search cannot. Read-only and confined to that one repository. Use it before claiming anything about the code: a check command and a fix must quote text that is really in the file." : "",
+    "- declined_check: record a check you could NOT perform — title=what you did not verify, command=why you could not, details=what would have to be true for it to become possible. All three are required: a reason nobody can test is the one claim that never gets examined, and it then licenses every later skip without being restated. The runner searches the repository for whatever your reason names and, if it finds it, hands the evidence back once — because an excuse is a claim and it gets a control like any other.",
     "- note: record what you checked and what you concluded, when there is nothing to run — title=the heading, details=what you looked at and what you found or ruled out. It runs instantly and changes nothing. Use it instead of inventing an action when the honest answer is that you looked and found nothing.",
     "- ask_stakeholder: record a question only the CEO can settle — scope, a policy choice, a name, a number nobody wrote down — WITHOUT stopping. title=the question, command=the assumption you are proceeding under meanwhile, url=where that assumption is written down (file, field, document). It does not wait for an answer and it must not: you keep working, the question is queued for the CEO to answer alongside others, and the answer reaches a later run. A question with no assumption is REFUSED, because that is just asking to stop. Use this instead of escalate whenever the work can continue on a stated guess.",
     "- ask_peer: consult a NAMED teammate for input, advice, or a quick review — title=their name or role, command=your question, details=any context. They reply with their expert opinion and it comes back to you. Use it to get a specialist's take or a second opinion instead of guessing. It is advice only — it does NOT make them do real work.",
@@ -1264,6 +1265,7 @@ export function normalizeAction(next, objective) {
   else if (["github_issue", "issue", "new_issue", "open_issue", "create_issue", "file_issue", "raise_issue", "bug_report"].includes(at)) at = "github_issue";
   else if (["github_comment", "issue_comment", "comment", "comment_issue", "reply_issue", "reply"].includes(at)) at = "github_comment";
   else if (["github_pr", "pull_request", "pullrequest", "pr", "open_pr", "create_pr", "raise_pr", "merge_request"].includes(at)) at = "github_pr";
+  else if (["declined_check", "skipped_check", "could_not_verify", "unverified", "gap", "blocked_check", "not_checked"].includes(at)) at = "declined_check";
   else if (["read_repo", "read_code", "read_source", "list_repo", "list_files", "open_file", "read_repo_file", "browse_repo"].includes(at)) at = "read_repo";
   else if (["propose_lens", "new_lens", "add_lens", "suggest_lens", "propose_method", "lens"].includes(at)) at = "propose_lens";   // only offered in the critic round
   else if (["ask_stakeholder", "ask_ceo", "open_question", "scope_question", "clarify", "clarification", "assumption", "flag_assumption", "ask_owner", "ask_stakeholders"].includes(at)) at = "ask_stakeholder";   // a question that must NOT stop the work
@@ -2489,6 +2491,37 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
           didExecute = true;
           history.push({ role: "user", content: `${peer.name} (${peer.role}) replied to your question:\n---\n${reply}\n---\nUse this input as you see fit. Continue toward the objective or finish.` });
         }
+      } else if ((next.actionType || "") === "declined_check") {
+        const shape = normalizeDeclinedCheck({ what: next.title, because: next.command, unblocked_by: next.details });
+        if (!shape.ok) {
+          emitAct({ agent: who, depth, actionType: "declined_check", url: "", ok: false, bytes: 0, error: "shape" });
+          history.push({ role: "user", content: "That was not recorded: " + shape.reason + "." });
+        } else {
+          const repo = findingRepo(org);
+          const shown = run._declinedShown || (run._declinedShown = new Set());
+          const key = questionKey(shape.declined.what);
+          // Refuse ONCE, with the evidence. The gate makes the agent look at the counter-evidence; it does not
+          // overrule the conclusion — the residual false-positive rate is real (measured: one noisy hit on a genuinely
+          // blocking excuse), so a permanent block would train it to route around this action.
+          const hits = (repo && !shown.has(key))
+            ? await falsifyBlocker(repo, shape.declined.because + " " + shape.declined.unblockedBy, searchRepoFiles).catch(() => [])
+            : [];
+          if (hits.length) {
+            shown.add(key);
+            emitAct({ agent: who, depth, actionType: "declined_check", url: "", ok: false, bytes: 0, error: "contradicted" });
+            emit(run, "declinedContradicted", { by: who, depth, what: shape.declined.what, hits });
+            history.push({ role: "user", content: "Before that goes on the record — your reason names something this repository already contains:\n"
+              + hits.map((h) => `  ${h.term} at ${h.at}: ${h.text}`).join("\n")
+              + "\n\nRead at least one of those and check whether it removes the blocker. This exact situation is why the action exists: a whole subsystem here shipped unverified because \"it needs the operator token\" went unexamined while the test harness minted a disposable one. If after looking the reason genuinely still holds, declare it again and it will be recorded." });
+          } else {
+            let out = { added: true, declined: shape.declined };
+            await updateOrg((o) => { out = recordDeclinedCheck(o, { ...shape.declined, by: who, runId: run.id }, Date.now()); }).catch(() => {});
+            didExecute = true;
+            emitAct({ agent: who, depth, actionType: "declined_check", url: shape.declined.what.slice(0, 60), ok: true, bytes: shape.declined.because.length, error: "" });
+            emit(run, "declinedCheck", { by: who, depth, what: shape.declined.what, because: shape.declined.because, unblockedBy: shape.declined.unblockedBy, duplicate: !out.added });
+            history.push({ role: "user", content: "Recorded on the company, so it survives this run and is visible to whoever reads the register — an unverified thing that is only mentioned in a summary is gone by the next commit. Carry on." });
+          }
+        }
       } else if ((next.actionType || "") === "read_repo") {
         // One action rather than two, because a model given read_repo and list_repo picks the wrong one and burns a
         // turn on the correction. A blank path, or one that turns out to be a directory, lists instead of reading.
@@ -3516,6 +3549,73 @@ async function failRun(run, message, extra = {}) {
 // Create a run object and kick it off. Returns { run, done } where done resolves when it finishes.
 // Reused by POST /api/run and the scheduler.
 // Turn a goal into a concrete run objective (used by "Work on it" and goal schedules).
+// ---- the declined-check register: a reason for NOT checking is a claim, and it gets a control -------------------
+//
+// Identifier spellings for the concrete things an excuse names. An excuse says "the operator token", not
+// OPERATOR_TOKEN, so adjacent significant words become snake_case / SCREAMING_SNAKE / camelCase candidates alongside
+// anything that already looks like an identifier, a flag or a path. Grepping those is what turns an exemption from an
+// assertion into something falsifiable.
+const BLOCKER_STOP = new Set(["the", "a", "an", "and", "or", "but", "because", "since", "cannot", "could", "would",
+  "needs", "need", "requires", "require", "without", "which", "that", "this", "there", "would", "have", "has",
+  "into", "with", "from", "means", "putting", "clear", "would", "only", "some", "such", "does", "not"]);
+export function blockerCandidates(text, cap = 12) {
+  const raw = String(text == null ? "" : text);
+  const out = new Set();
+  for (const m of raw.matchAll(/\b[A-Z][A-Z0-9]{2,}(?:_[A-Z0-9]+)+\b/g)) out.add(m[0]);        // SCREAMING_SNAKE
+  for (const m of raw.matchAll(/--[a-z][\w-]{1,30}/g)) out.add(m[0]);                          // --flags
+  for (const m of raw.matchAll(/\b[\w./-]+\.[a-z]{2,5}\b/g)) out.add(m[0]);                     // file-ish
+  const words = raw.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/)
+    .filter((w) => w.length >= 4 && !BLOCKER_STOP.has(w));
+  // Bare English words are NOT candidates. Tested: "operator", "provider", "replace" each hit any codebase,
+  // which made a genuinely-blocking excuse look contradicted three times over — and a gate that fires on
+  // everything is a gate that gets ignored. Only identifier-shaped spellings carry signal.
+  // Adjacent pairs, in the three spellings a codebase actually uses.
+  for (let i = 0; i + 1 < words.length; i++) {
+    const [a, b] = [words[i], words[i + 1]];
+    out.add(a + "_" + b);
+    out.add((a + "_" + b).toUpperCase());
+    out.add(a + b[0].toUpperCase() + b.slice(1));
+  }
+  return [...out].slice(0, cap);
+}
+
+// Try to prove the excuse wrong, using the repository as the authority. Returns the hits that contradict it.
+export async function falsifyBlocker(repo, text, search) {
+  const found = [];
+  for (const cand of blockerCandidates(text)) {
+    if (found.length >= 3) break;
+    const r = await search(repo, cand);
+    if (r && r.ok && r.hits.length) found.push({ term: cand, at: r.hits[0].file + ":" + r.hits[0].line, text: r.hits[0].text });
+  }
+  return found;
+}
+
+export function normalizeDeclinedCheck(body) {
+  const t = (v, n) => String(v == null ? "" : v).trim().slice(0, n);
+  const what = t(body?.what ?? body?.title, 300);
+  const because = t(body?.because ?? body?.command, 400);
+  const unblockedBy = t(body?.unblocked_by ?? body?.unblockedBy ?? body?.details, 300);
+  if (!what) return { ok: false, reason: "say WHAT you did not check" };
+  if (!because) return { ok: false, reason: "say why you could not — a check skipped without a stated reason is indistinguishable from one nobody thought of" };
+  if (!unblockedBy) {
+    return { ok: false, reason: "say what would have to be true for this check to become possible. Without that the "
+      + "reason cannot be tested, and an untested reason for not looking is the one claim that never gets examined" };
+  }
+  return { ok: true, declined: { what, because, unblockedBy } };
+}
+
+export function recordDeclinedCheck(org, rec, now = 0) {
+  org.declinedChecks = Array.isArray(org.declinedChecks) ? org.declinedChecks : [];
+  const key = questionKey(rec.what);
+  const dup = org.declinedChecks.find((d) => d._key === key);
+  if (dup) { dup.seen = (dup.seen || 1) + 1; dup.lastAt = now; return { added: false, declined: dup }; }
+  const d = { id: "d" + Number(now || 0).toString(36) + "-" + (org.declinedChecks.length + 1), _key: key,
+              what: rec.what, because: rec.because, unblockedBy: rec.unblockedBy,
+              by: rec.by || "", runId: rec.runId || "", at: now, seen: 1, contradicted: rec.contradicted || [] };
+  org.declinedChecks = [d, ...org.declinedChecks].slice(0, 100);
+  return { added: true, declined: d };
+}
+
 // ---- the stakeholder question queue: an open question must not stop the work -----------------------------------
 //
 // Bureau already had escalate, and escalate is the wrong shape for a question about SCOPE. It either creates a Latch
@@ -5352,6 +5452,24 @@ const server = createServer(async (req, res) => {
       const id = p.split("/")[3];
       await updateOrg((o) => { o.triggers = (o.triggers || []).filter((x) => x.id !== id); });
       return send(res, 200, { ok: true });
+    }
+
+    // ----- the declined-check register: what was NOT verified, and the reason given -----
+    // No UI panel in this commit ON PURPOSE: the lesson that produced this register was shipping UI unlooked-at, and
+    // the panel should arrive in a commit that also runs `node test/run-all.mjs --ui` and looks at it.
+    if (p === "/api/declined-checks" && req.method === "GET") {
+      const list = (await readOrg()).declinedChecks || [];
+      return send(res, 200, { declinedChecks: list, total: list.length });
+    }
+    if (p.startsWith("/api/declined-checks/") && req.method === "DELETE") {
+      const id = decodeURIComponent(p.split("/")[3] || "");
+      let gone = false;
+      await updateOrg((o) => {
+        const before = (o.declinedChecks || []).length;
+        o.declinedChecks = (o.declinedChecks || []).filter((d) => d.id !== id);
+        gone = o.declinedChecks.length < before;
+      });
+      return gone ? send(res, 200, { ok: true }) : send(res, 404, { error: "no declined check has that id" });
     }
 
     // ----- the lens register: which ways of looking this company has tried, and what each one found -----
