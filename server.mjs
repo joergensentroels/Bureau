@@ -1205,6 +1205,7 @@ export function normalizeAction(next, objective) {
   else if (["github_pr", "pull_request", "pullrequest", "pr", "open_pr", "create_pr", "raise_pr", "merge_request"].includes(at)) at = "github_pr";
   else if (["ask_peer", "ask", "consult", "message", "message_agent", "ask_teammate", "ask_colleague", "ask_agent", "peer"].includes(at)) at = "ask_peer";   // consult a named teammate
   else if (["mcp_call", "mcp", "tool", "use_tool", "call_tool", "mcp_tool", "tool_call"].includes(at)) at = "mcp_call";   // call an external MCP tool (via Latch)
+  else if (["register_finding", "finding", "report_finding", "defect", "report_defect", "bug", "log_finding"].includes(at)) at = "register_finding";   // claim a defect AND supply the control that proves it
   if (at === "web_research" && !urlIn) at = "web_search";                 // wants to research but only has a query
   else if (at === "web_search" && urlIn) { at = "web_research"; n.command = urlIn; } // "search" but gave a URL
   else if (!at || at === "other" || at === "note") {                      // vague/catch-all -> infer intent
@@ -3064,6 +3065,85 @@ async function failRun(run, message, extra = {}) {
 // Create a run object and kick it off. Returns { run, done } where done resolves when it finishes.
 // Reused by POST /api/run and the scheduler.
 // Turn a goal into a concrete run objective (used by "Work on it" and goal schedules).
+// ---- the probe gate: a finding is a claim PLUS an observed control -------------------------------------------
+//
+// The point of this, and it is the whole reason the investigate phase is not a noise generator: an autonomous critic
+// produces confident, plausible, wrong findings at machine speed. The defence is that the RUNNER performs the control,
+// never the agent — the agent supplies a check and a fix, and the runner observes three things itself:
+//
+//   1. the check FAILS before the fix        (otherwise the check does not see the defect being described)
+//   2. it PASSES after the fix               (otherwise the fix does not fix it)
+//   3. it FAILS AGAIN once the fix is reverted (otherwise the check is not reading the code at all)
+//
+// Two of the three are the ones that catch a fabricated finding. Observation 1 rejects "I noticed X" where X is already
+// handled — which is exactly the shape of the two false positives the 4water browser pass produced, both of which would
+// otherwise have "fixed" correct code.
+//
+// THE CHECK COMMAND IS NOT ARBITRARY, and that is a hard-floor decision rather than a convenience. Running a check is
+// shell execution, and `shell` requires the CEO always. So a check is accepted only if it is one of the project's own
+// entry points — its test runner or a tool it ships — which keeps this action below the floor BY CONSTRUCTION instead of
+// by trusting the model to be modest. Anything else is refused here, before it reaches a dispatcher.
+const FINDING_CHECK_ALLOW = [
+  /^npm (test|run [a-z:-]{1,40})$/,                       // the project's own scripts
+  /^node --test( [\w./-]{1,120})?$/,                      // the whole suite, or one file
+  /^node tools\/[\w.-]{1,60}\.mjs( --[\w-]{1,20})?$/,    // a tool the project ships, with at most one flag
+];
+export const findingCheckAllowed = (cmd) => FINDING_CHECK_ALLOW.some((re) => re.test(String(cmd || "").trim()));
+
+// Shape validation, pure so it is testable without a repo. Returns { ok, finding } or { ok:false, reason }.
+export function normalizeFinding(body) {
+  const str = (v, n) => String(v == null ? "" : v).trim().slice(0, n);
+  const f = {
+    claim: str(body?.claim, 240),
+    cls: str(body?.class ?? body?.cls, 40) || "new",
+    where: str(body?.where, 160),
+    check: str(body?.check, 200),
+    fix: {
+      file: str(body?.fix?.file, 200),
+      find: String(body?.fix?.find ?? "").slice(0, 4000),
+      replace: String(body?.fix?.replace ?? "").slice(0, 4000),
+    },
+  };
+  if (!f.claim) return { ok: false, reason: "a finding needs a claim: one sentence naming what is wrong" };
+  if (!f.where) return { ok: false, reason: "a finding needs a location — file:line or a route" };
+  if (!f.check) return { ok: false, reason: "a finding needs a check: the command that detects it" };
+  if (!findingCheckAllowed(f.check))
+    return { ok: false, reason: `the check must be one of this project's own entry points (npm test, node --test <file>, `
+      + `node tools/<x>.mjs) — "${f.check}" is arbitrary shell, which requires the CEO and is not what this action is for` };
+  if (!f.fix.file || !f.fix.find) return { ok: false, reason: "a finding needs a fix with a file and the text to replace" };
+  if (f.fix.find === f.fix.replace) return { ok: false, reason: "the fix changes nothing, so it cannot be the control" };
+  return { ok: true, finding: f };
+}
+
+// The gate. `io` is injected so this is unit-testable without a worktree, in the same style as fetchImpl/env elsewhere:
+//   io.sh(cmd)      -> { ok }        run the check, ok = exit 0
+//   io.apply(fix)   -> boolean       apply the edit; false when the anchor was not found
+//   io.revert(fix)  -> void          undo it
+// Returns { ok:true, observations } or { ok:false, reason } — and a rejection is data worth keeping, because the
+// rejected list is where an over-confident critic's output accumulates.
+export async function verifyFinding(finding, io) {
+  const norm = normalizeFinding(finding);
+  if (!norm.ok) return norm;
+  const f = norm.finding;
+  const obs = {};
+  try {
+    obs.before = (await io.sh(f.check)).ok;
+    if (obs.before) return { ok: false, reason: "the check passes already, so it does not see the defect described", obs };
+    if (!(await io.apply(f.fix))) return { ok: false, reason: "the fix did not apply — the anchor text was not found", obs };
+    obs.after = (await io.sh(f.check)).ok;
+    if (!obs.after) return { ok: false, reason: "the fix does not make the check pass", obs };
+    await io.revert(f.fix);
+    obs.again = (await io.sh(f.check)).ok;
+    if (obs.again) return { ok: false, reason: "the check still passes with the fix reverted, so it is not reading the code", obs };
+    return { ok: true, finding: f, obs };
+  } catch (e) {
+    // A gate that throws must not read as a pass. Reverting is attempted regardless, for the reason recorded in
+    // tools/proseproof.mjs in the 4water repo: cleanup that only runs on the happy path is not cleanup.
+    try { await io.revert(f.fix); } catch {}
+    return { ok: false, reason: `verification itself failed: ${e?.message || e}`, obs };
+  }
+}
+
 export function goalObjective(g) {
   const open = (g.keyResults || []).filter((k) => !k.done).map((k) => `- ${k.text}`).join("\n");
   return `Advance the company goal: "${g.title}".${g.detail ? " " + g.detail : ""}${open ? `\n\nKey results still open:\n${open}` : ""}\n\nMake concrete progress toward it and produce a deliverable capturing the work.`.slice(0, 1000);
