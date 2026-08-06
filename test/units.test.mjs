@@ -796,6 +796,18 @@ console.log("# investigate — the round prompt carries what the agent needs and
   chk("  with no history it says nothing about repeats", !/Do NOT repeat/.test(bare));
 }
 
+
+console.log("# investigate — the company round cap is honoured");
+{
+  const run = { events: [], listeners: new Set(), findings: [], rejectedFindings: [], rounds: [] };
+  // maxRounds comes from guardrails.investigateRounds; the hook passes `Number(x) || undefined` so 0 means "default".
+  await investigate(run, async () => ({ tokens: 1 }), { dryLimit: 9, maxRounds: 3 });
+  eq("  a cap of 3 stops after 3 rounds even with a high dry limit", run.rounds.length, 3);
+  const run2 = { events: [], listeners: new Set(), findings: [], rejectedFindings: [], rounds: [] };
+  await investigate(run2, async () => ({ tokens: 1 }), { dryLimit: 9, maxRounds: Number(0) || undefined });
+  eq("  a cap of 0 falls back to the built-in maximum, not to zero rounds", run2.rounds.length, 8);
+}
+
 console.log(`\n${fail === 0 ? "ALL PASS ✓" : "FAILURES ✗"} — ${pass} passed, ${fail} failed`);
 
 process.exit(fail === 0 ? 0 : 1);

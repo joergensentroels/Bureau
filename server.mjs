@@ -412,7 +412,10 @@ export function ensureBudget(org) {
   // Guardrails: autoApproveUnderUsd = purchases/spend below this may auto-approve; maxActionsPerRun =
   // hard cap on real actions per run (0 = unlimited); maxPaidUsdPerRun = server-side ceiling on TOTAL
   // paid-model spend per run across all agents (0 = unlimited). Per-agent allowlists live on the agent.
-  org.guardrails = { autoApproveUnderUsd: 0, maxActionsPerRun: 0, maxPaidUsdPerRun: 0, ...(org.guardrails || {}) };
+  // investigate: hunt for defects the acceptance criteria never described, after a run PASSES. Default ON, because
+  // that phase is the point — but it is an operator switch and not a constant, because it costs rounds of real model
+  // time on work that already met its definition of done. investigateRounds caps how many, 0 = the built-in default.
+  org.guardrails = { autoApproveUnderUsd: 0, maxActionsPerRun: 0, maxPaidUsdPerRun: 0, investigate: true, investigateRounds: 0, findingRepo: "", ...(org.guardrails || {}) };
   if (!Array.isArray(org.agents)) org.agents = [];                      // self-sufficient even on a bare {}
   org.agents.forEach((a) => {
     if (!a) return;
@@ -3006,11 +3009,17 @@ async function runGated(run, worker, persistExtra, perAgentTally) {
   // ---- construction is done; now go looking for what the criteria never asked about ----
   // Only on a PASS: investigating work that has not met its own definition of done is looking for a second problem
   // while the first is still open. Opt out per run with investigate:false, and never on a dry run.
-  if (verdict === "passed" && !run.dryRun && !run.stopped && run.investigate !== false) {
+  const org0 = verdict === "passed" ? await readOrg().catch(() => ({})) : {};
+  // Three ways to not do this: the company switched it off, THIS run opted out, or it was never going to be real work
+  // (dry run). The company switch is read here rather than at boot so turning it off takes effect on the next run
+  // instead of the next restart.
+  const mayInvestigate = verdict === "passed" && !run.dryRun && !run.stopped
+    && run.investigate !== false && org0.guardrails?.investigate !== false;
+  if (mayInvestigate) {
     run.phase = "investigate";
-    const org0 = await readOrg().catch(() => ({}));
     tokens += await investigate(run, worker, {
       taxonomy: org0.taxonomy || {},
+      maxRounds: Number(org0.guardrails?.investigateRounds) || undefined,
       // Each confirmed finding bumps its class on the company, so the NEXT run's lens choice is informed by this one.
       onRound: async () => {
         const fresh = (run.findings || []).filter((f) => !f._booked);
@@ -3823,6 +3832,8 @@ const server = createServer(async (req, res) => {
         if (body.maxActionsPerRun !== undefined) o.guardrails.maxActionsPerRun = Math.max(0, Math.min(100, Math.round(Number(body.maxActionsPerRun) || 0)));
         if (body.findingRepo !== undefined) o.guardrails.findingRepo = String(body.findingRepo || "").slice(0, 300);
         if (body.maxPaidUsdPerRun !== undefined) o.guardrails.maxPaidUsdPerRun = Math.max(0, Math.round((parseFloat(body.maxPaidUsdPerRun) || 0) * 100) / 100);
+        if (body.investigate !== undefined) o.guardrails.investigate = !(body.investigate === false || body.investigate === "false" || body.investigate === 0 || body.investigate === "0");
+        if (body.investigateRounds !== undefined) o.guardrails.investigateRounds = Math.max(0, Math.min(20, Math.round(Number(body.investigateRounds) || 0)));
       });
       return send(res, 200, org.guardrails);
     }

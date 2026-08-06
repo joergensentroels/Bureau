@@ -41,6 +41,22 @@ const ok = (c, m) => (c ? pass : fail).push(m);
     ok(gr.autoApproveUnderUsd === 12.35, "autoApproveUnderUsd rounded to cents");
     ok(gr.maxActionsPerRun === 100, "maxActionsPerRun clamped to 100");
 
+    // ---- the investigate switch: default ON, turnable OFF, and the round cap clamps ----
+    // Default ON because hunting after a pass is the whole point; an operator switch because it spends real model time
+    // on work that already met its definition of done, and that is the operator's money.
+    ok(gr.investigate === true, "investigate defaults ON");
+    await api("POST", "/api/guardrails", { investigate: false, investigateRounds: 99, findingRepo: "  /tmp/x  " });
+    const gr2 = (await api("GET", "/api/guardrails")).j;
+    ok(gr2.investigate === false, "investigate can be switched off");
+    ok(gr2.investigateRounds === 20, "investigateRounds clamped to 20");
+    ok(gr2.findingRepo === "  /tmp/x  ".slice(0, 300), "findingRepo is stored as given");
+    // "false" as a STRING is what an HTML form sends, and a truthy string would silently re-enable a phase the
+    // operator switched off — the expensive direction to get wrong.
+    await api("POST", "/api/guardrails", { investigate: "false" });
+    ok((await api("GET", "/api/guardrails")).j.investigate === false, 'the string "false" also switches it off');
+    await api("POST", "/api/guardrails", { investigate: true });
+    ok((await api("GET", "/api/guardrails")).j.investigate === true, "and it can be switched back on");
+
     // ---- notify webhook validation ----
     ok((await api("POST", "/api/notify", { webhook: "not-a-url" })).status === 400, "notify rejects non-http url (400)");
     ok((await api("POST", "/api/notify", { webhook: "https://hooks.example/x" })).status === 200, "notify accepts https url");
