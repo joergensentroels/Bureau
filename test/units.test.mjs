@@ -13,6 +13,7 @@ import {
   startLogTee, webhookBody,
   normalizeFinding, verifyFinding, findingCheckAllowed,
   LENSES, pickLens, investigateObjective, investigate, seedLenses, activeLenses, bookLensRound,
+  normalizeLens, lensParaphrase, addProposedLens, lensProposalObjective, sigWords,
   normalizeQuestion, questionKey, recordQuestion, answerQuestion, systemPrompt, unqueuedAssumption,
   buildUndecidedMsgs, normalizeUndecided, unaddressedUndecided, runInvestigateFlag,
 } from "../server.mjs";
@@ -839,6 +840,93 @@ console.log("# investigate — the lens register is the COMPANY's, and it learns
     const src = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
     chk("  investigate is given the register rather than the constant", src.includes("pickLens(run, lenses, lensStats)"));
     chk("  and every round is booked against the company, dry ones included", src.includes("bookLensRound(o, round.lens, round.confirmed"));
+  }
+}
+console.log("# investigate — the completeness critic, and what stops it filling the register with junk");
+{
+  // The register is a list, so its blind spots are exactly the ones it can never report. A critic can name them — and
+  // will happily name imaginary ones too, at the cost of a paid round on every future run. Hence a gate with the same
+  // shape as the finding gate: evidence the runner can check, not a claim the model makes about itself.
+  const FOUND = [{ claim: "the GDPR export omits the volunteer_notes table", where: "src/export.mjs:41" }];
+  const good = { id: "money-path", prompt: "Follow every path where money or credentials move, and ask who could take it without being logged.", because: "the GDPR export omits the volunteer_notes table" };
+  const no = (label, body, needle) => {
+    const r = normalizeLens({ ...good, ...body }, { existing: LENSES, findings: FOUND });
+    chk("  " + label, r.ok === false && (!needle || r.reason.includes(needle)));
+  };
+  no("no id", { id: "" });
+  no("an id already in the register", { id: LENSES[0].id }, "already a lens");
+  no("a topic instead of an instruction", { prompt: "security" }, "not an instruction");
+  no("a long noun phrase is still not an instruction", { prompt: "Data retention coverage across the whole application surface and its edges" }, "instruction verb");
+  no("a restatement of a lens already there",
+     { prompt: "Find every number and date stated in prose or config, and derive the true value." }, "in different words");
+  no("no finding cited", { because: "" }, "name the confirmed finding");
+  // THE rule. Without it the critic invents a coverage gap to look thorough and bills for it forever.
+  no("a finding that was never confirmed this run", { because: "the login page has no rate limit" }, "does not match any finding");
+  {
+    const r = normalizeLens(good, { existing: LENSES, findings: FOUND });
+    chk("  a real instruction citing a real finding is accepted", r.ok === true);
+    eq("  and it keeps the evidence with it", r.lens.because, good.because);
+  }
+  {
+    // The control on the whole block: with no findings at all, nothing can be proposed — which is why the critic round
+    // does not even run on a dry investigate phase.
+    const r = normalizeLens(good, { existing: LENSES, findings: [] });
+    chk("  with no confirmed findings nothing can be proposed", r.ok === false);
+  }
+  {
+    eq("  a paraphrase is reported by the id it duplicates",
+       lensParaphrase("Find every number, count or date stated in prose or config and derive the true value", LENSES), "stale-claim");
+    eq("  and a genuinely different way of looking is not a paraphrase", lensParaphrase(good.prompt, LENSES), null);
+    eq("  an empty prompt paraphrases nothing", lensParaphrase("", LENSES), null);
+  }
+}
+console.log("# investigate — a proposed lens is capped, and the least productive one makes room");
+{
+  const mk = (i) => ({ id: "p" + i, prompt: "Trace something specific number " + i, because: "x" });
+  {
+    const org = {}; seedLenses(org);
+    for (let i = 0; i < 4; i++) eq("  proposal " + i + " is added", addProposedLens(org, mk(i), i).added, true);
+    eq("  four proposals sit alongside the built-ins", org.lenses.filter((l) => l.proposed).length, 4);
+    chk("  and they are marked as proposed, with the evidence kept", org.lenses.find((l) => l.id === "p0").proposed === true);
+    // All four are dry, so the coldest one is evicted rather than the register growing without limit.
+    const fifth = addProposedLens(org, mk(9), 99);
+    eq("  a fifth still lands", fifth.added, true);
+    eq("  but the count is held", org.lenses.filter((l) => l.proposed).length, 4);
+    // The control: eviction must not touch the built-ins.
+    eq("  and no built-in was evicted to make room", LENSES.every((l) => org.lenses.some((x) => x.id === l.id)), true);
+  }
+  {
+    // If every proposal is earning its round, nothing is thrown away — a productive register must not churn.
+    const org = {}; seedLenses(org);
+    for (let i = 0; i < 4; i++) { addProposedLens(org, mk(i), i); org.lenses.find((l) => l.id === "p" + i).found = 2; }
+    const r = addProposedLens(org, mk(9), 99);
+    eq("  a full register of productive proposals refuses the new one", r.added, false);
+    chk("  and says why", /finding things/.test(r.reason));
+  }
+}
+console.log("# investigate — the critic round asks about the METHOD, and only when there is evidence");
+{
+  const run = { findings: [{ claim: "the retention sweep only runs when a season expires", where: "src/jobs.mjs:12" }] };
+  const o = lensProposalObjective(run, LENSES.slice(0, 3));
+  chk("  it lists the ways of looking the company already has", o.includes(LENSES[0].id) && o.includes(LENSES[2].id));
+  chk("  it lists what was actually found", o.includes("the retention sweep only runs when a season expires"));
+  chk("  it names the action and its three fields", o.includes("propose_lens") && o.includes("kebab-case"));
+  chk("  it asks about the method, not the code", /way of looking/.test(o) && /METHOD/.test(o));
+  // Without this the critic proposes something every single time, because saying nothing feels like failing the task.
+  chk("  and it says plainly that 'already covered' is the useful answer most of the time", /perfectly good answer|most of the time/.test(o));
+  {
+    const src = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
+    const inv = src.slice(src.indexOf("export async function investigate"));
+    const body = inv.slice(0, inv.indexOf('emit(run, "investigated"'));
+    const code = body.split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
+    chk("  the critic round is skipped when the phase found nothing", code.includes("(run.findings || []).length && opts.critique !== false"));
+    chk("  and it is one round, not a loop", code.split("lensProposalObjective").length === 2);
+    const pl = src.slice(src.indexOf('=== "propose_lens") {'));
+    const plBody = pl.slice(0, pl.indexOf('=== "ask_stakeholder") {'));
+    const iWrite = plBody.indexOf('await updateOrg('), iCheck = plBody.indexOf('normalizeLens(');
+    chk('  the propose_lens branch was located and holds both halves', plBody.length > 300 && iWrite >= 0 && iCheck >= 0);
+    chk('  and it checks the register INSIDE the write that appends to it, so it cannot validate a stale read',
+        iWrite >= 0 && iCheck > iWrite && plBody.includes('seedLenses(o)'));
   }
 }
 console.log("# investigate — the round prompt carries what the agent needs and nothing it should repeat");

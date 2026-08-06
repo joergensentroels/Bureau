@@ -266,7 +266,7 @@ const TIERS = ["supervised", "trusted", "autonomous"];
 // allowlist: a browser holding the operator token can approve a repo-issues read from off-host. That is a
 // read of a repo the OPERATOR configured, not arbitrary reach, and remote mode is documented as defence in
 // depth rather than a boundary — but it is a widening, so it is written down here and in SECURITY.md.
-const SAFE_TIER_ACTIONS = new Set(["web_search", "web_research", "read_file", "read_issues", "file_write", "note", "ask_peer", "register_finding", "ask_stakeholder"]);
+const SAFE_TIER_ACTIONS = new Set(["web_search", "web_research", "read_file", "read_issues", "file_write", "note", "ask_peer", "register_finding", "ask_stakeholder", "propose_lens"]);
 // register_finding is safe-tier deliberately: it takes no real-world action, runs only commands the project itself
 // ships (FINDING_CHECK_ALLOW), and does it in a throwaway worktree. Autonomy is the entire point of the action — a
 // gate that needs the CEO for every claim is a gate nobody runs.
@@ -972,7 +972,7 @@ async function fileApproval(agent, action, run = null) {
     });
     return json;
   }
-  const typeMap = { email_draft: "external_contact", note: "context_question", file_write: "context_question", read_file: "context_question", ask_peer: "context_question", ask_stakeholder: "context_question" };
+  const typeMap = { email_draft: "external_contact", note: "context_question", file_write: "context_question", read_file: "context_question", ask_peer: "context_question", ask_stakeholder: "context_question", propose_lens: "context_question" };
   const { json } = await latch("POST", "/api/approvals", {
     type: typeMap[action.actionType] || "other",
     title: action.title || "Action requested",
@@ -1225,6 +1225,7 @@ export function normalizeAction(next, objective) {
   else if (["github_issue", "issue", "new_issue", "open_issue", "create_issue", "file_issue", "raise_issue", "bug_report"].includes(at)) at = "github_issue";
   else if (["github_comment", "issue_comment", "comment", "comment_issue", "reply_issue", "reply"].includes(at)) at = "github_comment";
   else if (["github_pr", "pull_request", "pullrequest", "pr", "open_pr", "create_pr", "raise_pr", "merge_request"].includes(at)) at = "github_pr";
+  else if (["propose_lens", "new_lens", "add_lens", "suggest_lens", "propose_method", "lens"].includes(at)) at = "propose_lens";   // only offered in the critic round
   else if (["ask_stakeholder", "ask_ceo", "open_question", "scope_question", "clarify", "clarification", "assumption", "flag_assumption", "ask_owner", "ask_stakeholders"].includes(at)) at = "ask_stakeholder";   // a question that must NOT stop the work
   else if (["ask_peer", "ask", "consult", "message", "message_agent", "ask_teammate", "ask_colleague", "ask_agent", "peer"].includes(at)) at = "ask_peer";   // consult a named teammate
   else if (["mcp_call", "mcp", "tool", "use_tool", "call_tool", "mcp_tool", "tool_call"].includes(at)) at = "mcp_call";   // call an external MCP tool (via Latch)
@@ -2400,6 +2401,28 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
           didExecute = true;
           history.push({ role: "user", content: `${peer.name} (${peer.role}) replied to your question:\n---\n${reply}\n---\nUse this input as you see fit. Continue toward the objective or finish.` });
         }
+      } else if ((next.actionType || "") === "propose_lens") {
+        // The whole gate runs inside one updateOrg: the register is read, checked against and appended to atomically,
+        // so a proposal cannot be validated against a register that has already changed underneath it.
+        let out = { ok: false, reason: "the register was unavailable" };
+        await updateOrg((o) => {
+          seedLenses(o);
+          const shape = normalizeLens({ id: next.title, prompt: next.command, because: next.details },
+                                      { existing: o.lenses, findings: run.findings || [] });
+          if (!shape.ok) { out = shape; return; }
+          const add = addProposedLens(o, shape.lens, Date.now());
+          out = add.added ? { ok: true, lens: add.lens } : { ok: false, reason: add.reason };
+        }).catch((e) => { out = { ok: false, reason: "the register could not be written: " + e.message }; });
+        didExecute = true;
+        if (out.ok) {
+          emit(run, "lensProposed", { by: who, depth, id: out.lens.id, prompt: out.lens.prompt, because: out.lens.because });
+          emitAct({ agent: who, depth, actionType: "propose_lens", url: out.lens.id, ok: true, bytes: out.lens.prompt.length, error: "" });
+          history.push({ role: "user", content: "Added to the company's register as a proposed lens, and future runs will try it. Now finish." });
+        } else {
+          emit(run, "lensRejected", { by: who, depth, id: String(next.title || "").slice(0, 40), reason: out.reason });
+          emitAct({ agent: who, depth, actionType: "propose_lens", url: String(next.title || "").slice(0, 40), ok: false, bytes: 0, error: "refused" });
+          history.push({ role: "user", content: "That lens was not added: " + out.reason + ". Either propose a different one or finish — saying the existing lenses already cover it is a perfectly good answer." });
+        }
       } else if ((next.actionType || "") === "ask_stakeholder") {
         // Deliberately NOT an escalation: nothing waits, nothing polls, no approval is created, no agent goes into
         // "waiting". The question becomes company state and the agent is told to carry on under its own assumption —
@@ -3268,8 +3291,9 @@ const QUESTION_STOPWORDS = new Set(["the","a","an","is","are","was","were","do",
 // Dedup key. Significant words, sorted — so wording, order and punctuation can drift without producing a second copy
 // of the same question. It is a heuristic and will miss a genuine paraphrase; that costs a duplicate in the queue,
 // which the CEO can see and ignore, rather than a lost question.
-export const questionKey = (t) => String(t == null ? "" : t).toLowerCase().replace(/[^a-z0-9\s]/g, " ")
-  .split(/\s+/).filter((w) => w && !QUESTION_STOPWORDS.has(w)).sort().join(" ");
+export const sigWords = (t) => String(t == null ? "" : t).toLowerCase().replace(/[^a-z0-9\s]/g, " ")
+  .split(/\s+/).filter((w) => w && !QUESTION_STOPWORDS.has(w));
+export const questionKey = (t) => sigWords(t).sort().join(" ");
 
 // An assumption phrased as a question is not a decision — it is the question a second time, and it leaves the work
 // parked exactly as if no assumption had been given.
@@ -3380,6 +3404,84 @@ export const LENSES = [
 // Least-recently-used within this run, skipping lenses that have already gone dry twice — the register that makes
 // rotation informed rather than random. It is deliberately NOT random: a lens that just found something gets another
 // turn before one that has produced nothing.
+// ---- the completeness critic: what way of looking is MISSING? ---------------------------------------------------
+const LENS_PROPOSAL_CAP = 4;   // machine-proposed lenses in the register at once; the built-ins are never counted
+
+// A proposal must not restate a lens that is already there. Overlap on significant words, because a paraphrase is how
+// this fails in practice: "look for stale numbers in prose" against the existing stale-claim lens.
+export function lensParaphrase(prompt, existing = []) {
+  const w = new Set(sigWords(prompt));
+  if (!w.size) return null;
+  for (const l of existing) {
+    const e = new Set(sigWords(l.prompt));
+    if (!e.size) continue;
+    let shared = 0;
+    for (const x of w) if (e.has(x)) shared++;
+    if (shared / w.size >= 0.5) return l.id;   // half its words are already in that lens
+  }
+  return null;
+}
+
+// Imperative check. A lens only changes what an agent DOES if it tells it to do something, which is why every built-in
+// starts with a verb. A noun phrase ("data retention coverage") reads like a lens and behaves like a label.
+const LENS_IMPERATIVE = /^(read|take|find|walk|run|for each|follow|open|list|trace|compare|check|ask|start|pick|re-?read|look|count|search|inspect|replay|diff|measure|try)\b/i;
+
+export function normalizeLens(body, opts = {}) {
+  const { existing = [], findings = [] } = opts;
+  const id = String(body?.id || "").trim().toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+  const prompt = String(body?.prompt || "").trim().slice(0, 600);
+  const because = String(body?.because || "").trim().slice(0, 240);
+  if (!id) return { ok: false, reason: "the lens has no id" };
+  if (existing.some((l) => l.id === id)) return { ok: false, reason: "there is already a lens with that id" };
+  if (prompt.length < 40) return { ok: false, reason: "that is a topic, not an instruction — say what to DO with the code, in a sentence" };
+  if (!LENS_IMPERATIVE.test(prompt)) return { ok: false, reason: "a lens must start with an instruction verb (Read, Walk, Trace, Follow, Compare…), or it is a label and it changes nothing about what you do" };
+  const dup = lensParaphrase(prompt, existing);
+  if (dup) return { ok: false, reason: `that is the "${dup}" lens in different words — propose a way of looking that is not already in the register` };
+  // The evidence rule. Without it a critic invents coverage gaps to look thorough, and every one costs a paid round
+  // on every future run.
+  if (!because) return { ok: false, reason: "name the confirmed finding this lens would have found, so the proposal rests on a real defect rather than a feeling about coverage" };
+  const key = new Set(sigWords(because));
+  const hit = findings.some((f) => {
+    const fw = sigWords(f.claim);
+    if (!fw.length) return false;
+    let shared = 0;
+    for (const x of fw) if (key.has(x)) shared++;
+    return shared / fw.length >= 0.4;
+  });
+  if (!hit) return { ok: false, reason: "that does not match any finding confirmed in this run — cite one that was actually proved, not one you expect to exist" };
+  return { ok: true, lens: { id, prompt, because } };
+}
+
+export function addProposedLens(org, lens, now = 0, cap = LENS_PROPOSAL_CAP) {
+  org.lenses = Array.isArray(org.lenses) ? org.lenses : [];
+  const proposed = org.lenses.filter((l) => l.proposed);
+  if (proposed.length >= cap) {
+    // Full: the least productive proposal makes room, so the register can keep learning without growing forever.
+    const worst = proposed.slice().sort((a, b) => (a.found || 0) - (b.found || 0) || (b.dry || 0) - (a.dry || 0))[0];
+    if ((worst.found || 0) > 0) return { added: false, reason: "the proposed-lens slots are full and all of them are finding things" };
+    org.lenses = org.lenses.filter((l) => l !== worst);
+  }
+  org.lenses.push({ id: lens.id, prompt: lens.prompt, because: lens.because, found: 0, dry: 0, lastAt: 0, off: false, edited: true, proposed: true, at: now });
+  return { added: true, lens: org.lenses[org.lenses.length - 1] };
+}
+
+export function lensProposalObjective(run, lenses = []) {
+  const found = (run.findings || []).map((f) => `- ${f.claim}${f.where ? " (" + f.where + ")" : ""}`);
+  return [
+    "The hunting rounds are over. Before this closes, one question about the METHOD rather than the code.",
+    "",
+    "Ways of looking this company already has:",
+    ...lenses.map((l) => `- ${l.id}: ${l.prompt.slice(0, 120)}`),
+    "",
+    "Defects confirmed this run:",
+    ...found,
+    "",
+    "Is there a way of looking that is NOT in that list, and that would have found one of those defects more directly than the lens that did?",
+    'If so, propose it with propose_action actionType "propose_lens": title=a short id (kebab-case), command=the instruction itself (start with a verb: Read, Walk, Trace, Follow, Compare…), details=the confirmed finding above that it would have found.',
+    "If every one of those defects was already covered by an existing lens, say so plainly and finish — that is the useful answer most of the time, and a proposal that restates a lens already in the list will be refused.",
+  ].filter(Boolean).join("\n");
+}
+
 // The company's copy of the register. Seeded from LENSES, then it is the company's — an operator can add a lens, edit
 // a prompt, or switch one off, and the yield counters survive. Merging by id rather than replacing means a later
 // release can add a lens without wiping what this company learned about the others.
@@ -3474,6 +3576,13 @@ export async function investigate(run, worker, opts = {}) {
     run.rounds.push({ lens: lens.id, at: Date.now(), confirmed, dryAfter: run.dryRounds });
     emit(run, "round", { round: roundNo, lens: lens.id, confirmed, dryRounds: run.dryRounds });
     if (onRound) await onRound(run, run.rounds[run.rounds.length - 1]);
+  }
+  // One critic round, and only when the run actually produced evidence: the gate refuses any proposal that cannot
+  // cite a confirmed finding, so spending a turn with an empty findings list would buy a guaranteed refusal.
+  if (!run.stopped && (run.findings || []).length && opts.critique !== false) {
+    emit(run, "critique", { findings: run.findings.length, lenses: lenses.length });
+    const w = await worker(lensProposalObjective(run, lenses));
+    tokens += (w && w.tokens) || 0;
   }
   emit(run, "investigated", {
     rounds: run.rounds.length, findings: run.findings.length, refused: run.rejectedFindings.length,
