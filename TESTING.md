@@ -558,3 +558,37 @@ to the finish it plainly is.
 And a fixture bug caught by checking the probe: `node --test <dir>` exits **1** on a plain script with no
 `test()` calls under Node 24, so the fixture's own `test` script had to name the file. Left unnoticed it would
 have reported a false failure *of the gate*.
+
+### The gate refusing a real false claim, on evidence
+
+Run nine's agent claimed: *"test/auth.test.mjs imports hasRole from src/auth.mjs, but this function is not
+present."* Both halves are false — `hasRole` is exported at `src/auth.mjs:325` and the test never imports it. It
+is the same truncation artifact as the earlier 'invite' claim: line 325 is far past the 4,000-character read cap.
+
+That claim was replayed through the gate, made well-formed first so the **evidence** rule decided rather than the
+shape rule:
+
+```
+shape: accepted — so the evidence rule is what decides
+verdict: REFUSED
+reason : the check passes already, so it does not see the defect described
+observations: {"before":true}
+```
+
+Before the npm fix the same claim returned *"verification itself failed: spawn EINVAL"* — an infrastructure error
+dressed as a refusal, which is the worst possible outcome because it looks like judgement. Now it is refused for
+the correct reason, and the reason is legible.
+
+**With the control that makes it mean something.** A refusal proves nothing if the check can only ever pass, so
+the same command was run against a deliberately broken tree: renaming the `hasRole` export makes `npm test`
+**fail**, and reverting makes it **pass** again. So `npm test` discriminates on this repository, and the refusal
+above is a judgement rather than a check that is blind.
+
+Caveat worth stating: this is a *replayed* claim. The model produced it live; the well-formed version and the
+gate call were mine. It shows the gate decides correctly on a real false claim against a real repository — not
+that an unassisted agent reaches that outcome on its own.
+
+Measured while doing this, since it bears on the round budget: a check in a fresh worktree costs under a second
+for `node --test <file>` and about 6 seconds for `npm test`. One earlier script took far longer for reasons I
+could not pin down — the import and the check commands were both ruled out by measurement, so it is recorded as
+unexplained rather than attributed.
