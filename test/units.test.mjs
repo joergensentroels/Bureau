@@ -13,6 +13,7 @@ import {
   startLogTee, webhookBody,
   normalizeFinding, verifyFinding, findingCheckAllowed,
   LENSES, pickLens, investigateObjective, investigate,
+  normalizeQuestion, questionKey, recordQuestion, answerQuestion, systemPrompt,
 } from "../server.mjs";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -806,6 +807,113 @@ console.log("# investigate — the company round cap is honoured");
   const run2 = { events: [], listeners: new Set(), findings: [], rejectedFindings: [], rounds: [] };
   await investigate(run2, async () => ({ tokens: 1 }), { dryLimit: 9, maxRounds: Number(0) || undefined });
   eq("  a cap of 0 falls back to the built-in maximum, not to zero rounds", run2.rounds.length, 8);
+}
+
+
+// ---- the stakeholder question queue -----------------------------------------------------------------------------
+//
+// The rule under test is the one that makes this produce autonomy instead of more waiting: a question is only accepted
+// if the agent says what it is proceeding with meanwhile. Refusals go first, because the refusals ARE the mechanism.
+console.log("# ask_stakeholder — a question that stops the work is refused");
+{
+  const good = { question: "Is the Booth an activity or an event?", assumption: "treating it as an activity with one role", affects: "src/seed.mjs" };
+  const no = (label, body, needle) => {
+    const r = normalizeQuestion(body);
+    chk("  " + label, r.ok === false && (!needle || r.reason.includes(needle)));
+  };
+  no("no question at all", { ...good, question: "" });
+  no("a question with NO assumption is a request to stop", { ...good, assumption: "" }, "stop working");
+  no("no place the assumption is written down", { ...good, affects: "" }, "WHERE");
+  no("an assumption that ends in a question mark is not a decision", { ...good, assumption: "treat it as an activity?" }, "not a decision");
+  no("nor is one that starts with 'should'", { ...good, assumption: "should it be an activity or an event" }, "not a decision");
+  no("nor 'unclear'", { ...good, assumption: "unclear, waiting on the CEO" });
+  no("an assumption that only restates the question",
+     { question: "Which licence do we ship?", assumption: "the licence we ship", affects: "LICENSE" }, "repeats");
+  {
+    const r = normalizeQuestion(good);
+    chk("  a real question with a real assumption is accepted", r.ok === true);
+    eq("  and keeps all three fields", [r.question.question, r.question.assumption, r.question.affects],
+       [good.question, good.assumption, good.affects]);
+  }
+  {
+    // The dispatch branch hands over title/command/url, not question/assumption/affects.
+    const r = normalizeQuestion({ title: "  What is the claim cutoff?  ", command: "  using 2 days  ", url: "board.cutoffDays" });
+    chk("  it reads the action's own field names, trimmed", r.ok && r.question.question === "What is the claim cutoff?" && r.question.assumption === "using 2 days");
+  }
+  {
+    const r = normalizeQuestion({ question: "q".repeat(900), assumption: "a".repeat(900), affects: "f".repeat(900) });
+    eq("  and caps the three fields", [r.question.question.length, r.question.assumption.length, r.question.affects.length], [400, 400, 200]);
+  }
+}
+console.log("# ask_stakeholder — the same question asked twice is not two questions");
+{
+  const k = questionKey;
+  chk("  wording, order and punctuation can drift", k("Who owns the licence?") === k("the licence — who owns it"));
+  chk("  and stopwords do not matter", k("Should we use MIT?") === k("use MIT"));
+  chk("  but a different question is a different key", k("who owns the licence") !== k("which licence do we ship"));
+  eq("  an empty question has an empty key", k(null), "");
+  {
+    const org = {};
+    const a = recordQuestion(org, { question: "Who owns the licence?", assumption: "MIT, in LICENSE", affects: "LICENSE" }, 1000);
+    eq("  the first ask is recorded and open", [a.added, a.question.status, org.questions.length], [true, "open", 1]);
+    const b = recordQuestion(org, { question: "the licence — who owns it", assumption: "MIT", affects: "LICENSE" }, 2000);
+    eq("  asking it again does not add a second", [b.added, org.questions.length], [false, 1]);
+    eq("  it counts the re-ask instead", [b.question.asked, b.question.lastAt], [2, 2000]);
+    // The control on the two assertions above: if recordQuestion simply never added, they would both pass anyway.
+    const c = recordQuestion(org, { question: "What is the claim cutoff?", assumption: "2 days", affects: "board.cutoffDays" }, 3000);
+    eq("  while a genuinely different question IS added", [c.added, org.questions.length], [true, 2]);
+    // The one that matters most: an ANSWERED question must still block a re-ask, or an agent can relitigate a
+    // decision the CEO already made and quietly get a different answer.
+    answerQuestion(org, a.question.id, "MIT is right", 4000);
+    const d = recordQuestion(org, { question: "who owns the licence", assumption: "MIT", affects: "LICENSE" }, 5000);
+    eq("  and an ANSWERED question is still deduped against", [d.added, d.question.status], [false, "answered"]);
+  }
+  {
+    const org = { questions: [] };
+    for (let i = 0; i < 240; i++) recordQuestion(org, { question: "question number " + i, assumption: "x", affects: "y" }, i);
+    eq("  the queue is capped", org.questions.length, 200);
+    chk("  keeping the newest", org.questions[0].question === "question number 239");
+  }
+}
+console.log("# ask_stakeholder — answering");
+{
+  const org = { questions: [] };
+  const { question: q } = recordQuestion(org, { question: "Whose name goes on it?", assumption: "the company's", affects: "README" }, 1);
+  const bad = answerQuestion(org, q.id, "   ");
+  chk("  an empty answer is not an answer", bad.ok === false);
+  chk("  and neither is one for a question that does not exist", answerQuestion(org, "nope", "yes").ok === false);
+  const ok = answerQuestion(org, q.id, "  mine  ", 9);
+  eq("  a real answer settles it", [ok.ok, ok.question.answer, ok.question.status, ok.question.answeredAt], [true, "mine", "answered", 9]);
+}
+console.log("# ask_stakeholder — the queue reaches the next run, which is what closes the loop");
+{
+  const agent = { name: "Ada", role: "engineer" };
+  const org = { questions: [
+    { id: "q1", status: "answered", answer: "MIT", question: "Which licence?", assumption: "MIT" },
+    { id: "q2", status: "open", question: "Is the Booth an activity?", assumption: "treating it as an activity" },
+  ] };
+  const p = systemPrompt(org, agent);
+  chk("  a settled decision is carried in as settled", p.includes("SETTLED") && p.includes("Which licence?") && p.includes("MIT"));
+  chk("  an open question is carried in with the assumption in force", p.includes("PROCEEDING AS IF") && p.includes("treating it as an activity"));
+  chk("  and the agent is told not to ask either of them again", p.includes("never ask again") && p.includes("Do NOT ask these again"));
+  // The control: those strings must be absent when there is nothing to say, or the assertions above prove only that
+  // the prompt is long.
+  const bare = systemPrompt({}, agent);
+  chk("  with an empty queue the prompt says none of it", !bare.includes("SETTLED") && !bare.includes("PROCEEDING AS IF"));
+}
+console.log("# ask_stakeholder — it is a safe action, and it is NOT an escalation");
+{
+  eq("  every alias normalizes to ask_stakeholder",
+     ["ask_stakeholder", "ask_ceo", "open_question", "scope_question", "clarify", "flag_assumption"].map((a) => normalizeAction({ actionType: a }).actionType),
+     ["ask_stakeholder", "ask_stakeholder", "ask_stakeholder", "ask_stakeholder", "ask_stakeholder", "ask_stakeholder"]);
+  chk("  and asking a teammate still means ask_peer", normalizeAction({ actionType: "consult" }).actionType === "ask_peer");
+  const src = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
+  const branch = src.slice(src.indexOf('=== "ask_stakeholder") {'));
+  const body = branch.slice(0, branch.indexOf('=== "register_finding") {'));
+  const code = body.split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
+  chk("  the assertion below is reading the right block", code.includes("recordQuestion(") && code.includes("didExecute = true"));
+  chk("  and that block never waits: no approval, no polling, no waiting state",
+      !code.includes("latch(") && !code.includes("latchApproval") && !code.includes('"waiting"') && !code.includes("sleep("));
 }
 
 console.log(`\n${fail === 0 ? "ALL PASS ✓" : "FAILURES ✗"} — ${pass} passed, ${fail} failed`);

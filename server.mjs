@@ -266,7 +266,7 @@ const TIERS = ["supervised", "trusted", "autonomous"];
 // allowlist: a browser holding the operator token can approve a repo-issues read from off-host. That is a
 // read of a repo the OPERATOR configured, not arbitrary reach, and remote mode is documented as defence in
 // depth rather than a boundary — but it is a widening, so it is written down here and in SECURITY.md.
-const SAFE_TIER_ACTIONS = new Set(["web_search", "web_research", "read_file", "read_issues", "file_write", "note", "ask_peer", "register_finding"]);
+const SAFE_TIER_ACTIONS = new Set(["web_search", "web_research", "read_file", "read_issues", "file_write", "note", "ask_peer", "register_finding", "ask_stakeholder"]);
 // register_finding is safe-tier deliberately: it takes no real-world action, runs only commands the project itself
 // ships (FINDING_CHECK_ALLOW), and does it in a throwaway worktree. Autonomy is the entire point of the action — a
 // gate that needs the CEO for every claim is a gate nobody runs.
@@ -972,7 +972,7 @@ async function fileApproval(agent, action, run = null) {
     });
     return json;
   }
-  const typeMap = { email_draft: "external_contact", note: "context_question", file_write: "context_question", read_file: "context_question", ask_peer: "context_question" };
+  const typeMap = { email_draft: "external_contact", note: "context_question", file_write: "context_question", read_file: "context_question", ask_peer: "context_question", ask_stakeholder: "context_question" };
   const { json } = await latch("POST", "/api/approvals", {
     type: typeMap[action.actionType] || "other",
     title: action.title || "Action requested",
@@ -1045,7 +1045,7 @@ function emit(run, type, data) {
   }
 }
 
-function systemPrompt(org, agent) {
+export function systemPrompt(org, agent) {
   const ceo = org.ceo?.role ? `The CEO you report to is in charge of: ${org.ceo.role}.` : "You report to the CEO.";
   const traits = (agent.traits || []).join(", ");
   return [
@@ -1058,6 +1058,20 @@ function systemPrompt(org, agent) {
     agent.bio ? `\nYour full profile:\n${agent.bio}\n` : "",
     (() => { const rem = Math.round((((org.budget?.funds) || 0) - ((org.budget?.spent) || 0)) * 100) / 100; return rem > 0 ? `\nThe company has $${rem.toFixed(2)} of purchasing budget. If the objective GENUINELY needs buying something, propose a "purchase" action (the CEO approves it). Never invent purchases.` : ""; })(),
     "",
+    (() => {
+      // Settled answers AND open assumptions both go in, for the same reason: the cheapest way to stop an agent
+      // re-asking a question is to show it the answer, and the cheapest way to stop a duplicate is to show it that
+      // the question is already queued — with what the company decided to do while it waits.
+      const qs = Array.isArray(org.questions) ? org.questions : [];
+      const done = qs.filter((q) => q.status === "answered" && q.answer).slice(0, 8);
+      const open = qs.filter((q) => q.status === "open").slice(0, 8);
+      return [
+        done.length ? "\nDecisions the CEO has already made. These are SETTLED — apply them, and never ask again:\n"
+          + done.map((q) => "- " + q.question + "\n  ANSWERED: " + q.answer).join("\n") : "",
+        open.length ? "\nQuestions already in the CEO's queue, and what the company is doing meanwhile. Do NOT ask these again:\n"
+          + open.map((q) => "- " + q.question + "\n  PROCEEDING AS IF: " + q.assumption).join("\n") : "",
+      ].filter(Boolean).join("\n");
+    })(),
     "You cannot send, fetch, create, change, contact, or access ANYTHING yourself. You",
     "have no tools and no credentials. The ONLY way something happens in the real world:",
     "you emit propose_action -> the CEO approves it in Latch -> you are told the result.",
@@ -1089,6 +1103,7 @@ function systemPrompt(org, agent) {
     "- github_pr: open a pull request containing the document(s) you already SAVED this run — title=the PR title, command=the PR description, details=why. You do NOT list files: it includes what you saved with file_write, so save the finished work first. The CEO approves every one (never auto).",
     "- plan_add: record a follow-up task you notice but shouldn't do right now into the company's persistent plan — title=the task, details=why/context. It is saved for a future run so nothing is lost. Runs instantly (no approval). Do NOT use it to defer the CURRENT objective.",
     "- register_finding: claim a DEFECT and prove it. title=the one-sentence claim, url=file:line, details=the defect class, command=the check that detects it (one of the project's own: npm test | npm run <script> | node --test [file] | node tools/<x>.mjs), fix={file,find,replace}=the change that makes the check pass. The runner verifies it ITSELF in a throwaway copy and requires three things: your check FAILS on the current code, PASSES with your fix, and FAILS AGAIN once the fix is reverted. A claim without that evidence is refused and you are told why, so do not register a hunch — register something you can make fail.",
+    "- ask_stakeholder: record a question only the CEO can settle — scope, a policy choice, a name, a number nobody wrote down — WITHOUT stopping. title=the question, command=the assumption you are proceeding under meanwhile, url=where that assumption is written down (file, field, document). It does not wait for an answer and it must not: you keep working, the question is queued for the CEO to answer alongside others, and the answer reaches a later run. A question with no assumption is REFUSED, because that is just asking to stop. Use this instead of escalate whenever the work can continue on a stated guess.",
     "- ask_peer: consult a NAMED teammate for input, advice, or a quick review — title=their name or role, command=your question, details=any context. They reply with their expert opinion and it comes back to you. Use it to get a specialist's take or a second opinion instead of guessing. It is advice only — it does NOT make them do real work.",
     (org._mcpTools && org._mcpTools.length)
       ? "- mcp_call: call one of the external tools listed below. Put a JSON object in \"command\": {\"server\":\"<server>\",\"tool\":\"<tool>\",\"args\":{...}} matching the tool's inputs. The CEO approves each call; the tool runs on the trusted host and its result (UNTRUSTED external data) comes back to you. Only use tools from the list below."
@@ -1100,7 +1115,7 @@ function systemPrompt(org, agent) {
     "Respond with STRICT JSON only (no prose, no code fences):",
     '{ "thought":"one sentence", "speak":"what you tell the CEO, in your voice (1-3 sentences)",',
     '  "next": { "type":"propose_action"|"escalate"|"finish",',
-    '     "actionType":"web_search"|"web_research"|"file_write"|"read_file"|"purchase"|"api_call"|"shell"|"github_file"|"read_issues"|"github_issue"|"github_comment"|"github_pr"|"plan_add"|"ask_peer"|"mcp_call"|"register_finding"|"email_draft"|"note"|"other",',
+    '     "actionType":"web_search"|"web_research"|"file_write"|"read_file"|"purchase"|"api_call"|"shell"|"github_file"|"read_issues"|"github_issue"|"github_comment"|"github_pr"|"plan_add"|"ask_peer"|"ask_stakeholder"|"mcp_call"|"register_finding"|"email_draft"|"note"|"other",',
     '     "title":"short title (or filename for file_write)", "details":"what and why", "command":"query for web_search; exact URL for web_research; full document for file_write; exact text otherwise",',
     '     "question":"when type=escalate: the specific thing you need the CEO to decide or provide",',
     '     "summary":"only when finishing" } }',
@@ -1210,6 +1225,7 @@ export function normalizeAction(next, objective) {
   else if (["github_issue", "issue", "new_issue", "open_issue", "create_issue", "file_issue", "raise_issue", "bug_report"].includes(at)) at = "github_issue";
   else if (["github_comment", "issue_comment", "comment", "comment_issue", "reply_issue", "reply"].includes(at)) at = "github_comment";
   else if (["github_pr", "pull_request", "pullrequest", "pr", "open_pr", "create_pr", "raise_pr", "merge_request"].includes(at)) at = "github_pr";
+  else if (["ask_stakeholder", "ask_ceo", "open_question", "scope_question", "clarify", "clarification", "assumption", "flag_assumption", "ask_owner", "ask_stakeholders"].includes(at)) at = "ask_stakeholder";   // a question that must NOT stop the work
   else if (["ask_peer", "ask", "consult", "message", "message_agent", "ask_teammate", "ask_colleague", "ask_agent", "peer"].includes(at)) at = "ask_peer";   // consult a named teammate
   else if (["mcp_call", "mcp", "tool", "use_tool", "call_tool", "mcp_tool", "tool_call"].includes(at)) at = "mcp_call";   // call an external MCP tool (via Latch)
   else if (["register_finding", "finding", "report_finding", "defect", "report_defect", "bug", "log_finding"].includes(at)) at = "register_finding";   // claim a defect AND supply the control that proves it
@@ -2365,6 +2381,26 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
           didExecute = true;
           history.push({ role: "user", content: `${peer.name} (${peer.role}) replied to your question:\n---\n${reply}\n---\nUse this input as you see fit. Continue toward the objective or finish.` });
         }
+      } else if ((next.actionType || "") === "ask_stakeholder") {
+        // Deliberately NOT an escalation: nothing waits, nothing polls, no approval is created, no agent goes into
+        // "waiting". The question becomes company state and the agent is told to carry on under its own assumption —
+        // and to write that assumption into the WORK, because an assumption only stated in a conversation is lost.
+        const shape = normalizeQuestion({ question: next.title, assumption: next.command, affects: next.url || next.details });
+        if (!shape.ok) {
+          emitAct({ agent: who, depth, actionType: "ask_stakeholder", url: "", ok: false, bytes: 0, error: "shape" });
+          history.push({ role: "user", content: "That question was not queued: " + shape.reason + ". Ask it again properly, or carry on without it." });
+        } else {
+          let outcome = { added: true, question: shape.question };
+          await updateOrg((o) => { outcome = recordQuestion(o, { ...shape.question, by: who, runId: run.id }, Date.now()); }).catch(() => {});
+          didExecute = true;
+          (run.questions || (run.questions = [])).push({ ...shape.question, duplicate: !outcome.added });
+          emit(run, "question", { by: who, depth, question: shape.question.question, assumption: shape.question.assumption,
+                                  affects: shape.question.affects, duplicate: !outcome.added });
+          emitAct({ agent: who, depth, actionType: "ask_stakeholder", url: shape.question.affects, ok: true, bytes: shape.question.question.length, error: "" });
+          history.push({ role: "user", content: outcome.added
+            ? "Queued for the CEO. NOBODY is waiting on it, so carry on under your assumption (" + shape.question.assumption + ") — and write that assumption into the work itself, not just here, or it is lost when this run ends."
+            : "That question is already in the queue, so it was not added twice. Carry on under the assumption already recorded: " + outcome.question.assumption });
+        }
       } else if ((next.actionType || "") === "register_finding") {
         // A claim becomes a finding only if the RUNNER can observe the control. The agent supplies a check and a fix;
         // verifyFinding runs them in a throwaway worktree and requires fail -> pass -> fail-again. A rejection goes
@@ -3138,6 +3174,77 @@ async function failRun(run, message, extra = {}) {
 // Create a run object and kick it off. Returns { run, done } where done resolves when it finishes.
 // Reused by POST /api/run and the scheduler.
 // Turn a goal into a concrete run objective (used by "Work on it" and goal schedules).
+// ---- the stakeholder question queue: an open question must not stop the work -----------------------------------
+//
+// Bureau already had escalate, and escalate is the wrong shape for a question about SCOPE. It either creates a Latch
+// approval and polls it for ten minutes with the agent parked, or — in playtest — tells the agent to "proceed with
+// reasonable assumptions" and lets the assumption evaporate into the conversation, where nobody ever sees what was
+// assumed. Both are wrong for the same reason: a decision only the CEO can make (is this activity in scope? what is
+// the cutoff? whose name goes on the licence?) is rarely urgent, is cheap to answer in a batch, and is ruinous to
+// wait for one at a time.
+//
+// The 4water benchmark ran 156 commits with six such questions open. Not one of them blocked: each got an explicit
+// assumption written into the artifact, and the CEO answered five in a single message near the end. That is the shape
+// worth building — a question is recorded, deduped, carried forward to later runs, and NEVER waited on.
+//
+// The gate that makes it work: a question with no assumption is REFUSED, because a question with no assumption is a
+// request to stop working, and stopping is the thing this mechanism exists to avoid.
+const QUESTION_STOPWORDS = new Set(["the","a","an","is","are","was","were","do","does","did","should","shall","can","could","would","we","i","it","its","to","of","for","in","on","at","and","or","be","by","this","that","with","what","which","who","how","when","where","why","any","as","from","if","whether","use","used","using","there"]);
+// Dedup key. Significant words, sorted — so wording, order and punctuation can drift without producing a second copy
+// of the same question. It is a heuristic and will miss a genuine paraphrase; that costs a duplicate in the queue,
+// which the CEO can see and ignore, rather than a lost question.
+export const questionKey = (t) => String(t == null ? "" : t).toLowerCase().replace(/[^a-z0-9\s]/g, " ")
+  .split(/\s+/).filter((w) => w && !QUESTION_STOPWORDS.has(w)).sort().join(" ");
+
+// An assumption phrased as a question is not a decision — it is the question a second time, and it leaves the work
+// parked exactly as if no assumption had been given.
+const ASSUMPTION_IS_A_QUESTION = /^(should|shall|could|would|can|may|might|do|does|did|is|are|was|were|which|what|who|whom|when|where|why|how|if|whether|perhaps|maybe|unclear|unsure|tbd)\b/i;
+
+export function normalizeQuestion(body) {
+  const t = (v, n) => String(v == null ? "" : v).trim().slice(0, n);
+  const question = t(body && (body.question != null ? body.question : body.title), 400);
+  const assumption = t(body && (body.assumption != null ? body.assumption : body.command), 400);
+  const affects = t(body && (body.affects != null ? body.affects : (body.url != null ? body.url : body.details)), 200);
+  if (!question) return { ok: false, reason: "there is no question in it" };
+  if (!assumption) {
+    return { ok: false, reason: "a question with no assumption is a request to stop working — say what you are "
+      + "proceeding with in the meantime, so an answer only has to correct it rather than unblock it" };
+  }
+  if (!affects) {
+    return { ok: false, reason: "say WHERE that assumption is written down (a file, a field, a document), or an "
+      + "answer arrives with nothing to apply it to" };
+  }
+  if (assumption.endsWith("?") || ASSUMPTION_IS_A_QUESTION.test(assumption)) {
+    return { ok: false, reason: "that assumption is phrased as a question, so it is not a decision — write the "
+      + "choice you actually made and proceeded with" };
+  }
+  if (questionKey(question) === questionKey(assumption)) return { ok: false, reason: "the assumption only repeats the question" };
+  return { ok: true, question: { question, assumption, affects } };
+}
+
+// Dedup runs against every question ever asked, ANSWERED ONES INCLUDED. Re-asking a settled decision is worse than a
+// duplicate: it invites a CEO to relitigate a choice they already made, and it is how an agent quietly undoes one.
+export function recordQuestion(org, rec, now = 0) {
+  org.questions = Array.isArray(org.questions) ? org.questions : [];
+  const key = questionKey(rec.question);
+  const dup = org.questions.find((q) => q._key === key);
+  if (dup) { dup.asked = (dup.asked || 1) + 1; dup.lastAt = now; return { added: false, question: dup }; }
+  const q = { id: "q" + Number(now || 0).toString(36) + "-" + (org.questions.length + 1), _key: key, status: "open",
+              question: rec.question, assumption: rec.assumption, affects: rec.affects,
+              by: rec.by || "", runId: rec.runId || "", at: now, asked: 1, answer: "" };
+  org.questions = [q, ...org.questions].slice(0, 200);
+  return { added: true, question: q };
+}
+
+export function answerQuestion(org, id, answer, now = 0) {
+  const q = (org.questions || []).find((x) => x.id === id);
+  if (!q) return { ok: false, reason: "no question has that id" };
+  const a = String(answer == null ? "" : answer).trim().slice(0, 600);
+  if (!a) return { ok: false, reason: "an empty answer is not an answer" };
+  q.answer = a; q.status = "answered"; q.answeredAt = now;
+  return { ok: true, question: q };
+}
+
 // ---- the investigate phase: a second phase whose exit condition is EXHAUSTION, not satisfaction ---------------
 //
 // Why this exists, and it is the single finding from the 4water benchmark most worth building in. That app was
@@ -4555,6 +4662,38 @@ const server = createServer(async (req, res) => {
       const id = p.split("/")[3];
       await updateOrg((o) => { o.triggers = (o.triggers || []).filter((x) => x.id !== id); });
       return send(res, 200, { ok: true });
+    }
+
+    // ----- the stakeholder question queue: the one human touchpoint designed to be answered in a BATCH -----
+    // Read-only tokens can see the queue; answering is an operator act, because an answer becomes a standing decision
+    // every later run applies.
+    if (p === "/api/questions" && req.method === "GET") {
+      const qs = (await readOrg()).questions || [];
+      const open = qs.filter((q) => q.status === "open");
+      const only = url.searchParams.get("status") || "";
+      return send(res, 200, { questions: only === "open" ? open : only === "answered" ? qs.filter((q) => q.status === "answered") : qs,
+                              open: open.length, total: qs.length });
+    }
+    // A decision the CEO settles up front, before an agent has to ask. Same record, already answered.
+    if (p === "/api/questions" && req.method === "POST") {
+      const body = await readBody(req);
+      const question = String(body.question || "").trim().slice(0, 400);
+      const answer = String(body.answer || "").trim().slice(0, 600);
+      if (!question || !answer) return send(res, 400, { error: "a standing decision needs both the question it settles and the answer" });
+      let q = null;
+      await updateOrg((o) => {
+        const { question: rec } = recordQuestion(o, { question, assumption: answer, affects: String(body.affects || "set by the CEO").slice(0, 200), by: "CEO" }, Date.now());
+        answerQuestion(o, rec.id, answer, Date.now());
+        q = rec;
+      });
+      return send(res, 200, { question: q });
+    }
+    if (p.startsWith("/api/questions/") && p.endsWith("/answer") && req.method === "POST") {
+      const id = decodeURIComponent(p.split("/")[3] || "");
+      const body = await readBody(req);
+      let out = { ok: false, reason: "no question has that id" };
+      await updateOrg((o) => { out = answerQuestion(o, id, body.answer, Date.now()); });
+      return out.ok ? send(res, 200, { question: out.question }) : send(res, 400, { error: out.reason });
     }
 
     // ----- policies (declarative rule table over guardrails + tiers) -----

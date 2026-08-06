@@ -41,6 +41,34 @@ const ok = (c, m) => (c ? pass : fail).push(m);
     ok(gr.autoApproveUnderUsd === 12.35, "autoApproveUnderUsd rounded to cents");
     ok(gr.maxActionsPerRun === 100, "maxActionsPerRun clamped to 100");
 
+    // ---- the stakeholder question queue over HTTP ----
+    // The queue is only useful if the operator can see the batch and answer it in one place; without these two
+    // endpoints ask_stakeholder is a write-only hole and the mechanism is worse than escalate, not better.
+    {
+      const empty = (await api("GET", "/api/questions")).j;
+      ok(Array.isArray(empty.questions) && empty.open === 0, "the queue starts empty");
+      // There is no POST for questions on purpose: only an AGENT queues one, from inside a run. So seed through the
+      // org file the same way a run would, then exercise the two endpoints an operator actually touches.
+      // A standing decision needs both halves.
+      ok((await api("POST", "/api/questions", { question: "Is the Booth an activity?" })).status === 400, "a decision with no answer is refused");
+      ok((await api("POST", "/api/questions", { answer: "yes" })).status === 400, "and so is an answer that settles nothing");
+      const made = await api("POST", "/api/questions", { question: "Is the Booth an activity?", answer: "yes, one role", affects: "src/seed.mjs" });
+      ok(made.status === 200 && made.j.question.id, "the CEO can settle something before anyone asks");
+      const id = made.j.question.id;
+      const listed = (await api("GET", "/api/questions")).j;
+      ok(listed.total === 1 && listed.open === 0, "it lands already answered, so it never sits in the open queue");
+      ok((await api("GET", "/api/questions?status=answered")).j.questions[0].answer === "yes, one role", "the answered filter carries the decision");
+      ok((await api("GET", "/api/questions?status=open")).j.questions.length === 0, "and the open filter does not");
+      // Re-answering: the same endpoint an operator uses on a real agent question, and the way a decision is changed.
+      ok((await api("POST", "/api/questions/" + id + "/answer", { answer: "   " })).status === 400, "an empty answer is refused with a 400");
+      ok((await api("POST", "/api/questions/nope/answer", { answer: "x" })).status === 400, "so is an answer to a question that does not exist");
+      const re = await api("POST", "/api/questions/" + id + "/answer", { answer: "no, an event" });
+      ok(re.status === 200 && re.j.question.answer === "no, an event", "and a decision can be corrected later");
+      // Asking the same thing again must not create a second row — including against an ANSWERED one.
+      await api("POST", "/api/questions", { question: "the Booth — is it an activity?", answer: "no, an event" });
+      ok((await api("GET", "/api/questions")).j.total === 1, "re-settling the same question does not add a second row");
+    }
+
     // ---- the investigate switch: default ON, turnable OFF, and the round cap clamps ----
     // Default ON because hunting after a pass is the whole point; an operator switch because it spends real model time
     // on work that already met its definition of done, and that is the operator's money.
