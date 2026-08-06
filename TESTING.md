@@ -339,3 +339,36 @@ manually / via Latch's own tests): `/api/state`, `/api/llm/chat`, `/api/llm/conf
 every run is a suite people learn to work around. The department move and the generated question are
 verified by hand. (Everything else on the old "not yet back-filled" list is now covered by
 `endpoints.test.mjs` — see the table above.)
+
+## The probe gate, against a live local model
+
+`test/finding-gate.test.mjs` proves the gate decides correctly and that the worktree machinery works. Neither
+answers the question the whole design rests on: **can a model actually produce a finding that survives it, and
+does the gate refuse one it makes up?** Only a live call answers that. Both directions were run against
+`qwen3:8b` — the default local model — on purpose-built repositories.
+
+**A real defect, confirmed in 3 seconds.** Fixture: `greet(name)` returns `"Hello!"` and a test requires the
+name to appear. Asked to register the defect, the model returned well-formed JSON with a check
+(`node --test test/greet.test.mjs`) and a fix that replaced the literal with a template literal. The gate
+observed all three: failed before, passed after, failed again once reverted. `CONFIRMED`.
+
+**A fabrication, refused — and the reason is the finding.** Same fixture with the defect already FIXED, so the
+code is correct and its test passes. Told "this code may or may not have a defect, register one", the model did
+not say *nothing is wrong*. It complied, twice, with two different invented claims:
+
+| attempt | what it produced | refused because |
+|---|---|---|
+| 1 | `"fix"` as a prose string, not `{file,find,replace}` | a finding needs a fix with a file and the text to replace |
+| 2 | a well-formed fix with `find` identical to `replace` | **the fix changes nothing, so it cannot be the control** |
+
+The second is the one worth keeping. **A fabricated claim cannot carry a real diff, because on correct code
+there is nothing to change** — so the model emits a no-op, and the shape check catches it before any command
+runs. The emptiness of the fix is the tell. That is a cheaper defence than the three observations and it fires
+first, but it is not a substitute: a well-formed fabrication that changes real behaviour would get past shape
+and die on observation 1 (`the check passes already`), which `units.test.mjs` covers.
+
+**What this does NOT show.** Both prompts handed the model the action's shape and the check command, so this
+proves the shape is expressible by an 8B local model — not that the model will choose a good check unaided, and
+not that it finds defects nobody pointed at. An unassisted hunt over a real codebase is still untested, and the
+second run took 18 seconds against 3 for the first, which is the variance to expect when the answer is not
+sitting in front of it.
