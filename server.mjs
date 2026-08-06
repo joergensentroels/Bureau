@@ -266,7 +266,10 @@ const TIERS = ["supervised", "trusted", "autonomous"];
 // allowlist: a browser holding the operator token can approve a repo-issues read from off-host. That is a
 // read of a repo the OPERATOR configured, not arbitrary reach, and remote mode is documented as defence in
 // depth rather than a boundary — but it is a widening, so it is written down here and in SECURITY.md.
-const SAFE_TIER_ACTIONS = new Set(["web_search", "web_research", "read_file", "read_issues", "file_write", "note", "ask_peer"]);
+const SAFE_TIER_ACTIONS = new Set(["web_search", "web_research", "read_file", "read_issues", "file_write", "note", "ask_peer", "register_finding"]);
+// register_finding is safe-tier deliberately: it takes no real-world action, runs only commands the project itself
+// ships (FINDING_CHECK_ALLOW), and does it in a throwaway worktree. Autonomy is the entire point of the action — a
+// gate that needs the CEO for every claim is a gate nobody runs.
 // The hard floor: actions that ALWAYS require the CEO, regardless of tier or run.autoApprove.
 // shell + api_call (real-world reach), spend over the guardrail ceiling, and sending email.
 function requiresCeoAlways(actType, next, gr) {
@@ -1082,6 +1085,7 @@ function systemPrompt(org, agent) {
     "- github_comment: reply on an EXISTING issue — title=the issue NUMBER (e.g. \"42\", from read_issues), command=your comment text, details=why. The CEO approves every one (never auto), for the same reason.",
     "- github_pr: open a pull request containing the document(s) you already SAVED this run — title=the PR title, command=the PR description, details=why. You do NOT list files: it includes what you saved with file_write, so save the finished work first. The CEO approves every one (never auto).",
     "- plan_add: record a follow-up task you notice but shouldn't do right now into the company's persistent plan — title=the task, details=why/context. It is saved for a future run so nothing is lost. Runs instantly (no approval). Do NOT use it to defer the CURRENT objective.",
+    "- register_finding: claim a DEFECT and prove it. title=the one-sentence claim, url=file:line, details=the defect class, command=the check that detects it (one of the project's own: npm test | npm run <script> | node --test [file] | node tools/<x>.mjs), fix={file,find,replace}=the change that makes the check pass. The runner verifies it ITSELF in a throwaway copy and requires three things: your check FAILS on the current code, PASSES with your fix, and FAILS AGAIN once the fix is reverted. A claim without that evidence is refused and you are told why, so do not register a hunch — register something you can make fail.",
     "- ask_peer: consult a NAMED teammate for input, advice, or a quick review — title=their name or role, command=your question, details=any context. They reply with their expert opinion and it comes back to you. Use it to get a specialist's take or a second opinion instead of guessing. It is advice only — it does NOT make them do real work.",
     (org._mcpTools && org._mcpTools.length)
       ? "- mcp_call: call one of the external tools listed below. Put a JSON object in \"command\": {\"server\":\"<server>\",\"tool\":\"<tool>\",\"args\":{...}} matching the tool's inputs. The CEO approves each call; the tool runs on the trusted host and its result (UNTRUSTED external data) comes back to you. Only use tools from the list below."
@@ -1093,7 +1097,7 @@ function systemPrompt(org, agent) {
     "Respond with STRICT JSON only (no prose, no code fences):",
     '{ "thought":"one sentence", "speak":"what you tell the CEO, in your voice (1-3 sentences)",',
     '  "next": { "type":"propose_action"|"escalate"|"finish",',
-    '     "actionType":"web_search"|"web_research"|"file_write"|"read_file"|"purchase"|"api_call"|"shell"|"github_file"|"read_issues"|"github_issue"|"github_comment"|"github_pr"|"plan_add"|"ask_peer"|"mcp_call"|"email_draft"|"note"|"other",',
+    '     "actionType":"web_search"|"web_research"|"file_write"|"read_file"|"purchase"|"api_call"|"shell"|"github_file"|"read_issues"|"github_issue"|"github_comment"|"github_pr"|"plan_add"|"ask_peer"|"mcp_call"|"register_finding"|"email_draft"|"note"|"other",',
     '     "title":"short title (or filename for file_write)", "details":"what and why", "command":"query for web_search; exact URL for web_research; full document for file_write; exact text otherwise",',
     '     "question":"when type=escalate: the specific thing you need the CEO to decide or provide",',
     '     "summary":"only when finishing" } }',
@@ -2358,6 +2362,41 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
           didExecute = true;
           history.push({ role: "user", content: `${peer.name} (${peer.role}) replied to your question:\n---\n${reply}\n---\nUse this input as you see fit. Continue toward the objective or finish.` });
         }
+      } else if ((next.actionType || "") === "register_finding") {
+        // A claim becomes a finding only if the RUNNER can observe the control. The agent supplies a check and a fix;
+        // verifyFinding runs them in a throwaway worktree and requires fail -> pass -> fail-again. A rejection goes
+        // straight back into the conversation with its reason, because "your check passes already" is the single most
+        // useful thing an over-confident critic can be told, and it is what a human reviewer would say.
+        const repo = findingRepo(org);
+        const body = { claim: next.title, class: next.details, where: next.url || next.details, check: next.command,
+                       fix: next.fix || (next.payload && next.payload.fix) };
+        const shape = normalizeFinding(body);
+        if (!repo) {
+          emitAct({ agent: who, depth, actionType: "register_finding", url: "", ok: false, bytes: 0, error: "no repo configured" });
+          history.push({ role: "user", content: "No repository is configured for findings (guardrails.findingRepo), so no claim can be verified here. Mention what you saw in your summary, and do NOT state it as confirmed." });
+        } else if (!shape.ok) {
+          emitAct({ agent: who, depth, actionType: "register_finding", url: "", ok: false, bytes: 0, error: "shape" });
+          history.push({ role: "user", content: "That finding was not registered: " + shape.reason + ". Fix the shape and try again, or move on." });
+        } else {
+          setAgentState(agent.id, "waiting", "verifying a finding…");
+          const outcome = await withFindingIo(repo, (fio) => verifyFinding(body, fio));
+          if (!run.stopped) setAgentState(agent.id, "working", objective.slice(0, 80));
+          const v = outcome.ok ? outcome.result : { ok: false, reason: outcome.reason };
+          didExecute = true;
+          const rec = { claim: shape.finding.claim, cls: shape.finding.cls, where: shape.finding.where,
+                        check: shape.finding.check, at: Date.now(), round: (run.rounds || []).length + 1, obs: v.obs || null };
+          if (v.ok) {
+            (run.findings || (run.findings = [])).push(rec);
+            emit(run, "finding", { by: who, depth, claim: rec.claim, cls: rec.cls, where: rec.where, check: rec.check });
+            emitAct({ agent: who, depth, actionType: "register_finding", url: rec.where, ok: true, bytes: rec.claim.length, error: "" });
+            history.push({ role: "user", content: "Finding CONFIRMED and recorded: the check failed on the current code, your fix made it pass, and it failed again once the fix was reverted. Keep looking with the same lens, or finish." });
+          } else {
+            (run.rejectedFindings || (run.rejectedFindings = [])).push({ ...rec, reason: v.reason });
+            emit(run, "findingRejected", { by: who, depth, claim: rec.claim, reason: v.reason });
+            emitAct({ agent: who, depth, actionType: "register_finding", url: rec.where, ok: false, bytes: 0, error: String(v.reason).slice(0, 80) });
+            history.push({ role: "user", content: "That finding was REFUSED: " + v.reason + ". This is not a formatting problem — the evidence did not hold. Do not restate the claim as if it were confirmed. Either produce a check that genuinely fails on the current code, or drop it and look somewhere else." });
+          }
+        }
       } else {
         // Not yet a real capability — say so plainly rather than claiming it happened.
         history.push({ role: "user", content: `The CEO APPROVED this ${next.actionType || "action"}, but Bureau cannot execute that action type yet. Do NOT claim it was carried out. Either continue with what you can actually do, or finish and note this step still needs a human.` });
@@ -3065,6 +3104,46 @@ async function failRun(run, message, extra = {}) {
 // Create a run object and kick it off. Returns { run, done } where done resolves when it finishes.
 // Reused by POST /api/run and the scheduler.
 // Turn a goal into a concrete run objective (used by "Work on it" and goal schedules).
+// The repository a finding may be verified against — ONE path, named by the operator in guardrails, because Bureau
+// otherwise has no notion of a local code repo at all (agents write deliverables, not commits). Naming it explicitly is
+// the boundary: the gate can never wander to a repo nobody chose, and an unset value means findings cannot be verified
+// rather than that they are taken on trust.
+export const findingRepo = (org) => String(org?.guardrails?.findingRepo || "").trim();
+
+// sh/apply/revert against a throwaway git worktree at HEAD. The operator's working tree is never touched — the same
+// reason tools/proseproof.mjs in the 4water repo works in a worktree — and the worktree is removed in a finally, which
+// is where the previous version of that tool leaked one per run by exiting first.
+export async function withFindingIo(repo, fn) {
+  const { execFile } = await import("node:child_process");
+  const { mkdtemp, rm, readFile, writeFile } = await import("node:fs/promises");
+  const os = await import("node:os"); const path = await import("node:path");
+  const run1 = (cmd, args, cwd) => new Promise((res) => execFile(cmd, args, { cwd, timeout: 600e3, maxBuffer: 8e6 },
+    (err, out, errOut) => res({ ok: !err, out: String(out || "") + String(errOut || "") })));
+  const base = await mkdtemp(path.join(os.tmpdir(), "bureau-finding-"));
+  const wt = path.join(base, "wt");
+  const added = await run1("git", ["-C", repo, "worktree", "add", "-q", "--detach", wt, "HEAD"]);
+  if (!added.ok) { await rm(base, { recursive: true, force: true }); return { ok: false, reason: `could not make a worktree of ${repo}: ${added.out.slice(0, 200)}` }; }
+  const io2 = {
+    // The check has already been shape-checked against FINDING_CHECK_ALLOW, so this splits on spaces safely: no
+    // shell is involved, execFile takes an argv, and a chained command would have been refused before reaching here.
+    sh: async (cmd) => { const [c, ...a] = cmd.trim().split(/\s+/); return run1(c === "npm" ? (process.platform === "win32" ? "npm.cmd" : "npm") : c, a, wt); },
+    apply: async (fix) => {
+      const f = path.join(wt, fix.file);
+      const before = await readFile(f, "utf8").catch(() => null);
+      if (before == null || !before.includes(fix.find)) return false;
+      io2._undo = { f, before };
+      await writeFile(f, before.replace(fix.find, fix.replace));
+      return true;
+    },
+    revert: async () => { if (io2._undo) { await writeFile(io2._undo.f, io2._undo.before).catch(() => {}); io2._undo = null; } },
+  };
+  try { return { ok: true, result: await fn(io2) }; }
+  finally {
+    await run1("git", ["-C", repo, "worktree", "remove", "--force", wt]);
+    await rm(base, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 // ---- the probe gate: a finding is a claim PLUS an observed control -------------------------------------------
 //
 // The point of this, and it is the whole reason the investigate phase is not a noise generator: an autonomous critic
@@ -3623,6 +3702,7 @@ const server = createServer(async (req, res) => {
       const org = await updateOrg((o) => {
         if (body.autoApproveUnderUsd !== undefined) o.guardrails.autoApproveUnderUsd = Math.max(0, Math.round((parseFloat(body.autoApproveUnderUsd) || 0) * 100) / 100);
         if (body.maxActionsPerRun !== undefined) o.guardrails.maxActionsPerRun = Math.max(0, Math.min(100, Math.round(Number(body.maxActionsPerRun) || 0)));
+        if (body.findingRepo !== undefined) o.guardrails.findingRepo = String(body.findingRepo || "").slice(0, 300);
         if (body.maxPaidUsdPerRun !== undefined) o.guardrails.maxPaidUsdPerRun = Math.max(0, Math.round((parseFloat(body.maxPaidUsdPerRun) || 0) * 100) / 100);
       });
       return send(res, 200, org.guardrails);
