@@ -461,7 +461,7 @@ missed. Five live runs, and each one found a defect in **Bureau**, not in 4water
 | 2 | the phase did not run at all | `verdict === "passed"` requires *zero* unmet criteria, and the gate's minority-shortfall path leaves some unmet → verdict `"shortfall"`. The hook correctly declined. But the phase had **no way to be asked for**. Fixed: `mode: "hunt"`. |
 | 3 | 9 × `read_repo` → `ENOENT`, then it guessed `project/`, `app/`, `code/`, `source/` and escalated twice asking for the path | a path that does not exist returned ENOENT and never fell through to listing, so the listing was only reachable by sending a blank title. The error told the model nothing actionable, so it guessed — the exact behaviour this feature exists to remove. Fixed: any miss lists what is really there. |
 | 4 | listing worked (105 files), then `title="Read PLAN.md"` **9 times**, each returning the same listing | the model writes a human-readable label in `title` because that is what `title` means for every other action. Telling it otherwise in the doc line did not work and will not. Fixed: the runner resolves the target against the repository's own file list — `"Read PLAN.md"` → `PLAN.md`. |
-| 5 | listed 105 files, **read 10,246 bytes of README.md**, then: *"I'll provide a valid JSON response with the required structure"* and the round ended | the local 8B model loses the strict-JSON action format after a large file. Mitigated by capping a read at 4000 characters; **not fixed**, because the limit is the model. |
+| 5 | listed 105 files, **read 10,246 bytes of README.md**, then: *"I'll provide a valid JSON response with the required structure"* and the round ended | **first written up wrong.** I recorded this as the model losing the strict-JSON action format. It did not: the `say` event fired for that turn, and `say` only fires after the parse succeeds. The JSON was valid. The model read 10kB, had nothing to do with it, and finished. The real gap was that a read result ended with a *constraint* and no direction, while the lens instruction had been given once, a listing and 4000 characters earlier. Fixed: the read result now repeats the lens and states the three ways to proceed, one of which is "this lens shows nothing here". Reads are also capped at 4000 characters. |
 
 **Where this leaves it.** The machinery is now correct and observed end to end: hunt mode starts the phase on
 demand, one agent executes the lens verbatim, it lists the repository, resolves a loosely-named file, and reads
@@ -471,3 +471,28 @@ remaining obstacle is model capability at the action format, not wiring.
 That is worth stating plainly because four of the five defects above were invisible to 600 unit tests and 152
 API tests. Every one needed a real repository, a real model, and a printout of what the agent actually did. The
 tests were not wrong; they were testing the parts, and every defect was in the joins.
+
+### Run six: a real review loop, and the model refuting itself
+
+With the read result repeating the lens, the same hunt behaved completely differently — and this is the run worth
+reading:
+
+1. listed the repository (105 files);
+2. read `src/audit.mjs`;
+3. formed a hypothesis: *"/admin/invite/revoke is exempt from audit logging but should be audited as it changes
+   another person's access"*;
+4. read `test/audit.test.mjs` to check it, and noted the test flags POST routes in neither `AUDITED` nor
+   `NOT_AUDITED`;
+5. re-read `src/audit.mjs`;
+6. **refuted itself**: *"already in AUDITED as 'an invitation was withdrawn' — it meets…"*
+
+Hypothesis → check the test → check the source → withdraw the claim. That is the loop the lens exists to produce,
+and the gate never had to refuse anything because the agent got there first. Registering nothing was the correct
+outcome: `/admin/invite/revoke` **is** audited.
+
+It also exposed a cost defect. The agent proposed `web_search` twice — reaching for the only verifying-shaped
+tool it could see, when the answer was two files away — and each call spent the full 150-second
+`waitForExecution` deadline discovering there is no worker executor. **300 of the round's 349 seconds went on
+proving the same absence twice.** A timeout is now remembered for ten minutes and re-probed for 8 seconds instead
+of 150, self-healing the moment a worker returns: 300s → 158s on this exact run. And a search that fails during a
+hunt now says the repository is where a claim about code gets checked, rather than suggesting `web_research`.

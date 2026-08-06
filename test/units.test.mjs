@@ -13,7 +13,8 @@ import {
   startLogTee, webhookBody,
   normalizeFinding, verifyFinding, findingCheckAllowed,
   LENSES, pickLens, investigateObjective, investigate, seedLenses, activeLenses, bookLensRound,
-  normalizeLens, lensParaphrase, addProposedLens, lensProposalObjective, sigWords,
+  normalizeLens, lensParaphrase, addProposedLens, lensProposalObjective, sigWords, postReadGuidance,
+  executorProbeMs,
   repoPathSafe, readRepoFile, listRepoFiles, resolveRepoTarget,
   normalizeQuestion, questionKey, recordQuestion, answerQuestion, systemPrompt, unqueuedAssumption,
   buildUndecidedMsgs, normalizeUndecided, unaddressedUndecided, runInvestigateFlag,
@@ -947,6 +948,50 @@ console.log("# investigate — reading the repository under investigation, and s
     const sub = await listRepoFiles(R, "src");
     eq("  a subdirectory can be listed on its own", sub.files, ["src/db.mjs"]);
   } finally { rmSync(R, { recursive: true, force: true }); }
+}
+console.log("# an absent worker executor must not be re-proved at full price");
+{
+  // Measured on a real hunting round: two web_search actions spent 300 of the round's 349 seconds establishing the same
+  // fact twice — that no worker executor exists. waitForExecution polled its whole 150-second deadline both times.
+  const NOW = 1000000;
+  eq("  never seen absent: the full deadline", executorProbeMs(NOW, 0), 150000);
+  eq("  seen absent a minute ago: a short probe", executorProbeMs(NOW, NOW - 60000), 8000);
+  eq("  seen absent 20 minutes ago: full again, so it self-heals", executorProbeMs(NOW, NOW - 1200000), 150000);
+  eq("  exactly at the ttl boundary it is full again", executorProbeMs(NOW, NOW - 600000), 150000);
+  // The control: a function that always returned the short probe would pass line two and fail these.
+  chk("  the short probe is genuinely shorter", executorProbeMs(NOW, NOW - 1) < executorProbeMs(NOW, 0));
+  eq("  and the observed round would now cost 158s instead of 300s", (150000 + executorProbeMs(NOW, NOW - 1)) / 1000, 158);
+  {
+    const src = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
+    chk("  waitForExecution uses it rather than the raw deadline", src.includes("executorProbeMs(Date.now(), EXECUTOR_ABSENT_AT, ms)"));
+    chk("  a success forgets the memo, so a returning worker is not penalised", src.includes("EXECUTOR_ABSENT_AT = 0;"));
+    chk("  and a timeout records it", src.includes("EXECUTOR_ABSENT_AT = Date.now();"));
+    chk("  a failed search during a hunt points back at the repository", src.includes("the repository is the place to check a claim about the code"));
+  }
+}
+console.log("# investigate — after a file comes back, the agent is told what to do with it");
+{
+  // Live run five, and the write-up of it was wrong first time round. The model read 10kB of README, produced a
+  // PERFECTLY VALID turn whose speak was "I'll provide a valid JSON response with the required structure", and finished
+  // with nothing. I recorded that as the model losing the JSON format — it cannot have been: the "say" event only fires
+  // after safeParse succeeds. The real gap was that the read result ended with a constraint and no direction, while the
+  // lens instruction had been given once, a listing and 4000 characters of source earlier.
+  const run = { phase: "investigate", currentLens: LENSES[3] };
+  const g = postReadGuidance(run);
+  chk("  it repeats the lens instruction verbatim, where the decision is made", g.includes(LENSES[3].prompt));
+  chk("  it offers reading another file", /read_repo/.test(g));
+  chk("  it offers registering a finding, with the evidence rule attached", /register_finding/.test(g) && /fails because of it/.test(g));
+  chk("  it offers the empty answer, and says it is usually the right one", /shows nothing here/.test(g) && /right one most/.test(g));
+  chk("  and it forbids finishing without saying which", /Do NOT finish without saying which/.test(g));
+  // The controls: this must not fire outside a hunting round, or every construction file_read gets a hunting lecture.
+  eq("  nothing during ordinary construction", postReadGuidance({ phase: "work", currentLens: LENSES[0] }), "");
+  eq("  nothing when no lens is in play", postReadGuidance({ phase: "investigate" }), "");
+  eq("  and nothing for a run object that has neither", postReadGuidance({}), "");
+  {
+    const src = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
+    chk("  the read result appends it", src.includes("postReadGuidance(run)}"));
+    chk("  and the round records which lens is in play, or there is nothing to repeat", src.includes("run.currentLens = lens"));
+  }
 }
 console.log("# investigate — the completeness critic, and what stops it filling the register with junk");
 {
