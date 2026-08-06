@@ -2044,6 +2044,14 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
         history.push({ role: "user", content: "STOP — you tried to finish, but NOTHING has actually run yet: no file was saved, no search or fetch happened. Your words do not perform actions. You MUST emit a propose_action now (web_search / web_research / file_write) to actually do the work. Do not finish until a result message confirms it ran." });
         continue;
       }
+      // A decision nobody sanctioned must not leave together with the work. One nudge per run, and only when no
+      // question has been queued — an agent that already queued one has done the right thing and must not be badgered.
+      const tell = unqueuedAssumption(next.summary) || unqueuedAssumption(run.wroteText);
+      if (tell && !(run.questions || []).length && !run._qNudged) {
+        run._qNudged = true;
+        history.push({ role: "user", content: `Before you finish: your summary says "${tell}", so you made a call that nobody sanctioned. Queue it — propose_action with actionType "ask_stakeholder": title=the question the CEO has to settle, command=the assumption you proceeded on, url=where you wrote it down. It does NOT wait for an answer, so finish immediately afterwards. If on reflection nothing was actually assumed, say so and finish.` });
+        continue;
+      }
       summary = next.summary || "Done."; emit(run, "finish", { agent: who, depth, summary }); break;
     }
 
@@ -2221,6 +2229,10 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
         emitAct({ agent: who, depth, actionType: "file_write", url: r.ok ? `drafts/${r.name}` : "", ok: r.ok, bytes: r.ok ? r.bytes : 0, error: r.ok ? "" : r.error });
         if (r.ok) {
           didExecute = true; run.wroteFile = true; if (!filesWritten.includes(r.name)) filesWritten.push(r.name);
+          // The finish guard reads this, not the summary. A live run showed why: the summary was "Done." while the
+          // unsanctioned choice sat in the document — the narration is where an assumption is LEAST likely to appear,
+          // because an agent that has written it down considers it handled.
+          run.wroteText = ((run.wroteText || "") + " " + String(next.command || "")).slice(-6000);
           artifacts.push({ title: `saved drafts/${r.name}`, detail: String(next.command || next.details || "").slice(0, 500) });
           history.push({ role: "user", content: `APPROVED and EXECUTED — your document was really saved to drafts/${r.name} (${r.bytes} bytes). It exists on disk now. Continue toward the objective or finish.` });
         } else {
@@ -3199,6 +3211,8 @@ export const questionKey = (t) => String(t == null ? "" : t).toLowerCase().repla
 // An assumption phrased as a question is not a decision — it is the question a second time, and it leaves the work
 // parked exactly as if no assumption had been given.
 const ASSUMPTION_IS_A_QUESTION = /^(should|shall|could|would|can|may|might|do|does|did|is|are|was|were|which|what|who|whom|when|where|why|how|if|whether|perhaps|maybe|unclear|unsure|tbd)\b/i;
+// Fabricated sanction: the assumption claims someone signed off. Nobody did — that is the point of the question.
+const CLAIMS_SANCTION = /\b(approved|authorised|authorized|signed off|sanctioned|agreed|confirmed|ratified|greenlit|green-lit|mandated|decided)\b/i;
 
 export function normalizeQuestion(body) {
   const t = (v, n) => String(v == null ? "" : v).trim().slice(0, n);
@@ -3218,6 +3232,13 @@ export function normalizeQuestion(body) {
     return { ok: false, reason: "that assumption is phrased as a question, so it is not a decision — write the "
       + "choice you actually made and proceeded with" };
   }
+  // An assumption may not claim it was sanctioned. Observed live: "Assuming the CEO approved the 2-year retention
+  // duration", which then reached the deliverable as "(assumed approved by CEO)". A guess that presents itself as a
+  // decision is worse than a guess, because it stops the next reader from asking.
+  if (CLAIMS_SANCTION.test(assumption)) {
+    return { ok: false, reason: "do not write that anyone approved or decided this — nobody has, that is why you are "
+      + "asking. State the choice as YOURS: what you picked and why" };
+  }
   if (questionKey(question) === questionKey(assumption)) return { ok: false, reason: "the assumption only repeats the question" };
   return { ok: true, question: { question, assumption, affects } };
 }
@@ -3234,6 +3255,26 @@ export function recordQuestion(org, rec, now = 0) {
               by: rec.by || "", runId: rec.runId || "", at: now, asked: 1, answer: "" };
   org.questions = [q, ...org.questions].slice(0, 200);
   return { added: true, question: q };
+}
+
+// An agent that had to invent something and finished anyway leaves the CEO with a decision they never knew was made.
+// The first live run of ask_stakeholder is what proved this necessary: given an objective with a hole only the CEO
+// could fill, and told plainly to flag it, qwen3:8b wrote the file, wrote its assumption into the file, and finished.
+// It never reached for the action and it never escalated either. The mechanism was perfectly reachable and nothing
+// asked it to reach. So the runner reads the summary for the tell, exactly as it already reads for a hallucinated
+// completion — the same principle as the probe gate: do not ask an agent to volunteer evidence about itself.
+const ASSUMPTION_TELLS = [
+  "assum", "i picked", "i chose", "we chose", "not specified", "unspecified", "not defined", "no decision",
+  "nobody has decided", "undecided", "unclear", "placeholder", "tbd", "to be decided", "to be confirmed",
+  "defaulted to", "arbitrar", "for now", "guessed", "best judgment", "best judgement", "should be confirmed",
+  "needs confirmation", "you may want to change", "subject to change", "pending a decision",
+  // Observed verbatim in the first live run, which is the only reason they are here:
+  "policy choice", "reasonable default", "sensible default", "subject to review", "reasonable starting point",
+  "can be adjusted", "may need to be adjusted", "left to the", "at the discretion",
+];
+export function unqueuedAssumption(text) {
+  const t = String(text == null ? "" : text).toLowerCase();
+  return ASSUMPTION_TELLS.find((w) => t.includes(w)) || "";
 }
 
 export function answerQuestion(org, id, answer, now = 0) {
@@ -4694,6 +4735,19 @@ const server = createServer(async (req, res) => {
       let out = { ok: false, reason: "no question has that id" };
       await updateOrg((o) => { out = answerQuestion(o, id, body.answer, Date.now()); });
       return out.ok ? send(res, 200, { question: out.question }) : send(res, 400, { error: out.reason });
+    }
+
+    // Drop a question: it was moot, or it got settled in person. Also the only way to let the same question be asked
+    // again from scratch, since the dedup key would otherwise match it forever.
+    if (p.startsWith("/api/questions/") && req.method === "DELETE") {
+      const id = decodeURIComponent(p.split("/")[3] || "");
+      let gone = false;
+      await updateOrg((o) => {
+        const before = (o.questions || []).length;
+        o.questions = (o.questions || []).filter((q) => q.id !== id);
+        gone = o.questions.length < before;
+      });
+      return gone ? send(res, 200, { ok: true }) : send(res, 404, { error: "no question has that id" });
     }
 
     // ----- policies (declarative rule table over guardrails + tiers) -----

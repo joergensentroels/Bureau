@@ -67,6 +67,9 @@ const ok = (c, m) => (c ? pass : fail).push(m);
       // Asking the same thing again must not create a second row — including against an ANSWERED one.
       await api("POST", "/api/questions", { question: "the Booth — is it an activity?", answer: "no, an event" });
       ok((await api("GET", "/api/questions")).j.total === 1, "re-settling the same question does not add a second row");
+      ok((await api("DELETE", "/api/questions/nope")).status === 404, "dropping a question that does not exist is a 404");
+      ok((await api("DELETE", "/api/questions/" + id)).status === 200, "dropping a question works");
+      ok((await api("GET", "/api/questions")).j.total === 0, "and it is really gone, so the same question can be asked afresh");
     }
 
     // ---- the investigate switch: default ON, turnable OFF, and the round cap clamps ----

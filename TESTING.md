@@ -372,3 +372,44 @@ proves the shape is expressible by an 8B local model — not that the model will
 not that it finds defects nobody pointed at. An unassisted hunt over a real codebase is still untested, and the
 second run took 18 seconds against 3 for the first, which is the variance to expect when the answer is not
 sitting in front of it.
+
+## The question queue, against a live local model
+
+Three runs against `qwen3:8b` in a throwaway workspace. One objective throughout: write a data-retention note
+for a tool storing volunteer names, emails and shift history, where **the retention period is undecided and
+there is no answer anywhere** — and the objective says plainly "do not stop for it, pick something sensible,
+write it down, and flag it."
+
+**Run 1 — the mechanism was reachable and never reached for.** The agent wrote the file, wrote its assumption
+*into* the file, and finished. It never used `ask_stakeholder`. It never escalated either. Nothing was wrong
+with the plumbing; nothing asked it to reach. Being told to "flag it" was not enough.
+
+**Run 2 — the fix was correct and useless.** A finish-time guard now read the summary for assumption
+language, on the probe-gate principle: don't ask an agent to volunteer evidence about itself. Still nothing.
+Printing the actual text showed why — the finish summary was the single word **`"Done."`**, while the choice
+sat in the document (*"2 years, a duration selected as a reasonable default and subject to review"*). Thirteen
+green unit assertions had proved only that the detector works on summaries *I* would have written. The
+narration is where an assumption is **least** likely to appear, because an agent that has written it down
+considers it handled.
+
+**Run 3 — the whole loop, observed.** With the guard reading the produced text instead:
+
+1. the agent wrote the doc containing "policy choice" — no question;
+2. it tried to finish; the runner read the **work**, found the tell, and pushed back once;
+3. it emitted `propose_action` / `ask_stakeholder`, correctly shaped: question in `title`, assumption in
+   `command`, location in `url`;
+4. the gate accepted it, the queue took it, the `question` event fired;
+5. **and it carried straight on** — rewrote the file with the assumption stated explicitly, and finished.
+   Nothing waited, no approval was created, no agent entered a waiting state.
+
+**A defect found in the run that succeeded.** The queued assumption read *"Assuming the CEO approved the
+2-year retention duration"*, which then reached the deliverable as *"(assumed approved by CEO)"*. The CEO
+approved nothing. A guess that presents itself as a decision is worse than a guess, because every reader
+downstream stops asking — so `normalizeQuestion` now refuses an assumption claiming approval, agreement or a
+decision, with a control asserting that *owning* the choice ("I picked 2 years, matching the accounting
+retention already in the docs") still passes.
+
+**What this does not show.** One model, one objective, one hole. The tell list is a keyword list and half of
+it was written from this transcript, so it is fitted to what this model says; a model that writes "the period
+is 2 years" flat, with no hedge at all, gets no nudge and the question is lost. Detecting *that* needs the
+criteria to know which facts had no source, which is a different mechanism.

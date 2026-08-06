@@ -13,7 +13,7 @@ import {
   startLogTee, webhookBody,
   normalizeFinding, verifyFinding, findingCheckAllowed,
   LENSES, pickLens, investigateObjective, investigate,
-  normalizeQuestion, questionKey, recordQuestion, answerQuestion, systemPrompt,
+  normalizeQuestion, questionKey, recordQuestion, answerQuestion, systemPrompt, unqueuedAssumption,
 } from "../server.mjs";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -827,6 +827,16 @@ console.log("# ask_stakeholder — a question that stops the work is refused");
   no("an assumption that ends in a question mark is not a decision", { ...good, assumption: "treat it as an activity?" }, "not a decision");
   no("nor is one that starts with 'should'", { ...good, assumption: "should it be an activity or an event" }, "not a decision");
   no("nor 'unclear'", { ...good, assumption: "unclear, waiting on the CEO" });
+  // A fabricated sanction, verbatim from the live run that otherwise SUCCEEDED — the mechanism worked and the
+  // wording was still dangerous, which is why the gate is the right place to catch it and not a prompt tweak.
+  no("an assumption that claims the CEO approved it", { ...good, assumption: "Assuming the CEO approved the 2-year retention duration" }, "nobody has");
+  no("or that it was agreed", { ...good, assumption: "the board agreed to treat it as an activity" }, "nobody has");
+  no("or decided", { ...good, assumption: "it was decided to be an activity" });
+  {
+    // The control: owning the choice is exactly what SHOULD be accepted, and the pattern must not swallow it.
+    const r = normalizeQuestion({ ...good, assumption: "I picked 2 years, matching the accounting retention already in the docs" });
+    chk("  while owning the choice is accepted", r.ok === true);
+  }
   no("an assumption that only restates the question",
      { question: "Which licence do we ship?", assumption: "the licence we ship", affects: "LICENSE" }, "repeats");
   {
@@ -900,6 +910,41 @@ console.log("# ask_stakeholder — the queue reaches the next run, which is what
   // the prompt is long.
   const bare = systemPrompt({}, agent);
   chk("  with an empty queue the prompt says none of it", !bare.includes("SETTLED") && !bare.includes("PROCEEDING AS IF"));
+}
+console.log("# ask_stakeholder — the runner notices an unsanctioned decision, because the agent will not");
+{
+  // This exists because of a negative live result, not a hunch: told to flag an undecidable, the model wrote the
+  // assumption into the artifact and finished without queueing anything. Reachable is not the same as reached for.
+  for (const s of ["I assumed 24 months.", "Retention is not specified anywhere, so I used 2 years.",
+                   "Left as a placeholder.", "Used my best judgment on the cutoff.", "Defaulted to 30 days for now.",
+                   "The period is TBD.", "I picked 12 months.", "This should be confirmed by the board."])
+    chk("  it reads the tell in: " + s, unqueuedAssumption(s) !== "");
+  // The controls. Without these, a detector that returned a truthy value for everything would pass every line above,
+  // and every run would end in a nudge the agent cannot satisfy.
+  for (const s of ["Saved retention.md with the 24-month period the CEO set.", "Wrote the note and verified it renders.",
+                   "", "Done.", "Searched, found three sources, and summarised them."])
+    eq("  and stays quiet on: " + JSON.stringify(s), unqueuedAssumption(s), "");
+  eq("  it reports WHICH tell it found, so the nudge can quote it", unqueuedAssumption("I assumed 24 months"), "assum");
+  // The fixtures above were invented. These two are verbatim from the first live run, and they are the ones that
+  // matter: the summary carried NOTHING and the document carried everything. Thirteen green assertions over made-up
+  // summaries proved only that the detector works on text I would have written.
+  eq("  a real finish summary from the live run is empty of tells", unqueuedAssumption("Done."), "");
+  chk("  while the document it wrote is full of them",
+      unqueuedAssumption("Shift history is retained for 2 years, a duration selected as a reasonable default and subject to review and potential adjustment based on legal, operational, or regulatory requirements.") !== "");
+  {
+    const src = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
+    chk("  so the finish guard reads the written work, not only the narration", src.includes("unqueuedAssumption(run.wroteText)"));
+    chk("  and something populates it", src.includes("run.wroteText = ((run.wroteText"));
+  }
+  {
+    const src = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
+    const fin = src.slice(src.indexOf('if (next.type === "finish") {'));
+    const body = fin.slice(0, fin.indexOf('if (next.type === "escalate")'));
+    const code = body.split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
+    chk("  the finish handler consults it", code.includes("unqueuedAssumption(next.summary)"));
+    chk("  nudges at most once per run", code.includes("!run._qNudged") && code.includes("run._qNudged = true"));
+    chk("  and never nudges an agent that already queued one", code.includes("!(run.questions || []).length"));
+  }
 }
 console.log("# ask_stakeholder — it is a safe action, and it is NOT an escalation");
 {
