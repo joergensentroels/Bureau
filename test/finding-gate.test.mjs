@@ -26,7 +26,7 @@ function makeRepo() {
     'import { value } from "../value.mjs";\n'
     + 'if (value !== 42) { console.error("value is " + value + ", wanted 42"); process.exit(1); }\n'
     + 'console.log("ok");\n');
-  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "gate-fixture", private: true, type: "module" }, null, 2) + "\n");
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "gate-fixture", private: true, type: "module", scripts: { test: "node --test test/v.test.mjs" } }, null, 2) + "\n");
   git(dir, "init", "-q");
   git(dir, "config", "user.email", "gate@example.invalid");
   git(dir, "config", "user.name", "gate");
@@ -103,5 +103,35 @@ try {
   rmSync(repo, { recursive: true, force: true });
 }
 
+
+// ---- every shape the allowlist permits, not just the convenient one -------------------------------------------
+//
+// This exists because `npm test` was IMPOSSIBLE on Windows for as long as the gate had existed and fifteen green
+// assertions here said nothing about it: execFile refuses to spawn a .cmd and throws synchronously, so the promise
+// never settled. Every fixture used `node --test`. The allowlist is the gate's contract; a contract with an
+// untested branch is a guess.
+{
+  const repo = makeRepo();   // value is 10, the suite wants 42 — so `npm test` FAILS here
+  try {
+    const viaNpm = { claim: 'value is 10 and the suite wants 42', class: 'B', where: 'value.mjs:1',
+                     check: 'npm test', fix: { file: 'value.mjs', find: '10', replace: '42' } };
+    const out = await withFindingIo(repo, (io) => verifyFinding(viaNpm, io));
+    const v = out.ok ? out.result : { ok: false, reason: out.reason };
+    chk('a finding is confirmed through `npm test`, not only through `node --test`' + (v.ok ? '' : ' — got: ' + v.reason), v.ok === true);
+    chk('and all three observations came from npm: ' + JSON.stringify(v.obs || {}), !!v.obs && v.obs.before === false && v.obs.after === true && v.obs.again === false);
+  } finally { rmSync(repo, { recursive: true, force: true }); }
+  // The control: npm must be able to report a PASSING check too, or 'confirmed' above only proves it ran at all.
+  const passing = makeRepo();
+  writeFileSync(join(passing, 'value.mjs'), 'export const value = 42;' + String.fromCharCode(10));
+  git(passing, 'add', '-A');
+  git(passing, 'commit', '-q', '-m', 'now the suite passes');
+  try {
+    const bogus = { claim: 'nothing is wrong here', class: 'B', where: 'value.mjs:1',
+                    check: 'npm test', fix: { file: 'value.mjs', find: '42', replace: '43' } };
+    const o2 = await withFindingIo(passing, (io) => verifyFinding(bogus, io));
+    const v2 = o2.ok ? o2.result : { ok: false, reason: o2.reason };
+    chk('and npm reporting a PASSING check refuses the claim: ' + (v2.reason || 'confirmed?!'), v2.ok === false && /passes already/.test(v2.reason || ''));
+  } finally { rmSync(passing, { recursive: true, force: true }); }
+}
 console.log(`\n${fail === 0 ? "ALL PASS ✓" : "FAILURES ✗"} — ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

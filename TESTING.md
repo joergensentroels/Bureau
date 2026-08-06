@@ -526,3 +526,35 @@ in one turn. An empty search result *is* evidence of absence, and the message sa
 
 Worth noting what did not go wrong: the gate would have refused that claim anyway, because no check command
 could have been made to fail. The false hypothesis cost a round, not a corrupted register.
+
+### Run nine: the gate could never run `npm test` on Windows
+
+With the harness given a real idle timeout (an AbortController reset per chunk — the old `LIMIT` check only ran
+*after* an event arrived, so a silent stream parked it forever and I went looking for a server-side stall that
+was not there), a three-round hunt surfaced three more defects.
+
+**`spawn EINVAL` — two of the four allowlisted check shapes were impossible.** The agent proposed a finding with
+`check: "npm test"` and the gate answered *"verification itself failed: spawn EINVAL"*, twice. Reproduced
+directly: `execFile("npm.cmd", …)` throws **synchronously** on Node 24 Windows (the `.cmd` spawn restriction from
+CVE-2024-27980), so the promise wrapper never settled either. `npm test` and `npm run <script>` have been
+unusable since the gate was written. **Eighteen green gate assertions said nothing about it, because every
+fixture used `node --test`.** npm now runs as `node <npm-cli.js> …` — same program, no shell, no `.cmd` — and
+`run1` catches a synchronous throw. Verified against 4water: `npm test` inside a throwaway worktree,
+`{ok: true}`, real test output.
+
+The instrument: the check allowlist is the gate's **contract**, and a contract with an untested branch is a
+guess. `finding-gate.test.mjs` now proves a finding end-to-end through `npm test` as well, with the control that
+npm reporting a *passing* check refuses the claim.
+
+**My anti-false-absence instrument manufactured a false absence.** `title="Read src/db.mjs"`,
+`command="src/db.mjs"` produced `SEARCH src/db.mjs for "src/db.mjs" → 0 matches`, and the agent immediately said
+*"the search has confirmed absence"*. The model puts the path in `command` at least as often as in `title`, so a
+term that resolves to a real file is now treated as a path, not a search string — and either field may carry it.
+
+**A finish wrapped in `propose_action` burned seven turns.** The model emitted `actionType: "finish"`, which
+matched no branch, so it fell through the dispatch and repeated itself seven times in one round. Now normalized
+to the finish it plainly is.
+
+And a fixture bug caught by checking the probe: `node --test <dir>` exits **1** on a plain script with no
+`test()` calls under Node 24, so the fixture's own `test` script had to name the file. Left unnoticed it would
+have reported a false failure *of the gate*.

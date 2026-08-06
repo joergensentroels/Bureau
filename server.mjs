@@ -2046,6 +2046,13 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
     const origAt = String(rawNext.actionType || "").toLowerCase();
     const next = normalizeAction(rawNext, objective);
     const corrected = (origAt && origAt !== String(next.actionType || "").toLowerCase()) ? origAt : "";
+    // Observed seven times in a row in one hunting round: the model wrapped its finish in propose_action, so it never
+    // matched the finish branch, fell through the action dispatch, and burned a turn each time saying the same thing.
+    // Treat it as the finish it plainly is.
+    if (next.type !== "finish" && /^(finish|done|complete|completed|end|stop|none|no_action|nothing|note)$/.test(String(next.actionType || "").toLowerCase())) {
+      next.type = "finish";
+      next.summary = next.summary || next.title || next.details || String(parsed.speak || "Done.");
+    }
     if (next.type === "finish") {
       // Guard against hallucinated completion: if the task needed a real action but none has actually
       // executed, refuse the finish and push the model to DO the action (up to 2 nudges, then relent).
@@ -2437,13 +2444,18 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
           // Resolve against the repository's own paths first: the agent writes a label ("Read PLAN.md") because that
           // is what title means everywhere else, and arguing with that in the doc line does not work.
           const all = await listRepoFiles(repo);
-          const target = want ? resolveRepoTarget(all.files || [], want) : null;
+          const termRaw = String(next.command || "").trim();
+          // Either field may hold the path; the model is not consistent about which.
+          const target = (want ? resolveRepoTarget(all.files || [], want) : null)
+                      || (termRaw ? resolveRepoTarget(all.files || [], termRaw) : null);
           // A blank path, a directory, or a path that names nothing all mean the same thing in practice: the agent does
           // not know what is in this repository yet. All three list. Only a confinement refusal is fatal, because that
           // one is a boundary rather than a mistake about the contents.
           // A term in "command" means SEARCH — the instrument that a prefix cap cannot defeat.
-          const term = String(next.command || "").trim();
-          if (term && term !== want) {
+          // A "term" that names a real file is a path, not something to grep for. Without this the instrument added
+          // to PREVENT false absence claims produced one: searching src/db.mjs for the string "src/db.mjs".
+          const term = termRaw;
+          if (term && term !== want && !resolveRepoTarget(all.files || [], term)) {
             const s = await searchRepoFiles(repo, term, target || "");
             if (s.ok) {
               didExecute = true;
@@ -3896,6 +3908,16 @@ export async function listRepoFiles(repo, sub = "", cap = 400) {
   return { ok: true, files: out.sort(), truncated: out.length >= cap };
 }
 
+// npm cannot be spawned directly on Windows: execFile refuses a .cmd (Node's CVE-2024-27980 fix) and throws
+// SYNCHRONOUSLY, so a promise wrapper never settles. Run npm's own JS entry point under this node binary instead —
+// same program, no shell, no .cmd, and it works identically on every platform. Falls back to the plain binary if the
+// layout is unfamiliar, so an unusual install degrades rather than breaks.
+const NPM_CLI = path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+export function npmArgv(args, execPath = process.execPath, cli = NPM_CLI, exists = existsSync) {
+  return exists(cli) ? { bin: execPath, argv: [cli, ...args] }
+                     : { bin: process.platform === "win32" ? "npm.cmd" : "npm", argv: args };
+}
+
 // The repository a finding may be verified against — ONE path, named by the operator in guardrails, because Bureau
 // otherwise has no notion of a local code repo at all (agents write deliverables, not commits). Naming it explicitly is
 // the boundary: the gate can never wander to a repo nobody chose, and an unset value means findings cannot be verified
@@ -3909,8 +3931,14 @@ export async function withFindingIo(repo, fn) {
   const { execFile } = await import("node:child_process");
   const { mkdtemp, rm, readFile, writeFile } = await import("node:fs/promises");
   const os = await import("node:os"); const path = await import("node:path");
-  const run1 = (cmd, args, cwd) => new Promise((res) => execFile(cmd, args, { cwd, timeout: 600e3, maxBuffer: 8e6 },
-    (err, out, errOut) => res({ ok: !err, out: String(out || "") + String(errOut || "") })));
+  // The try/catch is load-bearing: execFile can throw synchronously (EINVAL on a .cmd), and without it the promise
+  // never settles and the whole verification hangs or unwinds past its own error handling.
+  const run1 = (cmd, args, cwd) => new Promise((res) => {
+    try {
+      execFile(cmd, args, { cwd, timeout: 600e3, maxBuffer: 8e6 },
+        (err, out, errOut) => res({ ok: !err, out: String(out || "") + String(errOut || "") }));
+    } catch (e) { res({ ok: false, out: "could not start " + cmd + ": " + e.message }); }
+  });
   const base = await mkdtemp(path.join(os.tmpdir(), "bureau-finding-"));
   const wt = path.join(base, "wt");
   const added = await run1("git", ["-C", repo, "worktree", "add", "-q", "--detach", wt, "HEAD"]);
@@ -3918,7 +3946,11 @@ export async function withFindingIo(repo, fn) {
   const io2 = {
     // The check has already been shape-checked against FINDING_CHECK_ALLOW, so this splits on spaces safely: no
     // shell is involved, execFile takes an argv, and a chained command would have been refused before reaching here.
-    sh: async (cmd) => { const [c, ...a] = cmd.trim().split(/\s+/); return run1(c === "npm" ? (process.platform === "win32" ? "npm.cmd" : "npm") : c, a, wt); },
+    sh: async (cmd) => {
+      const [c, ...a] = cmd.trim().split(/\s+/);
+      const { bin, argv } = c === "npm" ? npmArgv(a) : { bin: c, argv: a };
+      return run1(bin, argv, wt);
+    },
     apply: async (fix) => {
       const f = path.join(wt, fix.file);
       const before = await readFile(f, "utf8").catch(() => null);

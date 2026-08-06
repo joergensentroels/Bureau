@@ -11,7 +11,7 @@ import {
   objectiveSignature, dedupeMemories, deliverableEmbedText, deliverableTitle,
   chunkDocument, deliverableChunks, modelUnreachable, trimVersions, clientKey, isLoopback,
   startLogTee, webhookBody,
-  normalizeFinding, verifyFinding, findingCheckAllowed,
+  normalizeFinding, verifyFinding, findingCheckAllowed, npmArgv,
   LENSES, pickLens, investigateObjective, investigate, seedLenses, activeLenses, bookLensRound,
   normalizeLens, lensParaphrase, addProposedLens, lensProposalObjective, sigWords, postReadGuidance,
   executorProbeMs,
@@ -844,6 +844,26 @@ console.log("# investigate — the lens register is the COMPANY's, and it learns
     chk("  and every round is booked against the company, dry ones included", src.includes("bookLensRound(o, round.lens, round.confirmed"));
   }
 }
+console.log("# the gate runs npm without a shell and without a .cmd");
+{
+  // execFile refuses to spawn a .cmd on Windows and throws SYNCHRONOUSLY, so `npm test` — one of four shapes the
+  // check allowlist permits — could never run here, and the promise wrapper never settled either.
+  const cli = 'C:/x/node_modules/npm/bin/npm-cli.js';
+  const found = npmArgv(['test'], 'C:/x/node.exe', cli, () => true);
+  eq('  npm runs as a script under this node binary', [found.bin, found.argv], ['C:/x/node.exe', [cli, 'test']]);
+  eq('  and a script name is passed through', npmArgv(['run', 'lint'], 'C:/x/node.exe', cli, () => true).argv, [cli, 'run', 'lint']);
+  // The control: an unfamiliar install must degrade to the plain binary rather than pointing at a missing file.
+  const missing = npmArgv(['test'], 'C:/x/node.exe', cli, () => false);
+  chk('  an unfamiliar layout falls back to the plain binary', missing.bin !== 'C:/x/node.exe' && missing.argv.join(' ') === 'test');
+  {
+    const src = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
+    chk('  io.sh uses it rather than spawning npm directly', src.includes('c === "npm" ? npmArgv(a)'));
+    chk('  and run1 survives a synchronous spawn failure', src.includes('could not start '));
+    chk('  a path in "command" is not treated as a search term', src.includes('&& !resolveRepoTarget(all.files || [], term)'));
+    chk('  either field may carry the path', src.includes('Either field may hold the path'));
+    chk('  and a finish wrapped in propose_action is treated as a finish', src.includes('next.type = "finish";'));
+  }
+}
 console.log("# investigate — a truncated read cannot show ABSENCE, so there is a search that can");
 {
   // The defect this closes was mine, and it manufactured a false finding. Round two of a five-round hunt claimed "the
@@ -885,7 +905,8 @@ console.log("# investigate — a truncated read cannot show ABSENCE, so there is
     {
       const src = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
       chk("  a truncated read tells the agent it cannot prove absence", src.includes("can never show that something is MISSING"));
-      chk("  a term in command searches instead of reading", src.includes("if (term && term !== want)"));
+      chk("  a term in command searches instead of reading — but only when it does not name a file",
+        src.includes("if (term && term !== want && !resolveRepoTarget(all.files || [], term))"));
       chk("  and an unattended hunting round redirects a hard-floor action instead of waiting ten minutes for a CEO",
           src.includes("hunting rounds are unattended") && src.includes('actType === "shell" || actType === "api_call"'));
     }
@@ -918,7 +939,8 @@ console.log("# investigate — the runner works out which file was meant, instea
   }
   {
     const src = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
-    chk("  the dispatch resolves before it reads", src.includes("const target = want ? resolveRepoTarget(all.files || [], want) : null"));
+    chk("  the dispatch resolves before it reads, from whichever field carries the path",
+        src.includes("resolveRepoTarget(all.files || [], want)") && src.includes("resolveRepoTarget(all.files || [], termRaw)"));
     chk("  and a miss lists rather than dead-ending", src.includes("const listInstead ="));
   }
 }
