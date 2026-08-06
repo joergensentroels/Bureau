@@ -680,6 +680,11 @@ async function openGuardrails(){
       <div><label>Auto-approve purchases under ($ — 0 = off)</label><input id="gAuto" type="number" min="0" step="1" value="${g.autoApproveUnderUsd||0}"></div>
       <div><label>Max real actions per run (0 = unlimited)</label><input id="gCap" type="number" min="0" max="100" step="1" value="${g.maxActionsPerRun||0}"></div>
       <div><label>Max paid-model spend per run ($ — 0 = unlimited)</label><input id="gPaid" type="number" min="0" step="0.01" value="${g.maxPaidUsdPerRun||0}"></div>
+      <div><label><input id="gInv" type="checkbox" ${g.investigate===false?"":"checked"}> Hunt for defects after a run passes</label>
+        <div class="muted" style="font-size:12px">A passing run has met the criteria it derived, which is not the same as being right. With this on, the agent keeps looking — with a different lens each round — until two rounds in a row turn up nothing new. It costs model time on work that already passed, which is why it is a switch.</div></div>
+      <div><label>Hunting rounds (0 = the default of 8, max 20)</label><input id="gInvR" type="number" min="0" max="20" step="1" value="${g.investigateRounds||0}"></div>
+      <div><label>Repository a finding may be verified in (absolute path)</label><input id="gRepo" type="text" placeholder="C:\path\to\repo" value="${(g.findingRepo||"").replace(/"/g,"&quot;")}">
+        <div class="muted" style="font-size:12px">Left empty, claims CANNOT be verified — the agent is told so and must not state them as confirmed. Checks run in a throwaway copy of this repo; your working tree is never touched.</div></div>
       <div><label>Notification webhook <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">— optional; POSTed on run-done, run-failed &amp; needs-approval</span></label>
         <div class="row" style="gap:6px;align-items:center"><input id="gWebhook" type="text" placeholder="https://hooks.slack.com/… (blank = none)" value="${esc(nt.webhook||"")}" style="flex:1"><button id="gWhTest" title="Send a test event now and show what the endpoint actually answered">Test</button></div>
         <div id="gWhState" class="dim" style="font-size:11px;margin-top:4px">${notifyStateLine(nt.lastDelivery)}</div></div>
@@ -724,7 +729,7 @@ async function openGuardrails(){
   wrap.onclick=e=>{ if(e.target===wrap) wrap.remove(); };
   wrap.querySelector("#gc").onclick=()=>wrap.remove();
   wrap.querySelector("#gs").onclick=async()=>{
-    await api("POST","/api/guardrails",{ autoApproveUnderUsd:parseFloat(wrap.querySelector("#gAuto").value)||0, maxActionsPerRun:parseInt(wrap.querySelector("#gCap").value)||0, maxPaidUsdPerRun:parseFloat(wrap.querySelector("#gPaid").value)||0 });
+    await api("POST","/api/guardrails",{ autoApproveUnderUsd:parseFloat(wrap.querySelector("#gAuto").value)||0, maxActionsPerRun:parseInt(wrap.querySelector("#gCap").value)||0, maxPaidUsdPerRun:parseFloat(wrap.querySelector("#gPaid").value)||0, investigate:wrap.querySelector("#gInv").checked, investigateRounds:parseInt(wrap.querySelector("#gInvR").value)||0, findingRepo:wrap.querySelector("#gRepo").value||"" });
     await api("POST","/api/notify",{ webhook: wrap.querySelector("#gWebhook").value.trim() });
     const b=wrap.querySelector("#gs"); const t=b.textContent; b.textContent="Saved ✓"; setTimeout(()=>{ b.textContent=t; },1200);
   };
@@ -807,7 +812,7 @@ async function openTemplates(){
 }
 function histEventLine(ev){
   const d=ev.data||{}; const w=d.agent||d.manager||"";
-  const m={ start:"▶ start", plan:`plan → ${(d.tasks||[]).map(t=>t.agent).join(", ")}`, assign:`assign → ${d.agent||""}`, say:`turn ${d.turn||"?"}`, propose:`propose ${d.actionType||""}`, verdict:`${d.verdict||""}`, result:`${d.ok?"✓":"✗"} ${d.actionType||""} ${d.url||d.error||""}`, report:"report", done:`✔ done ${d.verdict||""}`, criteria:"criteria set", verify:`verify ${d.met}/${d.total}`, remediate:"sending back", blocked:`⛔ blocked ${d.actionType||""}`, planreview:"plan review", planapproved:"plan approved", planrejected:"plan rejected", ask_peer:`🗣 ${d.by||""} → ${d.to||""}`, peer_answer:`💬 ${d.from||""} → ${d.to||""}`, paused:"⏸ paused", resumed:"▶ resumed", steered:"🧭 course correction", error:`error ${d.message||""}` }[ev.type];
+  const m={ start:"▶ start", plan:`plan → ${(d.tasks||[]).map(t=>t.agent).join(", ")}`, assign:`assign → ${d.agent||""}`, say:`turn ${d.turn||"?"}`, propose:`propose ${d.actionType||""}`, verdict:`${d.verdict||""}`, result:`${d.ok?"✓":"✗"} ${d.actionType||""} ${d.url||d.error||""}`, report:"report", done:`✔ done ${d.verdict||""}`, criteria:"criteria set", verify:`verify ${d.met}/${d.total}`, remediate:"sending back", blocked:`⛔ blocked ${d.actionType||""}`, planreview:"plan review", planapproved:"plan approved", planrejected:"plan rejected", ask_peer:`🗣 ${d.by||""} → ${d.to||""}`, peer_answer:`💬 ${d.from||""} → ${d.to||""}`, lens:`🔎 round ${d.round||"?"} · ${d.lens||""}`, finding:`🐞 ${d.cls||"?"} ${d.where||""}`, findingRejected:`↩ refused: ${(d.reason||"").slice(0,40)}`, round:`round ${d.round||"?"} → ${d.confirmed||0} found`, investigated:`🔎 done: ${d.findings||0} found in ${d.rounds||0} rounds (${d.stoppedBecause||""})`, paused:"⏸ paused", resumed:"▶ resumed", steered:"🧭 course correction", error:`error ${d.message||""}` }[ev.type];
   if(m==null) return "";
   return `<div class="dl">${esc((w?w+" · ":"")+m)}</div>`;
 }
@@ -2140,6 +2145,11 @@ function handleEvent(ev){
   }
   else if(ev.type==="assign") addEv("assign",`${esc(d.by||"manager")} → ${esc(d.agent)}`,`<div class="muted" style="font-size:12px">${esc(d.task)}</div>${d.handoffFrom&&d.handoffFrom.length?`<div class="dim" style="font-size:11px;margin-top:4px">↪ handed ${esc(d.handoffFrom.join(", "))}'s work</div>`:""}`, dep);
   else if(ev.type==="ask_peer") addEv("assign",`${esc(d.by)} → ${esc(d.to)}`,`<div class="propbox"><div class="t">🗣 asks ${esc(d.role||"teammate")}</div><div class="muted" style="font-size:12px;margin-top:4px">${esc(d.question)}</div></div>`, dep);
+  else if(ev.type==="lens") addEv("assign",`round ${d.round||"?"}`,`<div class="dim" style="font-size:11px">🔎 hunting with the <b>${esc(d.lens||"")}</b> lens — the criteria already passed, so this is looking for what they never described</div>`, dep);
+  else if(ev.type==="finding") addEv("approved",`🐞 finding · ${esc(d.cls||"?")}`,`<div><b>${esc(d.claim||"")}</b></div><div class="muted" style="font-size:12px;margin-top:3px">${esc(d.where||"")} — proved by <code>${esc(d.check||"")}</code>: it failed on the current code, passed with the fix, and failed again when the fix was reverted</div>`, dep);
+  else if(ev.type==="findingRejected") addEv("blocked",`↩ claim refused`,`<div>${esc(d.claim||"")}</div><div class="muted" style="font-size:12px;margin-top:3px">${esc(d.reason||"")}</div>`, dep);
+  else if(ev.type==="round") addEv("say",`round ${d.round||"?"} · ${esc(d.lens||"")}`,`<div class="dim" style="font-size:12px">${d.confirmed?`${d.confirmed} confirmed`:"nothing new"}${d.dryRounds?` · ${d.dryRounds} quiet round(s) in a row`:""}</div>`, dep);
+  else if(ev.type==="investigated") addEv("done",`🔎 investigation over`,`<div><b>${d.findings||0}</b> confirmed, <b>${d.refused||0}</b> refused, over ${d.rounds||0} round(s) — stopped because ${esc(d.stoppedBecause||"")}</div>`, dep);
   else if(ev.type==="peer_answer") addEv("approved",`${esc(d.from)} → ${esc(d.to)}`,`<div class="dim" style="font-size:11px;margin-bottom:3px">💬 replied</div><div>${esc(d.text)}</div>`, dep);
   else if(ev.type==="say") addEv("say",who(`turn ${d.turn}/${d.maxTurns}`),`<div>${d.paid?`<span title="this turn ran on the paid API" style="color:var(--accent);font-weight:600;font-size:11px;margin-right:5px">💳 ${d.paidModel?esc(d.paidModel):"paid"}</span>`:'<span title="this turn ran on the free local model" class="dim" style="font-size:11px;margin-right:5px">🖥️ local</span>'}${esc(d.speak)}</div>`, dep);
   else if(ev.type==="propose"){

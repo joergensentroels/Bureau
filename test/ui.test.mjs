@@ -22,6 +22,10 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HTML = readFileSync(join(ROOT, "public", "index.html"), "utf8");
+const Q = String.fromCharCode(34), BT = String.fromCharCode(96);
+// Proximity by indexOf. This file's newer assertions contain NO regex literals on purpose: built through a heredoc,
+// a template literal and a file write, every backslash was eaten — [\s\S] arrived as [sS], a class of literal s and S.
+const near = (a, b, n) => { const i = HTML.indexOf(a); return i >= 0 && HTML.indexOf(b, i) >= 0 && HTML.indexOf(b, i) - i < n; };
 
 let pass = 0, fail = 0;
 const ok = (name, cond, detail = "") => {
@@ -81,6 +85,37 @@ ok(`every literal id lookup resolves to an id that exists (${used.size} checked 
 for (const id of ["app", "authWarn"]) ok(`signed-out path still has #${id}`, defined.has(id));
 ok("signed-out renderer still exists", /function renderSignedOut\s*\(/.test(HTML));
 ok("the sign-in control is shared, not duplicated per call site", (HTML.match(/function signIn\s*\(/g) || []).length === 1);
+
+
+// ---- the investigate phase must be VISIBLE ---------------------------------
+//
+// A mechanism nobody can see is how a feature ends up unused — server.mjs says exactly that about its own action
+// allowlist. Every event the phase emits needs a renderer, and the list is derived from the emit() calls in server.mjs
+// rather than typed here, so a new event type added later fails this instead of being quietly invisible.
+{
+  const SERVER = readFileSync(join(ROOT, "server.mjs"), "utf8");
+  const investigateEvents = [...new Set(
+    [...SERVER.matchAll(/emit\(run, "(lens|round|investigated|finding|findingRejected)"/g)].map((m) => m[1]))].sort();
+  ok("the phase emits the events this test knows about", investigateEvents.length === 5, investigateEvents.join(","));
+  for (const ev of investigateEvents) {
+    ok(`the feed renders "${ev}"`, HTML.includes(`ev.type==="${ev}"`));
+    ok(`the compact history renders "${ev}"`, HTML.includes(ev + ":" + BT));
+  }
+  // A REFUSED claim must be as visible as a confirmed one. Hiding refusals would make an autonomous critic look
+  // infallible, and the refusals are precisely how you tell one that works from one that is guessing.
+  ok("a refused claim is rendered with its reason", near(Q + "findingRejected", "d.reason", 400));
+  ok("a confirmed finding shows what proved it", near("ev.type===" + Q + "finding", "d.check", 500));
+}
+{
+  // The switch and the repo field: without them the operator cannot turn this off or point it anywhere.
+  ok("the guardrails form has the hunting switch", HTML.includes('id="gInv"'));
+  ok("it has the round cap", HTML.includes('id="gInvR"'));
+  ok("it has the finding repository field", HTML.includes('id="gRepo"'));
+  ok("and all three are actually saved", HTML.includes("investigate:wrap.querySelector(" + Q + "#gInv" + Q + ").checked")
+    && HTML.includes("investigateRounds:") && HTML.includes("findingRepo:"));
+  // The empty case has to be explained where it is set, not only in a commit message.
+  ok("an empty repository field says what that means", HTML.includes("CANNOT be verified"));
+}
 
 console.log(fail ? `\nFAILURES — ${pass} passed, ${fail} failed` : `\nALL PASS ✓ — ${pass} passed, 0 failed`);
 process.exitCode = fail ? 1 : 0;
