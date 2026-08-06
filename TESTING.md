@@ -621,3 +621,23 @@ The outline is deliberately syntactic and language-loose — a missed exotic dec
 listing, whereas parsing properly would cost a dependency and this project has none. Controls in the suite: a
 symbol that is not declared is absent from it, comment lines are not mistaken for declarations, and an absurdly
 long line (a minified bundle is one enormous line) is skipped rather than quoted back.
+
+### Run ten: the outline worked, and silence was the next defect
+
+With the outline in place the same hunt behaved differently in the way that matters. Round 1 read `src/audit.mjs`
+(12,746 bytes, body capped) and concluded: *"The current audit rules match the described behavior. No defects
+found in this partial view."* **It named the partial view instead of claiming absence.** That is the first time an
+agent handled a truncated read correctly, and it is the whole point of the outline.
+
+Round 2 then found a new defect. After reading `src/auth.mjs` the agent emitted **nine consecutive turns** of
+`speak: "…"`, `actionType: "other"`, every field empty. Two causes, both silence:
+
+- **`"other"` was advertised in the actionType enum the system prompt hands out, and nothing implements it.** It
+  fell off the end of the dispatch chain — no result, no error, no feedback — even when it carried content. The
+  prompt was offering an action that does nothing. Removed; `note` is the implemented catch-all.
+- **Nothing noticed an action carrying no content at all**, so there was no reason for the model to stop.
+
+A wasted turn the model cannot detect is a turn it will repeat until the cap, and it did — nine times. Both are
+now refused with a reason, and three in a row ends the round with `gaveUp: true` rather than reading as a clean
+dry round, which would have been the more damaging outcome: a round that spent its whole budget on empty JSON and
+reported "nothing found" is indistinguishable from a round that genuinely looked.

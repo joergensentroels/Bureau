@@ -864,6 +864,21 @@ console.log("# the gate runs npm without a shell and without a .cmd");
     chk('  and a finish wrapped in propose_action is treated as a finish', src.includes('next.type = "finish";'));
   }
 }
+console.log("# a turn that proposes nothing must not pass in silence");
+{
+  // Observed nine times in a row after a 20kB read: speak "…", actionType "other", every field empty. Two causes,
+  // both silence: "other" was ADVERTISED in the action enum and has no dispatch branch, and nothing noticed an
+  // action carrying no content. A wasted turn the model cannot detect is a turn it will repeat until the cap.
+  const src = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
+  chk('  an action with nothing in it is refused with a reason', src.includes('That proposed nothing'));
+  chk('  and "other" is refused too, since nothing implements it', src.includes('is not a real action here'));
+  chk('  three in a row ends the round instead of burning the turn budget', src.includes('emptyActions >= 3'));
+  chk('  a real proposal resets the counter', src.includes('emptyActions = 0;   // a real proposal resets it'));
+  chk('  the round records that it gave up, rather than reading as a clean dry round', src.includes('gaveUp: true'));
+  // The root cause, and the control on it: the prompt must not offer an action nothing implements.
+  chk('  "other" is no longer advertised in the actionType enum', !src.includes('|"note"|"other"'));
+  chk('  while note — which IS implemented — still is', src.includes('|"email_draft"|"note"'));
+}
 console.log("# investigate — the BODY of a read is capped, the OUTLINE never is");
 {
   // Both false claims this session were absence claims made from a 4,000-character prefix of a 20,279-byte file:

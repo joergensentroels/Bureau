@@ -1124,7 +1124,7 @@ export function systemPrompt(org, agent) {
     "Respond with STRICT JSON only (no prose, no code fences):",
     '{ "thought":"one sentence", "speak":"what you tell the CEO, in your voice (1-3 sentences)",',
     '  "next": { "type":"propose_action"|"escalate"|"finish",',
-    '     "actionType":"web_search"|"web_research"|"file_write"|"read_file"|"purchase"|"api_call"|"shell"|"github_file"|"read_issues"|"github_issue"|"github_comment"|"github_pr"|"plan_add"|"ask_peer"|"ask_stakeholder"|"mcp_call"|"register_finding"|"email_draft"|"note"|"other",',
+    '     "actionType":"web_search"|"web_research"|"file_write"|"read_file"|"purchase"|"api_call"|"shell"|"github_file"|"read_issues"|"github_issue"|"github_comment"|"github_pr"|"plan_add"|"ask_peer"|"ask_stakeholder"|"mcp_call"|"register_finding"|"email_draft"|"note",',
     '     "title":"short title (or filename for file_write)", "details":"what and why", "command":"query for web_search; exact URL for web_research; full document for file_write; exact text otherwise",',
     '     "question":"when type=escalate: the specific thing you need the CEO to decide or provide",',
     '     "summary":"only when finishing" } }',
@@ -1993,6 +1993,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
     && (!run.maxPaidUsd || runPaidTotal(run) < run.maxPaidUsd);   // server-side per-run paid ceiling (guardrails.maxPaidUsdPerRun)
   // reliability guards: the weak local model tends to "finish" claiming it did work it never did.
   let didExecute = false, finishRejections = 0;
+  let emptyActions = 0;   // consecutive turns that proposed nothing usable; three ends the round
   // Who approved the current action (auto vs a named approver), for the audit trail. Kept function-LOCAL
   // (not on `run`) so concurrent agents under parallel delegation can't clobber each other's attribution.
   // emitAct threads it into every real-action result; emitResult falls back to the run's default.
@@ -2121,6 +2122,27 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
       didExecute = true;
       history.push({ role: "user", content: `SIMULATED (dry-run preview) — assume your ${next.actionType || "action"} "${next.title || ""}" succeeded. This is a preview; nothing was really done. Continue toward the objective or finish.` });
       continue;
+    }
+    // An action with nothing in it is not an action, and "other" has no dispatch branch at all — both used to fall
+    // off the end of the chain in complete silence, which gives the model no way to learn the turn was wasted. Observed
+    // nine times in a row after a large read. Answer it, and stop the round after three rather than burning the budget.
+    {
+      const at0 = String(next.actionType || "").toLowerCase();
+      const nothing = !String(next.title || "").trim() && !String(next.command || "").trim() && !String(next.details || "").trim();
+      if (nothing || at0 === "other") {
+        emptyActions++;
+        if (emptyActions >= 3) {
+          summary = nothing ? "stopped: three turns in a row proposed nothing" : `stopped: three turns in a row proposed "other", which is not a real action`;
+          emit(run, "finish", { agent: who, depth, summary, gaveUp: true });
+          break;
+        }
+        emitAct({ agent: who, depth, actionType: at0 || "(none)", url: "", ok: false, bytes: 0, error: nothing ? "empty action" : "no such action" });
+        history.push({ role: "user", content: nothing
+          ? "That proposed nothing — no title, no command, no details, so there was nothing to run. Either name a REAL action with its arguments, or finish and say what you concluded. Repeating an empty action will end this round."
+          : `"other" is not a real action here — nothing runs for it. Pick one from the list you were given (read_repo, register_finding, note, ask_stakeholder, …) or finish and say what you concluded.` });
+        continue;
+      }
+      emptyActions = 0;   // a real proposal resets it
     }
     // ---- Guardrails: per-agent action allowlist, per-run action cap, purchase auto-approve ceiling ----
     const actType = String(next.actionType || "").toLowerCase();
