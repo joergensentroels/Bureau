@@ -14,6 +14,7 @@ import {
   normalizeFinding, verifyFinding, findingCheckAllowed,
   LENSES, pickLens, investigateObjective, investigate, seedLenses, activeLenses, bookLensRound,
   normalizeLens, lensParaphrase, addProposedLens, lensProposalObjective, sigWords,
+  repoPathSafe, readRepoFile, listRepoFiles,
   normalizeQuestion, questionKey, recordQuestion, answerQuestion, systemPrompt, unqueuedAssumption,
   buildUndecidedMsgs, normalizeUndecided, unaddressedUndecided, runInvestigateFlag,
 } from "../server.mjs";
@@ -841,6 +842,59 @@ console.log("# investigate — the lens register is the COMPANY's, and it learns
     chk("  investigate is given the register rather than the constant", src.includes("pickLens(run, lenses, lensStats)"));
     chk("  and every round is booked against the company, dry ones included", src.includes("bookLensRound(o, round.lens, round.confirmed"));
   }
+}
+console.log("# investigate — reading the repository under investigation, and staying inside it");
+{
+  // Why this exists: the hunting phase could verify a finding in the repo and could not READ the repo. read_file reads
+  // the drafts directory; findingRepo was referenced in exactly one place, the gate. So an agent was asked to supply a
+  // check command and a fix quoting exact anchor text from a file it had never seen — structurally unable to find a
+  // real defect, and every refusal would have looked like an honest gate over a careless model.
+  const BS = String.fromCharCode(92);   // a real backslash; a lost one turns an escape test into a test of nothing
+  const R = mkdtempSync(join(tmpdir(), "repo-read-"));
+  try {
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    mkdirSync(join(R, "src")); mkdirSync(join(R, ".git")); mkdirSync(join(R, "node_modules"));
+    writeFileSync(join(R, "src", "db.mjs"), "export const q = 1;\n");
+    writeFileSync(join(R, ".git", "config"), "[core]\n");
+    writeFileSync(join(R, "node_modules", "dep.js"), "module.exports = 1;\n");
+    writeFileSync(join(R, "README.md"), "x".repeat(50));
+    const inside = (p) => { const a = repoPathSafe(R, p); return !!a && (a === R || a.startsWith(R + String.fromCharCode(92)) || a.startsWith(R + "/")); };
+
+    chk("  a normal path resolves inside the repo", inside("src/db.mjs"));
+    chk("  and it is refused for a repo that is not configured", repoPathSafe("", "src/db.mjs") === null);
+    chk("  and for the filesystem root itself", repoPathSafe(process.platform === "win32" ? "C:" + BS : "/", "x") === null);
+    for (const [label, p] of [
+      ["dot-dot with forward slashes", "../../etc/passwd"],
+      ["dot-dot with backslashes", ".." + BS + ".." + BS + "secret"],
+      ["dot-dot buried mid-path", "src" + BS + ".." + BS + ".." + BS + ".." + BS + "secret"],
+      ["a windows absolute path", "C:/Windows/win.ini"],
+      ["the git directory", ".git/config"],
+      ["a dependency", "node_modules/dep.js"],
+      ["nothing at all", ""],
+      ["a null byte", "src/db" + String.fromCharCode(0) + ".mjs"],
+    ]) chk("  refused: " + label, repoPathSafe(R, p) === null);
+    // Deliberate: a leading separator is STRIPPED, not honoured, so an absolute-looking path lands inside the repo
+    // rather than on the real filesystem. The property under test is where it ends up, not whether it was allowed.
+    chk("  a unix-absolute path is read as repo-relative, not as absolute", inside("/etc/passwd"));
+    // The control on every 'refused' line above: the checker must be able to say yes, or they all pass vacuously.
+    chk("  the checker can still say yes, so the refusals above mean something", repoPathSafe(R, "README.md") !== null);
+
+    const f = await readRepoFile(R, "src/db.mjs");
+    eq("  a real file comes back with its content", [f.ok, f.content.trim()], [true, "export const q = 1;"]);
+    eq("  and its repo-relative name, with forward slashes", f.name, "src/db.mjs");
+    const esc = await readRepoFile(R, "../../etc/passwd");
+    chk("  an escape attempt is refused by the reader too, not only the path check", esc.ok === false && /not inside/.test(esc.error));
+    const dir = await readRepoFile(R, "src");
+    chk("  a directory says to list it instead", dir.ok === false && /directory/.test(dir.error));
+    const small = await readRepoFile(R, "README.md", 10);
+    eq("  the cap truncates and says so", [small.content.length, small.truncated, small.bytes], [10, true, 50]);
+
+    const l = await listRepoFiles(R);
+    chk("  listing finds the source", l.ok && l.files.includes("src/db.mjs") && l.files.includes("README.md"));
+    chk("  and hides the git directory and the dependencies", !l.files.some((x) => x.startsWith(".git") || x.startsWith("node_modules")));
+    const sub = await listRepoFiles(R, "src");
+    eq("  a subdirectory can be listed on its own", sub.files, ["src/db.mjs"]);
+  } finally { rmSync(R, { recursive: true, force: true }); }
 }
 console.log("# investigate — the completeness critic, and what stops it filling the register with junk");
 {

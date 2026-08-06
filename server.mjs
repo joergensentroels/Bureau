@@ -10,7 +10,7 @@
 // Run:  node server.mjs        then open http://127.0.0.1:4173
 // No dependencies. Node built-ins only.
 
-import { readFile, writeFile, mkdir, readdir, stat, rm, rename } from "node:fs/promises";
+import { readFile, writeFile, mkdir, readdir, stat, rm, rename, realpath } from "node:fs/promises";
 import { openSync, closeSync, writeSync, existsSync, statSync, renameSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { createServer } from "node:http";
@@ -266,7 +266,7 @@ const TIERS = ["supervised", "trusted", "autonomous"];
 // allowlist: a browser holding the operator token can approve a repo-issues read from off-host. That is a
 // read of a repo the OPERATOR configured, not arbitrary reach, and remote mode is documented as defence in
 // depth rather than a boundary — but it is a widening, so it is written down here and in SECURITY.md.
-const SAFE_TIER_ACTIONS = new Set(["web_search", "web_research", "read_file", "read_issues", "file_write", "note", "ask_peer", "register_finding", "ask_stakeholder", "propose_lens"]);
+const SAFE_TIER_ACTIONS = new Set(["web_search", "web_research", "read_file", "read_issues", "file_write", "note", "ask_peer", "register_finding", "ask_stakeholder", "propose_lens", "read_repo"]);
 // register_finding is safe-tier deliberately: it takes no real-world action, runs only commands the project itself
 // ships (FINDING_CHECK_ALLOW), and does it in a throwaway worktree. Autonomy is the entire point of the action — a
 // gate that needs the CEO for every claim is a gate nobody runs.
@@ -972,7 +972,7 @@ async function fileApproval(agent, action, run = null) {
     });
     return json;
   }
-  const typeMap = { email_draft: "external_contact", note: "context_question", file_write: "context_question", read_file: "context_question", ask_peer: "context_question", ask_stakeholder: "context_question", propose_lens: "context_question" };
+  const typeMap = { email_draft: "external_contact", note: "context_question", file_write: "context_question", read_file: "context_question", ask_peer: "context_question", ask_stakeholder: "context_question", propose_lens: "context_question", read_repo: "context_question" };
   const { json } = await latch("POST", "/api/approvals", {
     type: typeMap[action.actionType] || "other",
     title: action.title || "Action requested",
@@ -1103,6 +1103,7 @@ export function systemPrompt(org, agent) {
     "- github_pr: open a pull request containing the document(s) you already SAVED this run — title=the PR title, command=the PR description, details=why. You do NOT list files: it includes what you saved with file_write, so save the finished work first. The CEO approves every one (never auto).",
     "- plan_add: record a follow-up task you notice but shouldn't do right now into the company's persistent plan — title=the task, details=why/context. It is saved for a future run so nothing is lost. Runs instantly (no approval). Do NOT use it to defer the CURRENT objective.",
     "- register_finding: claim a DEFECT and prove it. title=the one-sentence claim, url=file:line, details=the defect class, command=the check that detects it (one of the project's own: npm test | npm run <script> | node --test [file] | node tools/<x>.mjs), fix={file,find,replace}=the change that makes the check pass. The runner verifies it ITSELF in a throwaway copy and requires three things: your check FAILS on the current code, PASSES with your fix, and FAILS AGAIN once the fix is reverted. A claim without that evidence is refused and you are told why, so do not register a hunch — register something you can make fail.",
+    findingRepo(org) ? "- read_repo: read the source of the repository under investigation — title=the path relative to the repo root (e.g. \"src/db.mjs\"), or a directory (or blank) to LIST what is there. Read-only, and confined to that one repository. Use it before claiming anything about the code: a check command and a fix have to quote text that is actually in the file." : "",
     "- ask_stakeholder: record a question only the CEO can settle — scope, a policy choice, a name, a number nobody wrote down — WITHOUT stopping. title=the question, command=the assumption you are proceeding under meanwhile, url=where that assumption is written down (file, field, document). It does not wait for an answer and it must not: you keep working, the question is queued for the CEO to answer alongside others, and the answer reaches a later run. A question with no assumption is REFUSED, because that is just asking to stop. Use this instead of escalate whenever the work can continue on a stated guess.",
     "- ask_peer: consult a NAMED teammate for input, advice, or a quick review — title=their name or role, command=your question, details=any context. They reply with their expert opinion and it comes back to you. Use it to get a specialist's take or a second opinion instead of guessing. It is advice only — it does NOT make them do real work.",
     (org._mcpTools && org._mcpTools.length)
@@ -1225,6 +1226,7 @@ export function normalizeAction(next, objective) {
   else if (["github_issue", "issue", "new_issue", "open_issue", "create_issue", "file_issue", "raise_issue", "bug_report"].includes(at)) at = "github_issue";
   else if (["github_comment", "issue_comment", "comment", "comment_issue", "reply_issue", "reply"].includes(at)) at = "github_comment";
   else if (["github_pr", "pull_request", "pullrequest", "pr", "open_pr", "create_pr", "raise_pr", "merge_request"].includes(at)) at = "github_pr";
+  else if (["read_repo", "read_code", "read_source", "list_repo", "list_files", "open_file", "read_repo_file", "browse_repo"].includes(at)) at = "read_repo";
   else if (["propose_lens", "new_lens", "add_lens", "suggest_lens", "propose_method", "lens"].includes(at)) at = "propose_lens";   // only offered in the critic round
   else if (["ask_stakeholder", "ask_ceo", "open_question", "scope_question", "clarify", "clarification", "assumption", "flag_assumption", "ask_owner", "ask_stakeholders"].includes(at)) at = "ask_stakeholder";   // a question that must NOT stop the work
   else if (["ask_peer", "ask", "consult", "message", "message_agent", "ask_teammate", "ask_colleague", "ask_agent", "peer"].includes(at)) at = "ask_peer";   // consult a named teammate
@@ -2401,6 +2403,37 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
           didExecute = true;
           history.push({ role: "user", content: `${peer.name} (${peer.role}) replied to your question:\n---\n${reply}\n---\nUse this input as you see fit. Continue toward the objective or finish.` });
         }
+      } else if ((next.actionType || "") === "read_repo") {
+        // One action rather than two, because a model given read_repo and list_repo picks the wrong one and burns a
+        // turn on the correction. A blank path, or one that turns out to be a directory, lists instead of reading.
+        const repo = findingRepo(org);
+        const want = String(next.title || next.command || next.details || "").trim();
+        if (!repo) {
+          emitAct({ agent: who, depth, actionType: "read_repo", url: "", ok: false, bytes: 0, error: "no repo configured" });
+          history.push({ role: "user", content: "No repository is configured (guardrails.findingRepo), so there is no source to read. Work from what you have been given, and do not state anything about code you cannot see." });
+        } else {
+          const r = want ? await readRepoFile(repo, want) : { ok: false, error: "that is a directory — list it instead of reading it" };
+          if (r.ok) {
+            didExecute = true;
+            emitAct({ agent: who, depth, actionType: "read_repo", url: r.name, ok: true, bytes: r.bytes, error: "" });
+            emit(run, "repoRead", { by: who, depth, file: r.name, bytes: r.bytes, truncated: !!r.truncated });
+            history.push({ role: "user", content: `APPROVED and EXECUTED — ${r.name} from the repository under investigation${r.truncated ? " (first 12000 characters; ask for a narrower path if you need more)" : ""}:\n---\n${r.content}\n---\nThis is the REAL current source. Anything you claim about it must quote text that appears above.` });
+          } else if (/is a directory/.test(r.error)) {
+            const l = await listRepoFiles(repo, want);
+            if (l.ok) {
+              didExecute = true;
+              emitAct({ agent: who, depth, actionType: "read_repo", url: (want || ".") + "/", ok: true, bytes: l.files.length, error: "" });
+              emit(run, "repoRead", { by: who, depth, file: (want || ".") + "/", bytes: l.files.length, listing: true });
+              history.push({ role: "user", content: `APPROVED and EXECUTED — ${l.files.length} file(s) in the repository${l.truncated ? " (truncated)" : ""}:\n${l.files.join("\n")}\n\nRead one with read_repo before claiming anything about it.` });
+            } else {
+              emitAct({ agent: who, depth, actionType: "read_repo", url: want, ok: false, bytes: 0, error: l.error });
+              history.push({ role: "user", content: "read_repo could not list that: " + l.error });
+            }
+          } else {
+            emitAct({ agent: who, depth, actionType: "read_repo", url: want, ok: false, bytes: 0, error: r.error });
+            history.push({ role: "user", content: "read_repo FAILED: " + r.error + ". Paths are relative to the repository root — leave the path blank to list what is there." });
+          }
+        }
       } else if ((next.actionType || "") === "propose_lens") {
         // The whole gate runs inside one updateOrg: the register is read, checked against and appended to atomically,
         // so a proposal cannot be validated against a register that has already changed underneath it.
@@ -3549,6 +3582,10 @@ export function investigateObjective(run, lens, taxonomy = {}) {
     classes.length ? "Defect shapes this company has found before, most common first: " + classes.join(", ") + "." : "",
     seen.length ? "Do NOT repeat any of these:\n" + seen.slice(0, 20).join("\n") : "",
     "",
+    "READ THE CODE FIRST with read_repo — leave the path blank to list the repository, then read the files this lens points at.",
+    "A check command and a fix must quote text that is really in the file, so a claim made without reading it will be refused",
+    "for the wrong reason and teach you nothing.",
+    "",
     "If you find something, register_finding it — a claim, a check that FAILS on the current code, and the fix that makes",
     "it pass. If this lens shows you nothing, say so plainly and finish the round; an honest empty round is what tells the",
     "loop to move on, and a fabricated one wastes everybody's time because the runner will refuse it.",
@@ -3589,6 +3626,72 @@ export async function investigate(run, worker, opts = {}) {
     stoppedBecause: run.stopped ? "stopped" : run.dryRounds >= dryLimit ? "dry" : "round cap",
   });
   return tokens;
+}
+
+// ---- reading the repository under investigation ------------------------------------------------------------------
+//
+// Read-only and confined to guardrails.findingRepo, which the OPERATOR set. That is the whole authority here: no new
+// power beyond a directory the operator already nominated, and nothing that can write. It sits below the hard floor
+// with read_file for that reason — reading a configured local directory is not shell access.
+//
+// The confinement is the part worth getting right. A relative path is resolved against the root and then checked by
+// going BACK: path.relative(root, abs) must not start with ".." and must not be absolute. That catches "../..",
+// "..\..", an absolute path, and a mixed-separator path in one test instead of a blacklist of spellings. Symlinks are
+// caught separately, after realpath, because a link inside the repo can point anywhere.
+const REPO_SKIP = new Set([".git", "node_modules", ".cache", "dist", "build", "coverage", ".next", ".venv", "__pycache__"]);
+export function repoPathSafe(repo, rel) {
+  const r = String(repo == null ? "" : repo).trim();
+  if (!r) return null;
+  const root = path.resolve(r);
+  if (root === path.parse(root).root) return null;   // never the filesystem root itself
+  // Leading separators are stripped rather than rejected, so "/etc/passwd" and "\\server\share\x" are read as
+  // repo-relative ("<repo>/etc/passwd") instead of as absolute paths. Verified by probe: neither resolves outside.
+  const raw = String(rel == null ? "" : rel).trim().replace(/^[/\\]+/, "");
+  if (!raw || raw.includes("\0")) return null;
+  const abs = path.resolve(root, raw);
+  const back = path.relative(root, abs);
+  if (!back || back.startsWith("..") || path.isAbsolute(back)) return null;
+  if (back.split(/[/\\]/).some((seg) => REPO_SKIP.has(seg))) return null;
+  return abs;
+}
+
+export async function readRepoFile(repo, rel, cap = 12000) {
+  const abs = repoPathSafe(repo, rel);
+  if (!abs) return { ok: false, error: "that path is not inside the configured repository" };
+  try {
+    // realpath first: a symlink inside the repo can point outside it, and the string check above cannot see that.
+    const real = await realpath(abs);
+    if (!repoPathSafe(repo, path.relative(path.resolve(repo), real))) {
+      return { ok: false, error: "that path leaves the repository through a link" };
+    }
+    const st = await stat(real);
+    if (st.isDirectory()) return { ok: false, error: "that is a directory — list it instead of reading it" };
+    if (st.size > 400000) return { ok: false, error: "that file is too big to read (" + Math.round(st.size / 1024) + "kB)" };
+    const content = await readFile(real, "utf8");
+    return { ok: true, name: path.relative(path.resolve(repo), real).split(path.sep).join("/"),
+             content: content.slice(0, cap), truncated: content.length > cap, bytes: content.length };
+  } catch (e) { return { ok: false, error: "could not read it: " + (e.code || e.message) }; }
+}
+
+export async function listRepoFiles(repo, sub = "", cap = 400) {
+  const base = sub ? repoPathSafe(repo, sub) : path.resolve(String(repo || ""));
+  if (!base || (!sub && !String(repo || "").trim())) return { ok: false, error: "no repository is configured" };
+  const root = path.resolve(String(repo));
+  const out = [];
+  const walk = async (dir, depth) => {
+    if (out.length >= cap || depth > 8) return;
+    let entries = [];
+    try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (out.length >= cap) return;
+      if (REPO_SKIP.has(e.name) || e.name.startsWith(".")) continue;
+      const abs = path.join(dir, e.name);
+      if (e.isDirectory()) await walk(abs, depth + 1);
+      else if (e.isFile()) out.push(path.relative(root, abs).split(path.sep).join("/"));
+    }
+  };
+  await walk(base, 0);
+  return { ok: true, files: out.sort(), truncated: out.length >= cap };
 }
 
 // The repository a finding may be verified against — ONE path, named by the operator in guardrails, because Bureau
