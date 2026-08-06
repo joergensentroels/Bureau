@@ -2046,10 +2046,17 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
       }
       // A decision nobody sanctioned must not leave together with the work. One nudge per run, and only when no
       // question has been queued — an agent that already queued one has done the right thing and must not be badgered.
-      const tell = unqueuedAssumption(next.summary) || unqueuedAssumption(run.wroteText);
-      if (tell && !(run.questions || []).length && !run._qNudged) {
+      // Two ways to notice an unsanctioned decision, and they are not equal. The derived list is the strong one: it
+      // came from the objective before any work existed, so it does not depend on the agent hedging its language. The
+      // hedge-word tell is the backstop for whatever the derivation missed, and it only fires when nothing at all was
+      // queued. One nudge either way — an agent that cannot satisfy it must still be able to finish.
+      const pending = unaddressedUndecided(run);
+      const tell = pending.length || (run.questions || []).length ? "" : (unqueuedAssumption(next.summary) || unqueuedAssumption(run.wroteText));
+      if ((pending.length || tell) && !run._qNudged) {
         run._qNudged = true;
-        history.push({ role: "user", content: `Before you finish: your summary says "${tell}", so you made a call that nobody sanctioned. Queue it — propose_action with actionType "ask_stakeholder": title=the question the CEO has to settle, command=the assumption you proceeded on, url=where you wrote it down. It does NOT wait for an answer, so finish immediately afterwards. If on reflection nothing was actually assumed, say so and finish.` });
+        history.push({ role: "user", content: pending.length
+          ? `Before you finish: the objective never settled this — "${pending[0]}" — and you have not queued it, so whatever you did about it is a decision nobody sanctioned. Queue it: propose_action with actionType "ask_stakeholder", title=that question, command=the choice you made meanwhile, url=where you wrote it down. It does NOT wait for an answer, so finish immediately afterwards. If your work genuinely does not touch it, say so and finish.`
+          : `Before you finish: your work says "${tell}", so you made a call that nobody sanctioned. Queue it — propose_action with actionType "ask_stakeholder": title=the question the CEO has to settle, command=the choice you made meanwhile, url=where you wrote it down. It does NOT wait for an answer, so finish immediately afterwards. If on reflection nothing was actually assumed, say so and finish.` });
         continue;
       }
       summary = next.summary || "Done."; emit(run, "finish", { agent: who, depth, summary }); break;
@@ -2815,6 +2822,44 @@ export function buildCriteriaMsgs(objective) {
     { role: "user", content: `Objective: ${objective}\n\n/no_think` },
   ];
 }
+// A separate call rather than a second array inside buildCriteriaMsgs, and the reason matters: criteria derivation is
+// the most JSON-critical call in the system and this local model is documented as unreliable at strict JSON. A
+// malformed reply here must cost a missed question — never a run with no criteria at all.
+export function buildUndecidedMsgs(objective) {
+  return [
+    { role: "system", content: [
+      "You read a work objective and list the DECISIONS IT DOES NOT MAKE: choices whose answer is not in the objective, cannot be derived from it, and that only the person who set it can settle.",
+      "A number with no stated value. A policy with no stated rule. A name or owner nobody named. A scope boundary left open.",
+      "NOT things merely unsaid but derivable from what is there, and NOT how to do the work — only decisions that are somebody's to make.",
+      "Phrase each as the question you would ask that person. Under 15 words each.",
+      "Respond STRICT JSON only: { \"undecided\": [\"...\"] }. 0 to 4 items. An empty list is the RIGHT answer for an objective that settles everything — do not invent gaps.",
+    ].join("\n") },
+    { role: "user", content: `Objective: ${objective}\n\n/no_think` },
+  ];
+}
+export function normalizeUndecided(obj) {
+  return (Array.isArray(obj?.undecided) ? obj.undecided : [])
+    .map((s) => String(s == null ? "" : s).trim().slice(0, 160)).filter(Boolean).slice(0, 4);
+}
+async function deriveUndecided(objective, run) {
+  try {
+    const { obj, tokens } = await askJsonReliable(buildUndecidedMsgs(objective), [700, 1600], { run });
+    return { items: normalizeUndecided(obj), tokens: tokens || 0 };
+  } catch { return { items: [], tokens: 0 }; }   // a failure here costs a missed question, nothing else
+}
+
+// Which of those decisions has NOT been queued as a question yet? Matched on significant-word overlap, because an
+// agent will not echo the derivation's phrasing back — half the words in common counts as the same decision.
+export function unaddressedUndecided(run) {
+  const asked = (run.questions || []).map((q) => new Set(questionKey(q.question).split(" ").filter(Boolean)));
+  return (run.undecided || []).filter((u) => {
+    const w = questionKey(u).split(" ").filter(Boolean);
+    if (!w.length) return false;
+    const need = Math.max(1, Math.ceil(w.length / 2));
+    return !asked.some((a) => w.filter((x) => a.has(x)).length >= need);
+  });
+}
+
 async function deriveCriteria(objective, run) {
   const msgs = buildCriteriaMsgs(objective);
   const { obj, raw, tokens } = await askJsonReliable(msgs, [1200, 3200], { run });
@@ -2983,6 +3028,13 @@ async function runGated(run, worker, persistExtra, perAgentTally) {
   let tokens = crit.tokens;
   run.tokensSoFar = tokens;   // kept current so an abnormal exit still books the real consumption
   if (run.criteria.length) emit(run, "criteria", { items: run.criteria });
+  // The decisions the objective never made. Derived up front so the agent can queue them while it works, instead of
+  // being caught at the finish line — which is where the previous version could only ever notice.
+  if (!run.dryRun && run.undecided === undefined) {
+    const und = await deriveUndecided(run.objective, run);
+    run.undecided = und.items; tokens += und.tokens; run.tokensSoFar = tokens;
+    if (run.undecided.length) emit(run, "undecided", { items: run.undecided });
+  }
   run.producedFiles = run.producedFiles || [];
   // Persist the team checklist as an editable markdown file, refreshed after every verify pass.
   // Kept OUT of producedFiles so the verifier never reads its own checklist back as evidence.
@@ -3013,6 +3065,11 @@ async function runGated(run, worker, persistExtra, perAgentTally) {
   let objective = run.criteria.length
     ? `${run.objective}\n\nAcceptance criteria (the definition of done) — aim to satisfy all of these:\n${run.criteria.map((c, i) => `${i + 1}. ${c.text}`).join("\n")}`
     : run.objective;
+  // Naming the gaps up front is the difference between an agent that flags a decision and one that quietly makes it.
+  if ((run.undecided || []).length) {
+    objective += `\n\nDecisions this objective does NOT settle — nobody has answered these:\n${run.undecided.map((u, i) => `${i + 1}. ${u}`).join("\n")}\n`
+      + `If your work depends on one of them, do NOT just pick and move on: propose_action with actionType "ask_stakeholder" (title=the question, command=the choice you are making meanwhile, url=where you wrote it). It does not wait for an answer, so keep working straight afterwards.`;
+  }
   while (true) {
     const w = await worker(objective);
     tokens += w.tokens || 0;
@@ -3597,6 +3654,11 @@ async function generateRetro(goalId) {
   logAudit({ kind: "retro", name: goal.title, actionType: "goal_retro", decision: "auto" });
 }
 
+// A run-level opt-out of the investigate phase. Exported because the object literal in beginRun is unreachable from
+// a model-free test, and an unreachable switch is how the last one stayed broken.
+export const runInvestigateFlag = (spec) =>
+  (spec?.investigate === false || spec?.investigate === "false" || spec?.investigate === 0) ? false : undefined;
+
 function beginRun(spec) {
   // Prune finished runs so the in-memory map (and its retained event history) can't grow without
   // bound on a long-lived, self-driving server. Keep the 20 most recent finished runs for replay.
@@ -3611,6 +3673,7 @@ function beginRun(spec) {
     maxTurns: Math.max(1, Math.min(20, Number(spec.maxTurns) || 6)),
     autoApprove: Boolean(spec.autoApprove), scheduleId: spec.scheduleId || "", goalId: spec.goalId || "", planItemId: spec.planItemId || "", sopId: spec.sopId || "", dryRun: Boolean(spec.dryRun),
     hush: Boolean(spec.hush),     // "hush" task: NO agent may use the paid/external LLM — everyone stays on the local model regardless of budget (for sensitive work)
+    investigate: runInvestigateFlag(spec),   // undefined = follow the company guardrail; false = skip hunting on this run
     parallel: Boolean(spec.parallel), // company mode only: run a manager's sibling reports concurrently (no cross-sibling handoff) instead of one-after-another
     ws: spec.ws || currentWs(),   // pin the workspace so the whole run reads/writes the right company
     events: [], listeners: new Set(), done: false, stopped: false,

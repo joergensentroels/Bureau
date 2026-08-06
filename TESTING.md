@@ -413,3 +413,38 @@ retention already in the docs") still passes.
 it was written from this transcript, so it is fitted to what this model says; a model that writes "the period
 is 2 years" flat, with no hedge at all, gets no nudge and the question is lost. Detecting *that* needs the
 criteria to know which facts had no source, which is a different mechanism.
+
+### Closing the flat-assertion hole
+
+The section above left one failure mode open and named it: the finish guard reads the work for hedge words, so
+a model that states an invented fact flat — "the period is 2 years", no qualifier — gets no nudge and the
+question is lost. Hedge words were never the signal. The gap is visible in the **objective**, before a word of
+work exists, which is also how it worked on the 4water benchmark: the holes were found reading the brief.
+
+So a second derivation runs alongside the criteria — *what decisions does this objective not make?* — as its
+**own** model call, not a second array in the criteria JSON, because criteria derivation is the most
+JSON-critical call in the system and this model is documented as unreliable at strict JSON. A malformed reply
+must cost a missed question, never a run with no criteria.
+
+**Live, on the deliberately hard case.** Same fixture as before, but the objective reduced to two sentences
+with no hint that anything is unsettled and no instruction to flag anything:
+
+> Write a one-paragraph data-retention note for a small volunteer-scheduling tool, and save it as
+> retention.md. The tool stores volunteer names, emails and shift history.
+
+The derivation found the hole. The agent was told about it up front and queued the question **while working**,
+not at the finish line — `ask_stakeholder` fired mid-run, and the finish summary read *"Document saved with
+queued retention duration question."* against `"Done."` before. That is the mechanism working without any of
+the scaffolding the first experiment gave it.
+
+**And the run exposed a defect in the investigate phase.** `investigate: false` was set on the request and the
+hunting phase ran anyway: `beginRun` never read `spec.investigate`, so the per-run opt-out documented in
+`runGated`'s own comment did not exist — only the company-wide guardrail worked. Documentation, condition and
+tests all agreed with each other and none of them agreed with the code that builds the run.
+
+The fix is one line. The test is the point: `units.test.mjs` now asserts that **every** run-spec field the code
+branches on is both read from `spec` and put on the run, with a control proving the check can fail. Writing
+that probe took three tries — it first missed shorthand properties (`mode`), then missed a read one level away
+in a helper, then missed optional chaining (`spec?.investigate`). Each time the probe was the defect and the
+code was fine, which is the third instance of that in this stretch and the reason the negative control is
+non-negotiable.

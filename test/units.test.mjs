@@ -14,6 +14,7 @@ import {
   normalizeFinding, verifyFinding, findingCheckAllowed,
   LENSES, pickLens, investigateObjective, investigate,
   normalizeQuestion, questionKey, recordQuestion, answerQuestion, systemPrompt, unqueuedAssumption,
+  buildUndecidedMsgs, normalizeUndecided, unaddressedUndecided, runInvestigateFlag,
 } from "../server.mjs";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -943,7 +944,82 @@ console.log("# ask_stakeholder — the runner notices an unsanctioned decision, 
     const code = body.split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
     chk("  the finish handler consults it", code.includes("unqueuedAssumption(next.summary)"));
     chk("  nudges at most once per run", code.includes("!run._qNudged") && code.includes("run._qNudged = true"));
-    chk("  and never nudges an agent that already queued one", code.includes("!(run.questions || []).length"));
+    chk("  the hedge-word path goes quiet once anything has been queued", code.includes("(run.questions || []).length ?"));
+    chk("  but a specifically-named unaddressed decision is still chased", code.includes("pending.length || tell"));
+  }
+}
+console.log("# beginRun plumbs every run-spec field the code branches on");
+{
+  // A live run found that `investigate:false` did nothing: runGated documented the opt-out, the condition tested for
+  // it, and beginRun never read it — so documentation, condition and tests all agreed with each other and none of them
+  // agreed with the code that builds the run. This is that class of bug caught mechanically instead.
+  const src = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
+  const start = src.indexOf("function beginRun(spec) {");
+  const init = src.slice(start, src.indexOf("runs.set(run.id, run);", start));
+  // The whole function, because a field can be normalized into a local above the object literal (mode is) and the
+  // property I care about is not "the literal contains f:" but "beginRun reads it from spec AND puts it on the run".
+  const surface = Math.min(src.indexOf("export const runInvestigateFlag"), start);
+  const fn = src.slice(surface, src.indexOf("const done = wsStore.run", start));
+  chk("  the beginRun initializer was located", start > 0 && init.length > 400);
+  // Every field elsewhere in the server that gates behaviour on the RUN object and can only come from the request.
+  for (const f of ["objective", "maxTurns", "autoApprove", "dryRun", "hush", "parallel", "investigate", "agentId", "sopId", "goalId", "planItemId", "ws", "mode"])
+    chk("  beginRun reads spec." + f + " and puts it on the run", (fn.includes("spec." + f) || fn.includes("spec?." + f)) && (init.includes(f + ":") || init.includes(f + ",")));
+  // The control: a field that is NOT a run-spec option must not be found, or the check above passes on any string.
+  chk("  and the check can fail — a made-up field passes neither half", !fn.includes("spec.notARealSpecField") && !init.includes("notARealSpecField"));
+  chk("  optional chaining counts as a read, which is what the first version of this probe got wrong",
+      fn.includes("spec?.investigate") || fn.includes("spec.investigate"));
+  eq("  investigate:false is honoured", runInvestigateFlag({ investigate: false }), false);
+  eq("  the string \"false\" too, which is what a form sends", runInvestigateFlag({ investigate: "false" }), false);
+  eq("  omitting it means 'follow the company guardrail', not 'off'", runInvestigateFlag({}), undefined);
+  eq("  and true means the same as omitting it", runInvestigateFlag({ investigate: true }), undefined);
+}
+console.log("# ask_stakeholder — the decisions the objective never made, derived before any work exists");
+{
+  // Why this exists: the hedge-word guard only catches an agent that HEDGES. A model that writes "the period is 2
+  // years" flat gets no nudge and the question is lost forever. Hedge words were never the signal — the gap is in the
+  // objective, and it is there before a single word of work has been written.
+  eq("  a well-formed list comes through", normalizeUndecided({ undecided: ["  How long is history kept?  ", "Who owns the licence?"] }),
+     ["How long is history kept?", "Who owns the licence?"]);
+  eq("  an empty list is a legitimate answer, not a failure", normalizeUndecided({ undecided: [] }), []);
+  eq("  and so is a reply with no list at all", normalizeUndecided({}), []);
+  eq("  junk does not become a decision", normalizeUndecided({ undecided: ["", null, "  ", "real one"] }), ["real one"]);
+  eq("  it caps at four", normalizeUndecided({ undecided: ["a", "b", "c", "d", "e", "f"] }).length, 4);
+  eq("  and caps each one", normalizeUndecided({ undecided: ["x".repeat(400)] })[0].length, 160);
+  {
+    const m = buildUndecidedMsgs("Write a retention note.");
+    chk("  the prompt carries the objective", JSON.stringify(m).includes("Write a retention note."));
+    chk("  asks only for decisions somebody has to MAKE", m[0].content.includes("only the person who set it can settle"));
+    // Without this the model invents gaps to look thorough, and every run ends in a nudge nobody can satisfy.
+    chk("  and says plainly that an empty list is the right answer sometimes", /empty list is the RIGHT answer/.test(m[0].content));
+  }
+}
+console.log("# ask_stakeholder — an undecided decision is only addressed once it has been ASKED");
+{
+  const und = ["How long is shift history kept?", "Who owns the licence?"];
+  eq("  with nothing queued, everything is outstanding", unaddressedUndecided({ undecided: und, questions: [] }).length, 2);
+  {
+    // The agent will not echo the phrasing back, so matching is on significant-word overlap.
+    const run = { undecided: und, questions: [{ question: "What retention period for shift history?" }] };
+    const left = unaddressedUndecided(run);
+    eq("  a question in the agent's own words still counts as asked", left.length, 1);
+    chk("  and the one left is the other one", left[0].includes("licence"));
+  }
+  {
+    // The control. Without it, a matcher that cleared everything on any question at all would pass the test above.
+    const run = { undecided: und, questions: [{ question: "Should the logo be blue?" }] };
+    eq("  an unrelated question clears nothing", unaddressedUndecided(run).length, 2);
+  }
+  eq("  no derived list means nothing to chase", unaddressedUndecided({ questions: [] }).length, 0);
+  {
+    const src = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
+    const fin = src.slice(src.indexOf('if (next.type === "finish") {'));
+    const body = fin.slice(0, fin.indexOf('if (next.type === "escalate")'));
+    const code = body.split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
+    chk("  the finish guard consults the derived list", code.includes("unaddressedUndecided(run)"));
+    chk("  and prefers it over the hedge-word tell", code.includes("pending.length || (run.questions || []).length ? \"\""));
+    chk("  still at most one nudge", code.includes("!run._qNudged"));
+    chk("  the derivation cannot break criteria: it is its own call", src.includes("async function deriveUndecided") && src.includes("catch { return { items: [], tokens: 0 }; }"));
+    chk("  and the agent is told about them up front, not only at the end", src.includes("Decisions this objective does NOT settle"));
   }
 }
 console.log("# ask_stakeholder — it is a safe action, and it is NOT an escalation");
