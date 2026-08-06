@@ -592,3 +592,32 @@ Measured while doing this, since it bears on the round budget: a check in a fres
 for `node --test <file>` and about 6 seconds for `npm test`. One earlier script took far longer for reasons I
 could not pin down — the import and the check commands were both ruled out by measurement, so it is recorded as
 unexplained rather than attributed.
+
+### The cap that caused both false claims, fixed structurally
+
+Every false claim in this work came from the same place: a 4,000-character prefix of a 20,279-byte file, and an
+agent concluding that what it could not see was not there. `"the 'invite' provider is not handled"`;
+`"hasRole is not defined in auth.mjs"`. Both wrong, both from the same file, both refutable from the part that was
+cut off.
+
+I answered that first with a **warning** — *"a truncated read cannot show absence"* — and the model ignored it
+twice. That is the correct lesson about warnings, so the fix is now structural: **the body is capped, the outline
+never is.** A read that truncates now carries a complete list of every declaration in the whole file, with line
+numbers, bounded by symbol count rather than by position. On the real file:
+
+```
+auth.mjs: 339 lines, 22 declarations
+  hasRole       line 325  export const hasRole = (db, personId, role) => {
+  inviteStatus  line 273  export function inviteStatus(db, token, …
+  redeemInvite  line 281  export function redeemInvite(db, token, …
+  PROVIDERS     line 6    export const PROVIDERS = ["dev", "oidc", "invite"];
+  notARealSymbol           correctly absent
+```
+
+Both false claims die at the source, and the message states the asymmetry in both directions: not in the list
+means really not declared here; in the list means it exists even though you cannot see its body.
+
+The outline is deliberately syntactic and language-loose — a missed exotic declaration costs one line of a
+listing, whereas parsing properly would cost a dependency and this project has none. Controls in the suite: a
+symbol that is not declared is absent from it, comment lines are not mistaken for declarations, and an absurdly
+long line (a minified bundle is one enormous line) is skipped rather than quoted back.

@@ -15,7 +15,7 @@ import {
   LENSES, pickLens, investigateObjective, investigate, seedLenses, activeLenses, bookLensRound,
   normalizeLens, lensParaphrase, addProposedLens, lensProposalObjective, sigWords, postReadGuidance,
   executorProbeMs,
-  repoPathSafe, readRepoFile, listRepoFiles, resolveRepoTarget, searchRepoFiles,
+  repoPathSafe, readRepoFile, listRepoFiles, resolveRepoTarget, searchRepoFiles, repoOutline,
   normalizeQuestion, questionKey, recordQuestion, answerQuestion, systemPrompt, unqueuedAssumption,
   buildUndecidedMsgs, normalizeUndecided, unaddressedUndecided, runInvestigateFlag,
 } from "../server.mjs";
@@ -864,6 +864,51 @@ console.log("# the gate runs npm without a shell and without a .cmd");
     chk('  and a finish wrapped in propose_action is treated as a finish', src.includes('next.type = "finish";'));
   }
 }
+console.log("# investigate — the BODY of a read is capped, the OUTLINE never is");
+{
+  // Both false claims this session were absence claims made from a 4,000-character prefix of a 20,279-byte file:
+  // "the 'invite' provider is not handled" and "hasRole is not defined here". Both are wrong and both were
+  // answerable from a complete list of what the file declares. I first answered this with a WARNING and the model
+  // ignored it twice, which is the correct lesson about warnings — so the outline is structural instead.
+  const LF = String.fromCharCode(10);
+  const src = [
+    'export const PROVIDERS = [1, 2, 3];',
+    'function helper() { return 1; }',
+  ].concat(new Array(400).fill('// filler line, nothing declared here'))
+   .concat([
+    'export const hasRole = (db, id, role) => {',
+    'export function redeemInvite(db, token) {',
+    'class Roster {',
+    'const build = function () { return 2; };',
+   ]).join(LF);
+
+  const o = repoOutline(src);
+  eq('  it counts the whole file, not the part you can see', o.lines, 406);
+  const has = (n) => o.symbols.some((s) => s.text.includes(n));
+  for (const n of ['PROVIDERS', 'helper', 'hasRole', 'redeemInvite', 'Roster', 'build'])
+    chk('  it lists ' + n + ', including past any prefix cap', has(n));
+  chk('  with a line number that points at the declaration', o.symbols.find((s) => s.text.includes('hasRole')).line > 400);
+  // The controls. Without them an outline that returned every line would pass all six lines above.
+  chk('  a symbol that is not declared is absent from it', !has('notARealSymbol'));
+  chk('  and filler lines are not mistaken for declarations', !o.symbols.some((s) => s.text.includes('filler')));
+  eq('  an empty file outlines to nothing', repoOutline('').symbols.length, 0);
+  eq('  and so does null', repoOutline(null).symbols.length, 0);
+  {
+    const many = repoOutline(new Array(300).fill('export const x = () => 1;').join(LF), 20);
+    eq('  the outline is capped and says so', [many.symbols.length, many.truncated], [20, true]);
+  }
+  {
+    // A minified bundle is one enormous line; outlining it would dump the whole file back.
+    const wide = repoOutline('export const a = 1;' + ' '.repeat(500) + '// pad');
+    eq('  an absurdly long line is skipped rather than quoted', wide.symbols.length, 0);
+  }
+  {
+    const s2 = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
+    chk('  a truncated read carries the outline', s2.includes('Every declaration in the WHOLE'));
+    chk('  built from the WHOLE file, not from the capped body', s2.includes('readRepoFile(repo, target, 400000)'));
+    chk('  and it states the asymmetry both ways', s2.includes('it really is not declared here') && s2.includes('it exists even though you cannot see its body'));
+  }
+}
 console.log("# investigate — a truncated read cannot show ABSENCE, so there is a search that can");
 {
   // The defect this closes was mine, and it manufactured a false finding. Round two of a five-round hunt claimed "the
@@ -904,7 +949,8 @@ console.log("# investigate — a truncated read cannot show ABSENCE, so there is
     }
     {
       const src = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
-      chk("  a truncated read tells the agent it cannot prove absence", src.includes("can never show that something is MISSING"));
+      chk("  a truncated read tells the agent it cannot prove absence from the body alone",
+        src.includes("Do not conclude anything is absent from the partial body alone"));
       chk("  a term in command searches instead of reading — but only when it does not name a file",
         src.includes("if (term && term !== want && !resolveRepoTarget(all.files || [], term))"));
       chk("  and an unattended hunting round redirects a hard-floor action instead of waiting ten minutes for a CEO",

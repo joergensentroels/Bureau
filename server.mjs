@@ -2469,6 +2469,10 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
               continue;
             }
           }
+          // Read the WHOLE file once for the outline, then hand over a capped body. The outline is what makes a
+          // truncated read safe to reason about; without it the agent has to guess at what it cannot see, and twice
+          // this session it guessed "absent".
+          const full = target ? await readRepoFile(repo, target, 400000) : null;
           const r = target ? await readRepoFile(repo, target)
                   : want ? await readRepoFile(repo, want)
                   : { ok: false, error: "that is a directory — list it instead of reading it" };
@@ -2479,7 +2483,17 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
             emit(run, "repoRead", { by: who, depth, file: r.name, bytes: r.bytes, truncated: !!r.truncated });
             history.push({ role: "user", content: `APPROVED and EXECUTED — ${r.name} from the repository under investigation${r.truncated ? ` (the FIRST ${r.content.length} of ${r.bytes} characters — you have NOT seen the rest)` : ""}:\n---\n${r.content}\n---\nThis is the REAL current source. Anything you claim about it must quote text that appears above.`
               + (r.truncated
-                ? ` The file was CUT OFF: a truncated read shows what IS there and can never show that something is MISSING. Do not conclude anything is absent, unhandled or unimplemented from this — search the whole file instead: read_repo with title=${r.name} and the term in "command".`
+                ? ` The file was CUT OFF after ${r.content.length} of ${r.bytes} characters, so the body above is partial.\n`
+                  + (() => {
+                      // The outline is COMPLETE even though the body is not, so "X is not in this file" is answerable
+                      // from it. Both false claims this session were absence claims made from a prefix.
+                      const o = repoOutline((full && full.ok ? full.content : r.content));
+                      return o.symbols.length
+                        ? `Every declaration in the WHOLE ${o.lines}-line file, complete regardless of the cut-off${o.truncated ? " (capped)" : ""} — if something is not in this list it really is not declared here, and if it IS in the list it exists even though you cannot see its body:\n`
+                          + o.symbols.map((sy) => `  ${sy.line}: ${sy.text}`).join("\n") + "\n"
+                        : "";
+                    })()
+                  + `Do not conclude anything is absent from the partial body alone. To see a specific part, search it: read_repo with title=${r.name} and the term in "command".`
                 : "")
               + postReadGuidance(run) });
           } else if (listInstead) {
@@ -3812,6 +3826,30 @@ export function repoPathSafe(repo, rel) {
   if (!back || back.startsWith("..") || path.isAbsolute(back)) return null;
   if (back.split(/[/\\]/).some((seg) => REPO_SKIP.has(seg))) return null;
   return abs;
+}
+
+// Every declaration in a file, with line numbers — complete regardless of any read cap, because it is bounded by the
+// number of symbols rather than by position. This is what makes "X is not defined here" answerable from a partial read.
+// Deliberately syntactic and language-loose: a missed exotic declaration costs a line in a listing, while parsing
+// properly would cost a dependency and this project has none.
+const OUTLINE_PATTERNS = [
+  /^\s*export\s+(?:default\s+)?(?:async\s+)?(?:function|class|const|let|var)\s+([A-Za-z_$][\w$]*)/,
+  /^\s*export\s*\{/,
+  /^\s*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/,
+  /^\s*class\s+([A-Za-z_$][\w$]*)/,
+  /^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:function\b|\()/,
+  /^\s*def\s+([A-Za-z_][\w]*)/,                       // python, in case a repo is mixed
+  /^\s*(?:public|private|protected|static)\s+[\w<>\[\]]+\s+([A-Za-z_][\w]*)\s*\(/,
+];
+export function repoOutline(content, cap = 150) {
+  const lines = String(content == null ? "" : content).split("\n");
+  const symbols = [];
+  for (let i = 0; i < lines.length && symbols.length < cap; i++) {
+    const l = lines[i];
+    if (l.length > 400) continue;
+    if (OUTLINE_PATTERNS.some((re) => re.test(l))) symbols.push({ line: i + 1, text: l.trim().slice(0, 120) });
+  }
+  return { lines: lines.length, symbols, truncated: symbols.length >= cap };
 }
 
 export async function readRepoFile(repo, rel, cap = 4000) {
