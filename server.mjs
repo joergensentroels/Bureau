@@ -1057,6 +1057,22 @@ function emit(run, type, data) {
 // commit — and noise is not free when the context window is 4,096 tokens and the prompt is clipped from the front.
 const HUNT_ACTIONS = new Set(["read_repo", "register_finding", "ask_stakeholder", "note", "propose_lens", "ask_peer"]);
 
+// Which model tier will serve a turn, and — the useful half — why it is not the other one. Exported and pure so the
+// reasoning is testable without a provider, a budget or a model.
+export function tierReason({ paidAvailable, hush, budgetUsd, paidSpent = 0, phase = "" } = {}) {
+  if (paidAvailable && !hush && budgetUsd > 0 && paidSpent < budgetUsd) return { tier: "paid", reason: "" };
+  const why = !paidAvailable ? "no paid provider is available in Latch"
+    : hush ? "this run is hush, so nothing may leave the machine"
+    : !(budgetUsd > 0) ? "the paying agent has no budget, so a paid provider cannot be charged"
+    : "the run has already spent its paid budget";
+  // Connect the two facts at the point where they matter together: a review round on the local model is the case that
+  // gets clipped, because the local provider is reached through an OpenAI-compatible endpoint with no num_ctx field.
+  const caveat = phase === "investigate"
+    ? " — and the local model's context window is 4096 tokens, so a long review round will be clipped from the front"
+    : "";
+  return { tier: "local", reason: why + caveat };
+}
+
 export function systemPrompt(org, agent, opts = {}) {
   const ceo = org.ceo?.role ? `The CEO you report to is in charge of: ${org.ceo.role}.` : "You report to the CEO.";
   const traits = (agent.traits || []).join(", ");
@@ -1954,6 +1970,11 @@ async function consultPeer(asker, peer, org, question) {
 async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 0) {
   const who = agent.name;
   const history = [{ role: "system", content: systemPrompt(org, agent, { phase: run.phase }) }];
+  {
+    // Said once per agent task, before any model call, so an unexpected tier is visible rather than deduced.
+    const t = tierReason({ paidAvailable: run.paidAvailable, hush: run.hush, budgetUsd, paidSpent: startPaidSpent + paidThisRun, phase: run.phase });
+    emit(run, "tier", { agent: who, depth, tier: t.tier, reason: t.reason, model: t.tier === "paid" ? (paidTier.model || "") : "" });
+  }
   if ((agent.lessons || []).length) history.push({ role: "user", content:
     "Coaching from the CEO's past feedback on your work — APPLY these; do not repeat the mistakes they point at:\n" +
     agent.lessons.slice(0, 8).map((l) => `- ${l.text}`).join("\n") });

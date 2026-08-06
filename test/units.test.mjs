@@ -16,7 +16,7 @@ import {
   normalizeLens, lensParaphrase, addProposedLens, lensProposalObjective, sigWords, postReadGuidance,
   executorProbeMs,
   repoPathSafe, readRepoFile, listRepoFiles, resolveRepoTarget, searchRepoFiles, repoOutline,
-  normalizeQuestion, questionKey, recordQuestion, answerQuestion, systemPrompt, unqueuedAssumption,
+  normalizeQuestion, questionKey, recordQuestion, answerQuestion, systemPrompt, unqueuedAssumption, tierReason,
   buildUndecidedMsgs, normalizeUndecided, unaddressedUndecided, runInvestigateFlag,
 } from "../server.mjs";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
@@ -863,6 +863,33 @@ console.log("# the gate runs npm without a shell and without a .cmd");
     chk('  either field may carry the path', src.includes('Either field may hold the path'));
     chk('  and a finish wrapped in propose_action is treated as a finish', src.includes('next.type = "finish";'));
   }
+}
+console.log("# which model tier serves a turn, and why it is not the other one");
+{
+  // Working out why every hunt in this project ran on the local model took reading four conditions across three
+  // files. From the outside an unfunded agent is indistinguishable from a missing API key, and the agents used in
+  // those runs had budgetUsd 0 — which no output ever mentioned. A new key alone would not have changed anything.
+  eq('  a funded agent on a configured provider goes paid', tierReason({ paidAvailable: true, budgetUsd: 3 }).tier, 'paid');
+  eq('  and needs no explanation', tierReason({ paidAvailable: true, budgetUsd: 3 }).reason, '');
+  // The four ways it stays local must be DISTINGUISHABLE, which is the entire point.
+  const why = (o) => tierReason(o).reason;
+  chk('  no provider says so', /no paid provider/.test(why({ paidAvailable: false, budgetUsd: 3 })));
+  chk('  an unfunded agent says so, and does not read as a missing key', /no budget/.test(why({ paidAvailable: true, budgetUsd: 0 })));
+  chk('  a hush run says so', /hush/.test(why({ paidAvailable: true, hush: true, budgetUsd: 3 })));
+  chk('  an exhausted budget says so', /already spent/.test(why({ paidAvailable: true, budgetUsd: 3, paidSpent: 3 })));
+  chk('  and all four reasons differ', new Set([
+    why({ paidAvailable: false, budgetUsd: 3 }), why({ paidAvailable: true, budgetUsd: 0 }),
+    why({ paidAvailable: true, hush: true, budgetUsd: 3 }), why({ paidAvailable: true, budgetUsd: 3, paidSpent: 3 }),
+  ]).size === 4);
+  for (const o of [{ paidAvailable: false }, { paidAvailable: true, budgetUsd: 0 }, { hush: true }])
+    eq('  every failing case is local', tierReason(o).tier, 'local');
+  // The window caveat belongs where the two facts matter together, and nowhere else.
+  chk('  a local REVIEW round is told about the 4096-token window', /4096/.test(why({ paidAvailable: false, phase: 'investigate' })));
+  chk('  a local construction turn is not', !/4096/.test(why({ paidAvailable: false, phase: 'work' })));
+  chk('  and a paid review round is not', !/4096/.test(tierReason({ paidAvailable: true, budgetUsd: 3, phase: 'investigate' }).reason));
+  eq('  called with nothing at all it still answers', tierReason().tier, 'local');
+  chk('  and the turn loop announces it before any model call',
+      readFileSync(new URL('../server.mjs', import.meta.url), 'utf8').includes('emit(run, "tier"'));
 }
 console.log("# a hunting turn must FIT the context window that exists");
 {

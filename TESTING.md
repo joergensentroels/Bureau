@@ -680,3 +680,35 @@ someone to trade VRAM.
 Also found while measuring: **`note` is implemented and enumerated but was never described to the agent** — the
 exact inverse of the `other` defect. In a review round it is the right action for "I looked here, this is what I
 checked, nothing to report", which is the answer most rounds should give. Now documented.
+
+## Before a new API key can help: the paying agent needs a budget
+
+Every hunt in this work ran on the local model, and a new key alone would **not** have changed that. A paid turn
+needs four things at once:
+
+```js
+const canUsePaid = () => run.paidAvailable && !run.hush && budgetUsd > 0 && (startPaidSpent + paidThisRun) < budgetUsd
+```
+
+The agents created for those hunt runs had `budgetUsd: 0`, so they were local-only regardless of the provider —
+and **from the outside an unfunded agent is indistinguishable from a missing key.** Nothing in the run output said
+which it was; establishing it meant reading four conditions across three files.
+
+Now every agent task announces its tier before the first model call, with the reason it is not the other one, and
+the four causes are worded distinctly: no provider configured / the paying agent has no budget / the run is hush /
+the budget is spent. A local **review** round additionally gets told the local window is 4,096 tokens and a long
+round will be clipped — the two facts stated where they matter together, and nowhere else.
+
+**So the checklist when a key goes in** (the key itself is the operator's to enter — it lives in the gitignored
+`openclaw-command-center/data/llm-provider.json` under `fallback.apiKey`, and nothing here reads or prints it):
+
+1. put the key in;
+2. **give the hunting agent a budget** — without it the run is silently local;
+3. start a hunt and read the `tier` event: it says `paid` with the model, or exactly which of the four conditions
+   failed;
+4. the configured fallback is `kimi-k2.6`, whose window is far larger than 4,096, so the clipping that explains
+   every model-side failure in this document does not apply to those turns.
+
+Currently configured (checked without reading any key material): primary is the local Ollama through its
+**OpenAI-compatible** endpoint `http://127.0.0.1:11434/v1` — which is precisely why `num_ctx` cannot be sent — and
+the fallback is Moonshot `kimi-k2.6`.
