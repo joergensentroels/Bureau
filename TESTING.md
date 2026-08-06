@@ -496,3 +496,33 @@ tool it could see, when the answer was two files away — and each call spent th
 proving the same absence twice.** A timeout is now remembered for ten minutes and re-probed for 8 seconds instead
 of 150, self-healing the moment a worker returns: 300s → 158s on this exact run. And a search that fails during a
 hunt now says the repository is where a claim about code gets checked, rather than suggesting `web_research`.
+
+### Runs seven and eight: the read cap manufactured a false finding
+
+A five-round hunt was cut off by its own 15-minute client limit after two rounds, and both rounds found defects
+in Bureau.
+
+**Round 1 lost 600 of its 776 seconds to the hard floor working correctly.** The agent proposed `shell` to run
+`npm test` — a reasonable thing to want — and `shell` always needs the CEO, so an approval was filed in Latch and
+the run waited the full ten-minute deadline for a human who was not watching. The floor is right; the wait was
+pure loss, because `register_finding`'s `check` field runs exactly those commands under the runner's own
+allowlist with no approval at all. A hard-floored action during an unattended hunting round is now redirected
+there instantly. Nothing new becomes runnable — the check allowlist is narrower than `shell` has ever been.
+
+**Round 2 produced a substantive claim, and it was false because of a cap I had just added.** The sibling-path
+lens read `src/auth.mjs` and reported: *"the 'invite' provider in PROVIDERS is not handled in auth.mjs,
+indicating a missing sibling implementation."* Checked by hand: **false.** The invite path is fully handled at
+lines 273–304 and explicitly documented at line 220. But `auth.mjs` is 20,279 bytes and reads had just been
+capped at 4,000 to keep the small model coherent — so the agent saw `PROVIDERS = ["dev","oidc","invite"]` on line
+6, saw two of the three handled inside the first 4kB, and never saw the third. **It reasoned correctly from
+evidence I truncated.**
+
+The general rule, which nothing in the read result had stated: **a truncated read is evidence of PRESENCE and
+never of ABSENCE.** Two fixes. The read message now says so, every time it truncates. And there is now an
+instrument a prefix cap cannot defeat — a term in `command` greps the whole file (or the whole repository) and
+returns every matching line with its number, capped by *matches* rather than by position. On the real file it
+returns 17 hits for `invite`, including line 220 and everything past the cap, so it would have refuted the claim
+in one turn. An empty search result *is* evidence of absence, and the message says that too.
+
+Worth noting what did not go wrong: the gate would have refused that claim anyway, because no check command
+could have been made to fail. The false hypothesis cost a round, not a corrupted register.

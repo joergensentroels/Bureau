@@ -1111,7 +1111,7 @@ export function systemPrompt(org, agent) {
     "- github_pr: open a pull request containing the document(s) you already SAVED this run — title=the PR title, command=the PR description, details=why. You do NOT list files: it includes what you saved with file_write, so save the finished work first. The CEO approves every one (never auto).",
     "- plan_add: record a follow-up task you notice but shouldn't do right now into the company's persistent plan — title=the task, details=why/context. It is saved for a future run so nothing is lost. Runs instantly (no approval). Do NOT use it to defer the CURRENT objective.",
     "- register_finding: claim a DEFECT and prove it. title=the one-sentence claim, url=file:line, details=the defect class, command=the check that detects it (one of the project's own: npm test | npm run <script> | node --test [file] | node tools/<x>.mjs), fix={file,find,replace}=the change that makes the check pass. The runner verifies it ITSELF in a throwaway copy and requires three things: your check FAILS on the current code, PASSES with your fix, and FAILS AGAIN once the fix is reverted. A claim without that evidence is refused and you are told why, so do not register a hunch — register something you can make fail.",
-    findingRepo(org) ? "- read_repo: read the source of the repository under investigation. title=the PATH, relative to the repo root, and nothing else — \"src/db.mjs\", not a description of what you are doing. Leave title blank (or name a directory) to LIST what is in the repository; a path that does not exist also returns the listing, so start there and read exact paths from it rather than guessing. Read-only and confined to that one repository. Use it before claiming anything about the code: a check command and a fix must quote text that is really in the file." : "",
+    findingRepo(org) ? "- read_repo: read the source of the repository under investigation. title=the PATH, relative to the repo root, and nothing else — \"src/db.mjs\", not a description of what you are doing. Leave title blank (or name a directory) to LIST what is in the repository; a path that does not exist also returns the listing, so start there and read exact paths from it rather than guessing. Put a TERM in \"command\" to search instead of read: it greps the whole file (or the whole repository if you give no path) and returns every matching line with its number — use that whenever you want to claim something is MISSING, because a read can be cut off and a search cannot. Read-only and confined to that one repository. Use it before claiming anything about the code: a check command and a fix must quote text that is really in the file." : "",
     "- ask_stakeholder: record a question only the CEO can settle — scope, a policy choice, a name, a number nobody wrote down — WITHOUT stopping. title=the question, command=the assumption you are proceeding under meanwhile, url=where that assumption is written down (file, field, document). It does not wait for an answer and it must not: you keep working, the question is queued for the CEO to answer alongside others, and the answer reaches a later run. A question with no assumption is REFUSED, because that is just asking to stop. Use this instead of escalate whenever the work can continue on a stated guess.",
     "- ask_peer: consult a NAMED teammate for input, advice, or a quick review — title=their name or role, command=your question, details=any context. They reply with their expert opinion and it comes back to you. Use it to get a specialist's take or a second opinion instead of guessing. It is advice only — it does NOT make them do real work.",
     (org._mcpTools && org._mcpTools.length)
@@ -2117,6 +2117,16 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
     }
     // ---- Guardrails: per-agent action allowlist, per-run action cap, purchase auto-approve ceiling ----
     const actType = String(next.actionType || "").toLowerCase();
+    // A hunting round is unattended by definition — it runs after the work is done, often on a schedule. A hard-floored
+    // action there files an approval and waits ten minutes for a CEO who is not watching: measured, 600 of one round's
+    // 776 seconds went to a single `shell` proposing `npm test`. The floor is right; the wait is pure loss, because a
+    // finding's `check` field runs exactly those commands under the runner's own allowlist with no approval at all.
+    if (run.phase === "investigate" && (actType === "shell" || actType === "api_call")) {
+      emit(run, "blocked", { agent: who, depth, actionType: actType, reason: "hunting rounds are unattended — use a finding's check instead" });
+      logAudit({ kind: "blocked", runId: run.id, agentId: agent.id, agent: who, actionType: actType, error: "hard-floor action during an unattended hunting round", decision: "denied" });
+      history.push({ role: "user", content: `BLOCKED: "${actType}" needs the CEO to approve it, and nobody is watching a hunting round — waiting on that would stall this round for ten minutes and then fail. You do NOT need it: put the command in a register_finding "check" instead (npm test | npm run <script> | node --test [file] | node tools/<x>.mjs) and the runner will run it itself, in a throwaway copy, and tell you whether it fails. That is how a finding gets proved here. Or use read_repo to look at the code.` });
+      continue;
+    }
     if (Array.isArray(agent.allow) && agent.allow.length && !agent.allow.includes(actType)) {
       emit(run, "blocked", { agent: who, depth, actionType: actType, reason: "not in this agent's allowlist" });
       logAudit({ kind: "blocked", runId: run.id, agentId: agent.id, agent: who, actionType: actType, error: "not permitted for this agent", decision: "denied" });
@@ -2431,6 +2441,22 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
           // A blank path, a directory, or a path that names nothing all mean the same thing in practice: the agent does
           // not know what is in this repository yet. All three list. Only a confinement refusal is fatal, because that
           // one is a boundary rather than a mistake about the contents.
+          // A term in "command" means SEARCH — the instrument that a prefix cap cannot defeat.
+          const term = String(next.command || "").trim();
+          if (term && term !== want) {
+            const s = await searchRepoFiles(repo, term, target || "");
+            if (s.ok) {
+              didExecute = true;
+              emitAct({ agent: who, depth, actionType: "read_repo", url: (target || "*") + ":" + term, ok: true, bytes: s.hits.length, error: "" });
+              emit(run, "repoRead", { by: who, depth, file: (target || "the whole repository") + " for " + JSON.stringify(term), bytes: s.hits.length, search: true });
+              history.push({ role: "user", content: s.hits.length
+                ? `APPROVED and EXECUTED — every line containing ${JSON.stringify(term)}${target ? " in " + target : " in the repository"} (${s.hits.length} match(es) across ${s.scanned} file(s)${s.truncated ? ", capped" : ""}):\n`
+                  + s.hits.map((h) => `${h.file}:${h.line}: ${h.text}`).join("\n")
+                  + `\n\nThis search read the WHOLE file(s), so an empty result here IS evidence of absence — unlike a truncated read.${postReadGuidance(run)}`
+                : `APPROVED and EXECUTED — ${JSON.stringify(term)} appears NOWHERE${target ? " in " + target : " in the repository"} (${s.scanned} file(s) searched in full). This search was not truncated, so that is real evidence of absence.${postReadGuidance(run)}` });
+              continue;
+            }
+          }
           const r = target ? await readRepoFile(repo, target)
                   : want ? await readRepoFile(repo, want)
                   : { ok: false, error: "that is a directory — list it instead of reading it" };
@@ -2439,7 +2465,11 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
             didExecute = true;
             emitAct({ agent: who, depth, actionType: "read_repo", url: r.name, ok: true, bytes: r.bytes, error: "" });
             emit(run, "repoRead", { by: who, depth, file: r.name, bytes: r.bytes, truncated: !!r.truncated });
-            history.push({ role: "user", content: `APPROVED and EXECUTED — ${r.name} from the repository under investigation${r.truncated ? ` (first ${r.content.length} of ${r.bytes} characters)` : ""}:\n---\n${r.content}\n---\nThis is the REAL current source. Anything you claim about it must quote text that appears above.${postReadGuidance(run)}` });
+            history.push({ role: "user", content: `APPROVED and EXECUTED — ${r.name} from the repository under investigation${r.truncated ? ` (the FIRST ${r.content.length} of ${r.bytes} characters — you have NOT seen the rest)` : ""}:\n---\n${r.content}\n---\nThis is the REAL current source. Anything you claim about it must quote text that appears above.`
+              + (r.truncated
+                ? ` The file was CUT OFF: a truncated read shows what IS there and can never show that something is MISSING. Do not conclude anything is absent, unhandled or unimplemented from this — search the whole file instead: read_repo with title=${r.name} and the term in "command".`
+                : "")
+              + postReadGuidance(run) });
           } else if (listInstead) {
             // List the requested subtree if it exists; otherwise the whole repository, because a wrong path is exactly
             // when the agent most needs to see the real one.
@@ -3812,6 +3842,37 @@ export function resolveRepoTarget(files, text) {
     if (suffix.length > 1) return null;   // ambiguous: showing the listing beats picking one
   }
   return null;
+}
+
+// Grep one file, or the whole repository, for a literal term. Capped by number of MATCHES, not by position in the
+// file, which is the point: a prefix cap can hide the one line that refutes a claim of absence.
+export async function searchRepoFiles(repo, needle, rel = "", cap = 60) {
+  const term = String(needle == null ? "" : needle).trim();
+  if (!term) return { ok: false, error: "no search term" };
+  let files;
+  if (rel) {
+    const abs = repoPathSafe(repo, rel);
+    if (!abs) return { ok: false, error: "that path is not inside the configured repository" };
+    files = [rel];
+  } else {
+    const l = await listRepoFiles(repo);
+    if (!l.ok) return l;
+    files = l.files;
+  }
+  const low = term.toLowerCase();
+  const hits = [];
+  let scanned = 0;
+  for (const f of files) {
+    if (hits.length >= cap) break;
+    const r = await readRepoFile(repo, f, 400000);   // whole file: a match cap replaces the length cap
+    if (!r.ok) continue;
+    scanned++;
+    const lines = r.content.split("\n");
+    for (let i = 0; i < lines.length && hits.length < cap; i++) {
+      if (lines[i].toLowerCase().includes(low)) hits.push({ file: r.name, line: i + 1, text: lines[i].trim().slice(0, 200) });
+    }
+  }
+  return { ok: true, term, hits, scanned, truncated: hits.length >= cap };
 }
 
 export async function listRepoFiles(repo, sub = "", cap = 400) {

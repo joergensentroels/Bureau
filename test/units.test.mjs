@@ -15,7 +15,7 @@ import {
   LENSES, pickLens, investigateObjective, investigate, seedLenses, activeLenses, bookLensRound,
   normalizeLens, lensParaphrase, addProposedLens, lensProposalObjective, sigWords, postReadGuidance,
   executorProbeMs,
-  repoPathSafe, readRepoFile, listRepoFiles, resolveRepoTarget,
+  repoPathSafe, readRepoFile, listRepoFiles, resolveRepoTarget, searchRepoFiles,
   normalizeQuestion, questionKey, recordQuestion, answerQuestion, systemPrompt, unqueuedAssumption,
   buildUndecidedMsgs, normalizeUndecided, unaddressedUndecided, runInvestigateFlag,
 } from "../server.mjs";
@@ -843,6 +843,53 @@ console.log("# investigate — the lens register is the COMPANY's, and it learns
     chk("  investigate is given the register rather than the constant", src.includes("pickLens(run, lenses, lensStats)"));
     chk("  and every round is booked against the company, dry ones included", src.includes("bookLensRound(o, round.lens, round.confirmed"));
   }
+}
+console.log("# investigate — a truncated read cannot show ABSENCE, so there is a search that can");
+{
+  // The defect this closes was mine, and it manufactured a false finding. Round two of a five-round hunt claimed "the
+  // 'invite' provider in PROVIDERS is not handled in auth.mjs". False: it is handled at lines 273-304 and documented at
+  // 220. But the file is 20,279 bytes and I had just capped reads at 4,000 to keep a small model coherent — so the agent
+  // saw PROVIDERS on line 6, saw two providers handled, and never saw the third. It reasoned correctly from evidence I
+  // truncated. A prefix is evidence of PRESENCE and never of ABSENCE.
+  const R = mkdtempSync(join(tmpdir(), "repo-search-"));
+  try {
+    const { mkdirSync, writeFileSync: wf } = await import("node:fs");
+    mkdirSync(join(R, "src"));
+    // The shape of the real defect: the term appears once early and again far past any prefix cap.
+    // Built by joining an array so no escape sequence has to survive the layers between here and the file.
+    const LF = String.fromCharCode(10);
+    const authLines = ['export const PROVIDERS = ["dev", "oidc", "invite"];'];
+    for (let i = 0; i < 600; i++) authLines.push('// filler');
+    authLines.push('export function redeemInvite() { return { provider: "invite" }; }');
+    wf(join(R, 'src', 'auth.mjs'), authLines.join(LF) + LF);
+    wf(join(R, 'src', 'other.mjs'), 'export const x = 1;' + LF);
+
+    const early = await readRepoFile(R, "src/auth.mjs", 200);
+    chk("  a prefix read is truncated and says so", early.ok && early.truncated && early.content.length === 200);
+    chk("  and the later occurrence is genuinely not in it", !early.content.includes("redeemInvite"));
+
+    const s = await searchRepoFiles(R, "invite", "src/auth.mjs");
+    chk("  the search finds BOTH occurrences, including the one past the cap", s.ok && s.hits.length >= 2 && s.hits.some((h) => h.text.includes("redeemInvite")));
+    chk("  with file and line numbers", s.hits.every((h) => h.file === "src/auth.mjs" && h.line > 0));
+    // The control that makes an empty result meaningful: absence must be reportable as absence.
+    const none = await searchRepoFiles(R, "zzz_not_here_at_all", "src/auth.mjs");
+    eq("  a genuinely absent term reports zero", [none.ok, none.hits.length], [true, 0]);
+    const all = await searchRepoFiles(R, "export");
+    chk("  with no path it searches the whole repository", all.ok && new Set(all.hits.map((h) => h.file)).size === 2);
+    eq("  an empty term is refused rather than matching everything", (await searchRepoFiles(R, "  ")).ok, false);
+    chk("  and an escape attempt is refused", !(await searchRepoFiles(R, "x", "../../etc/passwd")).ok);
+    {
+      const capped = await searchRepoFiles(R, "filler", "src/auth.mjs", 5);
+      eq("  the cap is on MATCHES, not on position in the file", [capped.hits.length, capped.truncated], [5, true]);
+    }
+    {
+      const src = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
+      chk("  a truncated read tells the agent it cannot prove absence", src.includes("can never show that something is MISSING"));
+      chk("  a term in command searches instead of reading", src.includes("if (term && term !== want)"));
+      chk("  and an unattended hunting round redirects a hard-floor action instead of waiting ten minutes for a CEO",
+          src.includes("hunting rounds are unattended") && src.includes('actType === "shell" || actType === "api_call"'));
+    }
+  } finally { rmSync(R, { recursive: true, force: true }); }
 }
 console.log("# investigate — the runner works out which file was meant, instead of demanding a formatted path");
 {
