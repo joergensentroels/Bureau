@@ -1053,7 +1053,11 @@ function emit(run, type, data) {
   }
 }
 
-export function systemPrompt(org, agent) {
+// The actions a hunting round can actually use. Everything else is noise in a phase that must not write, buy, send or
+// commit — and noise is not free when the context window is 4,096 tokens and the prompt is clipped from the front.
+const HUNT_ACTIONS = new Set(["read_repo", "register_finding", "ask_stakeholder", "note", "propose_lens", "ask_peer"]);
+
+export function systemPrompt(org, agent, opts = {}) {
   const ceo = org.ceo?.role ? `The CEO you report to is in charge of: ${org.ceo.role}.` : "You report to the CEO.";
   const traits = (agent.traits || []).join(", ");
   return [
@@ -1112,6 +1116,7 @@ export function systemPrompt(org, agent) {
     "- plan_add: record a follow-up task you notice but shouldn't do right now into the company's persistent plan — title=the task, details=why/context. It is saved for a future run so nothing is lost. Runs instantly (no approval). Do NOT use it to defer the CURRENT objective.",
     "- register_finding: claim a DEFECT and prove it. title=the one-sentence claim, url=file:line, details=the defect class, command=the check that detects it (one of the project's own: npm test | npm run <script> | node --test [file] | node tools/<x>.mjs), fix={file,find,replace}=the change that makes the check pass. The runner verifies it ITSELF in a throwaway copy and requires three things: your check FAILS on the current code, PASSES with your fix, and FAILS AGAIN once the fix is reverted. A claim without that evidence is refused and you are told why, so do not register a hunch — register something you can make fail.",
     findingRepo(org) ? "- read_repo: read the source of the repository under investigation. title=the PATH, relative to the repo root, and nothing else — \"src/db.mjs\", not a description of what you are doing. Leave title blank (or name a directory) to LIST what is in the repository; a path that does not exist also returns the listing, so start there and read exact paths from it rather than guessing. Put a TERM in \"command\" to search instead of read: it greps the whole file (or the whole repository if you give no path) and returns every matching line with its number — use that whenever you want to claim something is MISSING, because a read can be cut off and a search cannot. Read-only and confined to that one repository. Use it before claiming anything about the code: a check command and a fix must quote text that is really in the file." : "",
+    "- note: record what you checked and what you concluded, when there is nothing to run — title=the heading, details=what you looked at and what you found or ruled out. It runs instantly and changes nothing. Use it instead of inventing an action when the honest answer is that you looked and found nothing.",
     "- ask_stakeholder: record a question only the CEO can settle — scope, a policy choice, a name, a number nobody wrote down — WITHOUT stopping. title=the question, command=the assumption you are proceeding under meanwhile, url=where that assumption is written down (file, field, document). It does not wait for an answer and it must not: you keep working, the question is queued for the CEO to answer alongside others, and the answer reaches a later run. A question with no assumption is REFUSED, because that is just asking to stop. Use this instead of escalate whenever the work can continue on a stated guess.",
     "- ask_peer: consult a NAMED teammate for input, advice, or a quick review — title=their name or role, command=your question, details=any context. They reply with their expert opinion and it comes back to you. Use it to get a specialist's take or a second opinion instead of guessing. It is advice only — it does NOT make them do real work.",
     (org._mcpTools && org._mcpTools.length)
@@ -1121,6 +1126,7 @@ export function systemPrompt(org, agent) {
       ? "  External tools available: " + org._mcpTools.slice(0, 30).map((t) => `${t.server}/${t.name}${t.description ? ` — ${String(t.description).slice(0, 80)}` : ""}`).join("; ")
       : "",
     "",
+    opts.phase === "investigate" ? "You are in a REVIEW phase: you cannot write files, buy anything, send anything or commit. Only the actions listed above." : "",
     "Respond with STRICT JSON only (no prose, no code fences):",
     '{ "thought":"one sentence", "speak":"what you tell the CEO, in your voice (1-3 sentences)",',
     '  "next": { "type":"propose_action"|"escalate"|"finish",',
@@ -1140,7 +1146,15 @@ export function systemPrompt(org, agent) {
     "would otherwise be guessing — use type \"escalate\" with a specific question for the CEO. Do NOT",
     "repeat the same action or keep guessing. Escalate once, then use the answer. Use \"finish\" when done.",
     "/no_think",
-  ].filter(Boolean).join("\n");
+  ].filter(Boolean)
+    // In a hunting round, drop the doc line for every action the round cannot use. Each is one line of a 4,096-token
+    // budget that gets clipped from the FRONT, so what is dropped here is what survives at the far end.
+    .filter((l) => {
+      if (opts.phase !== "investigate") return true;
+      const m = /^- ([a-z_]+):/.exec(String(l));
+      return !m || HUNT_ACTIONS.has(m[1]);
+    })
+    .join("\n");
 }
 
 // Expand the compact role/persona/traits into a full markdown character profile via the LLM.
@@ -1939,7 +1953,7 @@ async function consultPeer(asker, peer, org, question) {
 // Reused by both a direct single-agent run and each delegated sub-task. Returns {summary, tokens}.
 async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 0) {
   const who = agent.name;
-  const history = [{ role: "system", content: systemPrompt(org, agent) }];
+  const history = [{ role: "system", content: systemPrompt(org, agent, { phase: run.phase }) }];
   if ((agent.lessons || []).length) history.push({ role: "user", content:
     "Coaching from the CEO's past feedback on your work — APPLY these; do not repeat the mistakes they point at:\n" +
     agent.lessons.slice(0, 8).map((l) => `- ${l.text}`).join("\n") });

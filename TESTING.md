@@ -641,3 +641,42 @@ A wasted turn the model cannot detect is a turn it will repeat until the cap, an
 now refused with a reason, and three in a row ends the round with `gaveUp: true` rather than reading as a clean
 dry round, which would have been the more damaging outcome: a round that spent its whole budget on empty JSON and
 reported "nothing found" is indistinguishable from a round that genuinely looked.
+
+## The root cause of every model-side failure: a 4,096-token context window
+
+Fourteen runs blamed the model for degrading after a large read. It was measurable, and it was not the model.
+
+**Ollama's default context window is 4,096 tokens, and Bureau sets `num_ctx` nowhere.** Probed directly, with the
+rule placed at the very start of the prompt so truncation would remove it:
+
+| prompt | tokens Ollama processed | obeys the rule at the top |
+|---|---|---|
+| 0.2 kB | 65 | YES |
+| 17 kB | 3,425 | YES |
+| 17 kB, `num_ctx: 16384` | 3,425 | YES |
+| **50 kB, default** | **2,050** (of ~9,865) | **no** — answered with a line of the filler |
+| 50 kB, `num_ctx: 32768` | 9,865 | YES |
+
+Past the window the prompt is clipped **from the front**, which is where the system message lives. That is exactly
+the observed behaviour: `actionType: "other"` with every field empty (the action list is gone), *"I'll provide a
+valid JSON response with the required structure"* (it knows it owes JSON and has lost the schema), and content
+drawn from the wrong part of the prompt.
+
+A hunting turn was measured at **16,882 characters ≈ 4,220 tokens before any reasoning** — over the limit on turn
+one, and every read pushes it further.
+
+**Why it cannot be fixed in the request.** Latch reaches the local model through the OpenAI-compatible
+`/chat/completions` endpoint, which has no `num_ctx` field. Raising the window means a machine change —
+`OLLAMA_CONTEXT_LENGTH` on the Ollama service, or a derived model with `PARAMETER num_ctx` — and this GPU is at
+**13,716 of 16,303 MiB used, 2,280 free**, so a larger KV cache is not obviously affordable. That is the
+operator's decision, not one to take unilaterally on a service that boots as a scheduled task.
+
+**What was free.** A review round can only use a handful of actions, so it is no longer shown the rest: the
+hunting system prompt drops `file_write`, `purchase`, `github_*` and the others, and says in words that it is a
+review phase. 8,613 → 6,338 characters, about 570 tokens back, with controls asserting construction is untouched.
+It is a mitigation and not a fix — the turn still begins near the limit — but it is the half that does not require
+someone to trade VRAM.
+
+Also found while measuring: **`note` is implemented and enumerated but was never described to the agent** — the
+exact inverse of the `other` defect. In a review round it is the right action for "I looked here, this is what I
+checked, nothing to report", which is the answer most rounds should give. Now documented.

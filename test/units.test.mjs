@@ -864,6 +864,29 @@ console.log("# the gate runs npm without a shell and without a .cmd");
     chk('  and a finish wrapped in propose_action is treated as a finish', src.includes('next.type = "finish";'));
   }
 }
+console.log("# a hunting turn must FIT the context window that exists");
+{
+  // Measured, and it is the root cause of every model-side failure in this work: Ollama's default context window is
+  // 4,096 tokens (probed — a 50kB prompt reports 2,050 prompt tokens instead of ~9,865 and the model answers from the
+  // filler rather than the rule at the top). Bureau sets num_ctx nowhere and Latch reaches Ollama through the
+  // OpenAI-compatible endpoint, which has no such field. A hunting turn starts near the limit and a read pushes it
+  // over, so the prompt is clipped from the FRONT — losing the system message with the JSON action format.
+  // Raising the window is a machine change on a GPU with 2.2GB free, so it is the operator's. Trimming the prompt is
+  // free, and a review round can only use a handful of actions anyway.
+  const org = { guardrails: { findingRepo: 'C:/x' } }, agent = { name: 'Ada', role: 'Software reviewer' };
+  const normal = systemPrompt(org, agent);
+  const hunt = systemPrompt(org, agent, { phase: 'investigate' });
+  chk('  a hunting prompt is smaller than a construction one', hunt.length < normal.length - 1000);
+  for (const k of ['read_repo', 'register_finding', 'ask_stakeholder', 'note'])
+    chk('  it keeps ' + k + ', which a review round needs', hunt.includes('- ' + k + ':'));
+  for (const k of ['file_write', 'purchase', 'github_pr', 'github_file'])
+    chk('  it drops ' + k + ', which a review round must not do', !hunt.includes('- ' + k + ':'));
+  chk('  and it says so in words as well as by omission', /REVIEW phase/.test(hunt));
+  // The controls: construction must be untouched, or this trades one phase's reliability for another's capability.
+  for (const k of ['file_write', 'purchase', 'github_pr', 'read_repo', 'note'])
+    chk('  construction still advertises ' + k, normal.includes('- ' + k + ':'));
+  chk('  and the turn loop passes the phase through', readFileSync(new URL('../server.mjs', import.meta.url), 'utf8').includes('systemPrompt(org, agent, { phase: run.phase })'));
+}
 console.log("# a turn that proposes nothing must not pass in silence");
 {
   // Observed nine times in a row after a 20kB read: speak "…", actionType "other", every field empty. Two causes,
