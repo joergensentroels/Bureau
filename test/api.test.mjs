@@ -41,6 +41,27 @@ const ok = (c, m) => (c ? pass : fail).push(m);
     ok(gr.autoApproveUnderUsd === 12.35, "autoApproveUnderUsd rounded to cents");
     ok(gr.maxActionsPerRun === 100, "maxActionsPerRun clamped to 100");
 
+    // ---- the lens register over HTTP ----
+    // The register is only "company state" if the company can change it. Read it, add one, rewrite one, switch one off.
+    {
+      const seeded = (await api("GET", "/api/lenses")).j.lenses;
+      ok(Array.isArray(seeded) && seeded.length >= 8, "the register seeds itself on first read (" + (seeded || []).length + " lenses)");
+      ok(seeded.every((l) => l.id && l.prompt && "found" in l && "dry" in l), "each lens carries its id, instruction and yield");
+      ok(seeded.every((l) => l.rounds === (l.found || 0) + (l.dry || 0)), "and the rounds it has been given");
+      // A lens must be an instruction. A one-word topic changes nothing about what the agent does.
+      ok((await api("POST", "/api/lenses", { id: "security", prompt: "security" })).status === 400, "a one-word lens is refused: it is a topic, not an instruction");
+      ok((await api("POST", "/api/lenses", { prompt: "x".repeat(60) })).status === 400, "and a lens with no id is refused");
+      const made = await api("POST", "/api/lenses", { id: "money-path", prompt: "Follow every path where money or credentials move, and ask who could take it without being logged." });
+      ok(made.status === 200, "an operator can add a lens");
+      ok((await api("POST", "/api/lenses", { id: "money-path", prompt: "y".repeat(60) })).status === 409, "adding the same id twice is a 409");
+      ok((await api("GET", "/api/lenses")).j.lenses.some((l) => l.id === "money-path"), "and it comes back in the register");
+      ok((await api("PATCH", "/api/lenses/nope", { off: true })).status === 404, "patching a lens that does not exist is a 404");
+      const off = await api("PATCH", "/api/lenses/money-path", { off: true });
+      ok(off.status === 200 && off.j.lens.off === true, "a lens can be switched off");
+      const re = await api("PATCH", "/api/lenses/money-path", { prompt: "Walk the refund and credit paths and ask which one skips the audit log entirely.", reset: true });
+      ok(re.j.lens.edited === true && re.j.lens.found === 0 && re.j.lens.dry === 0, "rewriting the instruction can reset the yield, since the old numbers no longer describe it");
+    }
+
     // ---- the stakeholder question queue over HTTP ----
     // The queue is only useful if the operator can see the batch and answer it in one place; without these two
     // endpoints ask_stakeholder is a write-only hole and the mechanism is worse than escalate, not better.

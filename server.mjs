@@ -3122,11 +3122,17 @@ async function runGated(run, worker, persistExtra, perAgentTally) {
     && run.investigate !== false && org0.guardrails?.investigate !== false;
   if (mayInvestigate) {
     run.phase = "investigate";
+    // Seed on first use so an existing company gets the register without a migration step.
+    const reg = await updateOrg((o) => { seedLenses(o); }).then(() => readOrg()).catch(() => org0);
     tokens += await investigate(run, worker, {
+      lenses: activeLenses(reg), lensStats: reg.lenses || [],
       taxonomy: org0.taxonomy || {},
       maxRounds: Number(org0.guardrails?.investigateRounds) || undefined,
       // Each confirmed finding bumps its class on the company, so the NEXT run's lens choice is informed by this one.
-      onRound: async () => {
+      onRound: async (r, round) => {
+        // The lens result is booked EVERY round, including dry ones — a dry round is the information that makes the
+        // next run's ordering better, so skipping it would keep the register permanently optimistic.
+        await updateOrg((o) => { seedLenses(o); bookLensRound(o, round.lens, round.confirmed, Date.now()); }).catch(() => {});
         const fresh = (run.findings || []).filter((f) => !f._booked);
         if (!fresh.length) return;
         await updateOrg((o) => {
@@ -3374,7 +3380,37 @@ export const LENSES = [
 // Least-recently-used within this run, skipping lenses that have already gone dry twice — the register that makes
 // rotation informed rather than random. It is deliberately NOT random: a lens that just found something gets another
 // turn before one that has produced nothing.
-export function pickLens(run, lenses = LENSES) {
+// The company's copy of the register. Seeded from LENSES, then it is the company's — an operator can add a lens, edit
+// a prompt, or switch one off, and the yield counters survive. Merging by id rather than replacing means a later
+// release can add a lens without wiping what this company learned about the others.
+export function seedLenses(org, defaults = LENSES) {
+  const have = Array.isArray(org.lenses) ? org.lenses : [];
+  const byId = new Map(have.map((l) => [l.id, l]));
+  for (const d of defaults) {
+    const cur = byId.get(d.id);
+    if (cur) { if (!cur.edited) cur.prompt = d.prompt; }   // unedited tracks the code; edited belongs to the operator
+    else byId.set(d.id, { id: d.id, prompt: d.prompt, found: 0, dry: 0, lastAt: 0, off: false, edited: false });
+  }
+  org.lenses = [...byId.values()];
+  return org.lenses;
+}
+export const activeLenses = (org) => (Array.isArray(org?.lenses) ? org.lenses : LENSES).filter((l) => !l.off && l.id && l.prompt);
+// One round's outcome, booked against the company so the NEXT run starts informed.
+export function bookLensRound(org, lensId, confirmed, now = 0) {
+  const l = (Array.isArray(org.lenses) ? org.lenses : []).find((x) => x.id === lensId);
+  if (!l) return null;
+  if (confirmed) l.found = (l.found || 0) + confirmed; else l.dry = (l.dry || 0) + 1;
+  l.lastAt = now;
+  return l;
+}
+
+// `stats` is the company register (the same array activeLenses returns). Ordering, in priority order:
+//   1. the lens that just found something in THIS run — it is warm, give it another turn;
+//   2. a lens this company has never run — coverage beats exploitation while five of eight have never been tried;
+//   3. highest yield rate found/(found+dry);
+//   4. least recently used across runs, which is what makes consecutive runs start in different places.
+// Rule 4 is the one that fixes the real bug: without it every run began with the same lens forever.
+export function pickLens(run, lenses = LENSES, stats = null) {
   const used = new Map((run.rounds || []).map((r, i) => [r.lens, i]));
   const dry = new Map();
   for (const r of run.rounds || []) if (!r.confirmed) dry.set(r.lens, (dry.get(r.lens) || 0) + 1);
@@ -3382,7 +3418,15 @@ export function pickLens(run, lenses = LENSES) {
   const pool = live.length ? live : lenses;
   const last = run.rounds?.length ? run.rounds[run.rounds.length - 1] : null;
   if (last && last.confirmed) { const again = pool.find((l) => l.id === last.lens); if (again) return again; }
-  return pool.slice().sort((a, b) => (used.has(a.id) ? used.get(a.id) : -1) - (used.has(b.id) ? used.get(b.id) : -1))[0];
+  const st = new Map((Array.isArray(stats) ? stats : []).map((l) => [l.id, l]));
+  const rate = (l) => { const s = st.get(l.id); if (!s) return -1; const n = (s.found || 0) + (s.dry || 0); return n ? (s.found || 0) / n : -1; };
+  const untried = (l) => { const s = st.get(l.id); return !s || (!(s.found || 0) && !(s.dry || 0)); };
+  const lastAt = (l) => (st.get(l.id)?.lastAt) || 0;
+  return pool.slice().sort((a, b) =>
+    (used.has(a.id) ? used.get(a.id) : -1) - (used.has(b.id) ? used.get(b.id) : -1)   // within-run recency first
+    || (untried(b) ? 1 : 0) - (untried(a) ? 1 : 0)                                    // then never-run-here
+    || rate(b) - rate(a)                                                              // then what actually finds things
+    || lastAt(a) - lastAt(b))[0];                                                     // then coldest across runs
 }
 
 // The prompt for one round. Carries the lens, what has already been claimed (confirmed AND refused, so the agent does
@@ -3411,12 +3455,13 @@ export function investigateObjective(run, lens, taxonomy = {}) {
 
 // The loop. `worker` is the same one runGated uses, so tallies, budgets and steering all keep working.
 export async function investigate(run, worker, opts = {}) {
-  const { taxonomy = {}, onRound = null, dryLimit = INVESTIGATE_DRY_ROUNDS, maxRounds = INVESTIGATE_MAX_ROUNDS } = opts;
+  const { taxonomy = {}, onRound = null, dryLimit = INVESTIGATE_DRY_ROUNDS, maxRounds = INVESTIGATE_MAX_ROUNDS,
+          lenses = LENSES, lensStats = null } = opts;
   run.rounds = run.rounds || []; run.findings = run.findings || []; run.rejectedFindings = run.rejectedFindings || [];
   run.dryRounds = 0;
   let tokens = 0;
   while (run.dryRounds < dryLimit && run.rounds.length < maxRounds && !run.stopped) {
-    const lens = pickLens(run);
+    const lens = pickLens(run, lenses, lensStats);
     const roundNo = run.rounds.length + 1;
     const before = run.findings.length;
     emit(run, "lens", { lens: lens.id, round: roundNo });
@@ -4766,6 +4811,45 @@ const server = createServer(async (req, res) => {
       const id = p.split("/")[3];
       await updateOrg((o) => { o.triggers = (o.triggers || []).filter((x) => x.id !== id); });
       return send(res, 200, { ok: true });
+    }
+
+    // ----- the lens register: which ways of looking this company has tried, and what each one found -----
+    if (p === "/api/lenses" && req.method === "GET") {
+      const org = await readOrg();
+      const list = (Array.isArray(org.lenses) && org.lenses.length ? org.lenses : seedLenses({}))
+        .map((l) => ({ ...l, rounds: (l.found || 0) + (l.dry || 0) }));
+      return send(res, 200, { lenses: list });
+    }
+    if (p === "/api/lenses" && req.method === "POST") {
+      const body = await readBody(req);
+      const id = String(body.id || "").trim().toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 40);
+      const prompt = String(body.prompt || "").trim().slice(0, 600);
+      // A lens is an INSTRUCTION, not a topic — a one-word "security" lens changes nothing about what the agent does,
+      // which is the whole reason the built-in ones are phrased as commands.
+      if (!id || prompt.length < 40) return send(res, 400, { error: "a lens needs an id and an instruction of at least 40 characters — say what to DO, not what to think about" });
+      let dup = false;
+      await updateOrg((o) => {
+        seedLenses(o);
+        if (o.lenses.some((l) => l.id === id)) { dup = true; return; }
+        o.lenses.push({ id, prompt, found: 0, dry: 0, lastAt: 0, off: false, edited: true });
+      });
+      return dup ? send(res, 409, { error: "a lens with that id already exists" }) : send(res, 200, { ok: true, id });
+    }
+    if (p.startsWith("/api/lenses/") && req.method === "PATCH") {
+      const id = decodeURIComponent(p.split("/")[3] || "");
+      const body = await readBody(req);
+      let found = null;
+      await updateOrg((o) => {
+        seedLenses(o);
+        const l = o.lenses.find((x) => x.id === id);
+        if (!l) return;
+        if (body.prompt !== undefined) { l.prompt = String(body.prompt || "").slice(0, 600); l.edited = true; }
+        if (body.off !== undefined) l.off = body.off === true || body.off === "true";
+        // Clearing the counters is how an operator says "this prompt changed, the old yield does not describe it".
+        if (body.reset === true || body.reset === "true") { l.found = 0; l.dry = 0; l.lastAt = 0; }
+        found = l;
+      });
+      return found ? send(res, 200, { lens: found }) : send(res, 404, { error: "no lens has that id" });
     }
 
     // ----- the stakeholder question queue: the one human touchpoint designed to be answered in a BATCH -----

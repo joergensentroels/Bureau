@@ -12,7 +12,7 @@ import {
   chunkDocument, deliverableChunks, modelUnreachable, trimVersions, clientKey, isLoopback,
   startLogTee, webhookBody,
   normalizeFinding, verifyFinding, findingCheckAllowed,
-  LENSES, pickLens, investigateObjective, investigate,
+  LENSES, pickLens, investigateObjective, investigate, seedLenses, activeLenses, bookLensRound,
   normalizeQuestion, questionKey, recordQuestion, answerQuestion, systemPrompt, unqueuedAssumption,
   buildUndecidedMsgs, normalizeUndecided, unaddressedUndecided, runInvestigateFlag,
 } from "../server.mjs";
@@ -782,6 +782,63 @@ console.log("# investigate — lens rotation is informed, not random");
     chk("  two dry rounds retire a lens", pickLens(run).id !== LENSES[0].id);
     const allDry = { rounds: LENSES.flatMap((l) => [{ lens: l.id, confirmed: 0 }, { lens: l.id, confirmed: 0 }]) };
     chk("  and when every lens is retired it still returns one rather than crashing", !!pickLens(allDry));
+  }
+}
+console.log("# investigate — the lens register is the COMPANY's, and it learns across runs");
+{
+  // The bug this fixes, measured before it was fixed: pickLens read only run.rounds, so two runs with no history both
+  // picked LENSES[0], and a lens that went dry twice was forgotten when the run ended. With the dry-exit at 2 rounds
+  // that meant most runs only ever reached lenses 1-2 and five of the eight never ran at all.
+  {
+    const orgA = {}, orgB = {};
+    seedLenses(orgA); seedLenses(orgB);
+    eq("  seeding produces one entry per built-in lens", orgA.lenses.length, LENSES.length);
+    eq("  each starts with no yield recorded", [orgA.lenses[0].found, orgA.lenses[0].dry, orgA.lenses[0].off], [0, 0, false]);
+    bookLensRound(orgA, LENSES[0].id, 0, 1000);
+    bookLensRound(orgA, LENSES[1].id, 0, 2000);
+    const a = pickLens({ rounds: [] }, orgA.lenses, orgA.lenses).id;
+    chk("  a company that has already spent two lenses starts run 2 somewhere else", a !== LENSES[0].id && a !== LENSES[1].id);
+    // The control: a company that has NOT tried anything still starts at the top, so the line above is about the
+    // recorded history and not about the ordering being scrambled.
+    eq("  while a company with no history still starts at the first lens", pickLens({ rounds: [] }, orgB.lenses, orgB.lenses).id, LENSES[0].id);
+  }
+  {
+    const org = {}; seedLenses(org);
+    for (const l of org.lenses) { l.found = 0; l.dry = 1; l.lastAt = 1000; }
+    const proven = org.lenses[5]; proven.found = 4;
+    eq("  once everything has been tried, the one that finds things wins", pickLens({ rounds: [] }, org.lenses, org.lenses).id, proven.id);
+    proven.off = true;
+    chk("  a lens switched off is not offered at all", !activeLenses(org).some((l) => l.id === proven.id));
+    eq("  and the picker never returns it", pickLens({ rounds: [] }, activeLenses(org), org.lenses).id !== proven.id, true);
+  }
+  {
+    const org = {}; seedLenses(org);
+    bookLensRound(org, LENSES[0].id, 3, 500);
+    eq("  a find books the COUNT, not just a tally of rounds", org.lenses[0].found, 3);
+    bookLensRound(org, LENSES[0].id, 0, 600);
+    eq("  and a dry round is recorded too, because that is what improves the next ordering", [org.lenses[0].found, org.lenses[0].dry], [3, 1]);
+    eq("  an unknown lens books nothing", bookLensRound(org, "no-such-lens", 1, 700), null);
+  }
+  {
+    // Upgrades: a later release adds a lens. That must not wipe what this company learned about the others, and must
+    // not overwrite a prompt the operator rewrote.
+    const org = {}; seedLenses(org);
+    org.lenses[0].found = 9;
+    org.lenses[1].prompt = "my own instruction, at least forty characters long so it is a real one"; org.lenses[1].edited = true;
+    org.lenses.push({ id: "mine", prompt: "an operator's own lens, phrased as an instruction to do something", found: 2, dry: 0, off: false, edited: true });
+    seedLenses(org, [...LENSES, { id: "brand-new", prompt: "a lens added by a later release" }]);
+    eq("  the new lens is added", org.lenses.filter((l) => l.id === "brand-new").length, 1);
+    eq("  existing yield survives", org.lenses.find((l) => l.id === LENSES[0].id).found, 9);
+    chk("  an edited prompt is left alone", org.lenses.find((l) => l.id === LENSES[1].id).prompt.startsWith("my own instruction"));
+    chk("  an UNedited prompt tracks the code, so a release can improve the wording", org.lenses.find((l) => l.id === LENSES[2].id).prompt === LENSES[2].prompt);
+    eq("  and the operator's own lens is kept", org.lenses.filter((l) => l.id === "mine").length, 1);
+  }
+  {
+    eq("  with no register at all it falls back to the built-ins", activeLenses({}).length, LENSES.length);
+    eq("  and a malformed entry is ignored rather than crashing the round", activeLenses({ lenses: [{ id: "", prompt: "" }, { id: "x", prompt: "y" }] }).length, 1);
+    const src = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
+    chk("  investigate is given the register rather than the constant", src.includes("pickLens(run, lenses, lensStats)"));
+    chk("  and every round is booked against the company, dry ones included", src.includes("bookLensRound(o, round.lens, round.confirmed"));
   }
 }
 console.log("# investigate — the round prompt carries what the agent needs and nothing it should repeat");
