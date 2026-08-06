@@ -415,7 +415,7 @@ export function ensureBudget(org) {
   // investigate: hunt for defects the acceptance criteria never described, after a run PASSES. Default ON, because
   // that phase is the point — but it is an operator switch and not a constant, because it costs rounds of real model
   // time on work that already met its definition of done. investigateRounds caps how many, 0 = the built-in default.
-  org.guardrails = { autoApproveUnderUsd: 0, maxActionsPerRun: 0, maxPaidUsdPerRun: 0, investigate: true, investigateRounds: 0, findingRepo: "", ...(org.guardrails || {}) };
+  org.guardrails = { autoApproveUnderUsd: 0, maxActionsPerRun: 0, maxPaidUsdPerRun: 0, investigate: true, investigateRounds: 0, findingRepo: "", refute: true, ...(org.guardrails || {}) };
   if (!Array.isArray(org.agents)) org.agents = [];                      // self-sufficient even on a bare {}
   org.agents.forEach((a) => {
     if (!a) return;
@@ -2519,7 +2519,14 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
             didExecute = true;
             emitAct({ agent: who, depth, actionType: "declined_check", url: shape.declined.what.slice(0, 60), ok: true, bytes: shape.declined.because.length, error: "" });
             emit(run, "declinedCheck", { by: who, depth, what: shape.declined.what, because: shape.declined.because, unblockedBy: shape.declined.unblockedBy, duplicate: !out.added });
-            history.push({ role: "user", content: "Recorded on the company, so it survives this run and is visible to whoever reads the register — an unverified thing that is only mentioned in a summary is gone by the next commit. Carry on." });
+            // Zero grep hits means nothing was NAMED, not that the reason is sound. This is the only instrument left.
+            const ref = await refute("excuse", shape.declined, { enabled: org.guardrails?.refute !== false });
+            if (ref) {
+              await updateOrg((o) => { const d = (o.declinedChecks || []).find((x) => x.id === (out.declined && out.declined.id)); if (d) d.refutation = ref; }).catch(() => {});
+              emit(run, "refuted", { by: who, depth, kind: "excuse", of: shape.declined.what, says: ref });
+            }
+            history.push({ role: "user", content: "Recorded on the company, so it survives this run and is visible to whoever reads the register — an unverified thing that is only mentioned in a summary is gone by the next commit."
+              + (ref ? "\n\nA reviewer was asked whether that reason is measured or inferred, and said: " + ref + "\nIf a weaker version of the check is possible, do that instead of leaving the gap." : "") + " Carry on." });
           }
         }
       } else if ((next.actionType || "") === "read_repo") {
@@ -2676,7 +2683,14 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
             (run.findings || (run.findings = [])).push(rec);
             emit(run, "finding", { by: who, depth, claim: rec.claim, cls: rec.cls, where: rec.where, check: rec.check });
             emitAct({ agent: who, depth, actionType: "register_finding", url: rec.where, ok: true, bytes: rec.claim.length, error: "" });
-            history.push({ role: "user", content: "Finding CONFIRMED and recorded: the check failed on the current code, your fix made it pass, and it failed again once the fix was reverted. Keep looking with the same lens, or finish." });
+            // The one question the three observations cannot answer: does this check test the property the claim names?
+            const suff = await refute("sufficiency", rec, { enabled: org.guardrails?.refute !== false });
+            if (suff) {
+              rec.refutation = suff;
+              emit(run, "refuted", { by: who, depth, kind: "sufficiency", of: rec.claim, says: suff });
+            }
+            history.push({ role: "user", content: "Finding CONFIRMED and recorded: the check failed on the current code, your fix made it pass, and it failed again once the fix was reverted. Keep looking with the same lens, or finish."
+              + (suff ? "\n\nA reviewer was asked what could satisfy your check while the defect remains, and said: " + suff + "\nIf that lands, a narrower check would make the finding stronger — but the finding stands either way." : "") });
           } else {
             (run.rejectedFindings || (run.rejectedFindings = [])).push({ ...rec, reason: v.reason });
             emit(run, "findingRejected", { by: who, depth, claim: rec.claim, reason: v.reason });
@@ -3549,6 +3563,64 @@ async function failRun(run, message, extra = {}) {
 // Create a run object and kick it off. Returns { run, done } where done resolves when it finishes.
 // Reused by POST /api/run and the scheduler.
 // Turn a goal into a concrete run objective (used by "Work on it" and goal schedules).
+// ---- the refuter: the two questions no mechanical control can answer --------------------------------------------
+export function refuteMsgs(kind, subject) {
+  if (kind === "sufficiency") {
+    return [
+      { role: "system", content: [
+        "You are a skeptical reviewer with one narrow job: attack the SUFFICIENCY of a check, never its result.",
+        "The runner has already proved this check discriminates — it failed on the current code, passed once the fix was applied, and failed again when the fix was reverted. Do not dispute that; it was observed, not claimed.",
+        "What it does NOT prove is that the check tests the property the claim actually names. A check can discriminate perfectly and still assert something weaker: 'a POST refuses a wrong CSRF token' can really be asserting the token is the wrong LENGTH, and 'this route logs' can really be asserting that the text logAudit( appears in the file.",
+        "So answer exactly one question: what could satisfy this check while the claimed defect is STILL PRESENT?",
+        "If you cannot name anything, say 'nothing obvious' and stop — that is a useful answer and padding it is not. Two or three sentences, plain text, no JSON.",
+      ].join("\n") },
+      { role: "user", content: [
+        "CLAIM: " + String(subject?.claim || ""),
+        "WHERE: " + String(subject?.where || ""),
+        "THE CHECK: " + String(subject?.check || ""),
+        "",
+        "What would satisfy that check while the claim is still true?",
+        "/no_think",
+      ].join("\n") },
+    ];
+  }
+  return [
+    { role: "system", content: [
+      "You are a skeptical reviewer with one narrow job: test whether a reason for NOT checking something is sound.",
+      "A search of the repository found nothing that contradicts the reason. That is weaker evidence than it looks: it means nothing the reason NAMED appears in the code, not that the reason is true. 'The GPU has no room' searches to nothing whether it was measured or merely assumed.",
+      "So answer two things, briefly. First: is this reason MEASURED or INFERRED — and if inferred, what is the cheapest thing that would settle it? Second: is there a way to perform some weaker version of the check that the reason does not block?",
+      "If the reason is plainly sound and nothing weaker is possible, say so and stop. Two or three sentences, plain text, no JSON.",
+    ].join("\n") },
+    { role: "user", content: [
+      "NOT CHECKED: " + String(subject?.what || ""),
+      "REASON GIVEN: " + String(subject?.because || ""),
+      "WOULD BE UNBLOCKED BY: " + String(subject?.unblockedBy || ""),
+      "",
+      "Measured or inferred? And is a weaker version of the check possible?",
+      "/no_think",
+    ].join("\n") },
+  ];
+}
+
+// A caveat, capped, prefixed with what it is worth. Returns "" when it cannot or should not run — never throws into a
+// caller that has already recorded something real.
+export async function refute(kind, subject, opts = {}) {
+  if (opts.enabled === false) return "";
+  try {
+    const text = String(await askLlm(refuteMsgs(kind, subject), { maxTokens: 320, routingPreference: opts.routingPreference || "local", ...(opts.model ? { model: opts.model } : {}) }))
+      .replace(/<think>[\s\S]*?<\/think>/gi, "").trim().slice(0, 600);
+    if (!text) return "";
+    // Same model as the agent, so it shares the agent's blind spots. Saying so where the text is stored is the
+    // difference between a caveat and a false second opinion.
+    return "(same-model review, so weak evidence) " + text;
+  } catch (e) {
+    // A swallowed failure here would be indistinguishable from "the reviewer had nothing to say", which is the exact
+    // defect class this whole register exists to remove — a check that could not run must never read as a clean bill of
+    // health. So say which it was, and let the caller store that.
+    return "(the reviewer could not be reached: " + String(e && e.message || e).slice(0, 120) + " — this is NOT a clean review)";
+  }
+}
+
 // ---- the declined-check register: a reason for NOT checking is a claim, and it gets a control -------------------
 //
 // Identifier spellings for the concrete things an excuse names. An excuse says "the operator token", not
@@ -4727,6 +4799,7 @@ const server = createServer(async (req, res) => {
       const org = await updateOrg((o) => {
         if (body.autoApproveUnderUsd !== undefined) o.guardrails.autoApproveUnderUsd = Math.max(0, Math.round((parseFloat(body.autoApproveUnderUsd) || 0) * 100) / 100);
         if (body.maxActionsPerRun !== undefined) o.guardrails.maxActionsPerRun = Math.max(0, Math.min(100, Math.round(Number(body.maxActionsPerRun) || 0)));
+        if (body.refute !== undefined) o.guardrails.refute = !(body.refute === false || body.refute === "false");
         if (body.findingRepo !== undefined) o.guardrails.findingRepo = String(body.findingRepo || "").slice(0, 300);
         if (body.maxPaidUsdPerRun !== undefined) o.guardrails.maxPaidUsdPerRun = Math.max(0, Math.round((parseFloat(body.maxPaidUsdPerRun) || 0) * 100) / 100);
         if (body.investigate !== undefined) o.guardrails.investigate = !(body.investigate === false || body.investigate === "false" || body.investigate === 0 || body.investigate === "0");

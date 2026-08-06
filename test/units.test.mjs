@@ -17,7 +17,7 @@ import {
   executorProbeMs,
   repoPathSafe, readRepoFile, listRepoFiles, resolveRepoTarget, searchRepoFiles, repoOutline,
   normalizeQuestion, questionKey, recordQuestion, answerQuestion, systemPrompt, unqueuedAssumption, tierReason,
-  blockerCandidates, falsifyBlocker, normalizeDeclinedCheck, recordDeclinedCheck,
+  blockerCandidates, falsifyBlocker, normalizeDeclinedCheck, recordDeclinedCheck, refuteMsgs,
   buildUndecidedMsgs, normalizeUndecided, unaddressedUndecided, runInvestigateFlag,
 } from "../server.mjs";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
@@ -863,6 +863,41 @@ console.log("# the gate runs npm without a shell and without a .cmd");
     chk('  a path in "command" is not treated as a search term', src.includes('&& !resolveRepoTarget(all.files || [], term)'));
     chk('  either field may carry the path', src.includes('Either field may hold the path'));
     chk('  and a finish wrapped in propose_action is treated as a finish', src.includes('next.type = "finish";'));
+  }
+}
+console.log("# the refuter: the two questions no mechanical control can answer");
+{
+  // Chosen scope, and the reason for it. verifyFinding proves a check DISCRIMINATES — failed, passed with the fix,
+  // failed again on revert. It does not prove the check tests the property the claim names. That is the proxy
+  // problem and it is measured: 5 of 7 derived audits on the 4water build asserted a proxy, every one green, on real
+  // input, computing correctly, answering a weaker question. And when the declined-check falsifier returns zero hits
+  // that means nothing was NAMED, not that the reason is sound.
+  const s = refuteMsgs('sufficiency', { claim: 'the POST accepts a wrong CSRF token', where: 'src/http.mjs:210', check: 'node --test test/csrf.test.mjs' });
+  const sys = s[0].content, usr = s[1].content;
+  chk('  it tells the reviewer the three observations are NOT up for dispute', /observed, not claimed/.test(sys));
+  chk('  and asks the one question they cannot answer', /satisfy this check while the claimed defect is STILL PRESENT/.test(sys));
+  chk('  it gives the proxy failure a concrete shape', /wrong LENGTH/.test(sys));
+  chk('  invites an empty answer, so padding is not rewarded', /nothing obvious/.test(sys));
+  chk('  and carries the claim and the check', usr.includes('wrong CSRF token') && usr.includes('node --test test/csrf.test.mjs'));
+
+  const e = refuteMsgs('excuse', { what: 'whether a larger window fits', because: 'the GPU has no room', unblockedBy: 'measuring free VRAM' });
+  chk('  the excuse prompt says a silent search is weak evidence', /nothing the reason NAMED appears in the code/.test(e[0].content));
+  chk('  asks measured-or-inferred', /MEASURED or INFERRED/.test(e[0].content));
+  chk('  and asks for a weaker version of the check', /weaker version/.test(e[0].content));
+  chk('  carrying all three recorded fields', e[1].content.includes('larger window') && e[1].content.includes('no room') && e[1].content.includes('free VRAM'));
+  // Controls: the two jobs must be genuinely different prompts, and neither may ask this model for JSON.
+  chk('  the two jobs are different prompts', sys !== e[0].content);
+  chk('  and neither asks for JSON, which this model is worst at', !/JSON/i.test(sys.replace(/no JSON/gi, '')) && !/JSON/i.test(e[0].content.replace(/no JSON/gi, '')));
+  {
+    const src = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
+    chk('  a same-model review is labelled weak where it is stored', src.includes('same-model review, so weak evidence'));
+    // The defect I wrote and then removed: catch { return "" } made a broken reviewer read as a clean one.
+    chk('  and a reviewer that could not be reached does NOT read as a clean review', src.includes('this is NOT a clean review'));
+    chk('  it runs after a finding is confirmed', src.includes('refute("sufficiency", rec'));
+    chk('  and on an excuse the grep did not contradict', src.includes('refute("excuse", shape.declined'));
+    chk('  with a switch, because it spends a turn per confirmed finding', src.includes('o.guardrails.refute ='));
+    chk('  and it cannot overturn anything — the finding is recorded before the reviewer is asked',
+        src.indexOf('(run.findings || (run.findings = [])).push(rec)') < src.indexOf('refute("sufficiency", rec'));
   }
 }
 console.log("# an excuse is a claim: the declined-check register");

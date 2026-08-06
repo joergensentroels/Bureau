@@ -785,3 +785,43 @@ gone by the next commit — which is exactly how this one survived.
 
 **No UI panel in that commit, on purpose.** The lesson that produced this register was shipping UI unlooked-at, so
 the panel belongs in a commit that also runs `node test/run-all.mjs --ui` and looks at it.
+
+## The refuter, and the two jobs it was given
+
+A refute agent was considered against the ~15 defects this work actually found. It would have caught **two**:
+the unlooked-at UI (*"you say tests cover it; tests don't render a page"*) and possibly the false-absence claim
+from a truncated read. It would have caught **none** of `spawn EINVAL`, the 4,096-token window, the ENOENT
+dead-end, the unimplemented `other`, the amnesiac lens register, or the unplumbed `investigate:false` — those are
+facts about the world, and no amount of reasoning surfaces them. On the context window it would have been *worse
+than nothing*: clipped identically, and confidently agreeing.
+
+So it was scoped to the two questions where **no mechanical control is possible**:
+
+**1. Sufficiency.** `verifyFinding` proves a check *discriminates* — failed, passed with the fix, failed again on
+revert. It does not prove the check tests the property the claim names. That is the proxy problem, and it is
+measured: on the 4water build **5 of 7 derived audits asserted a proxy** — every one green, on real input,
+computing correctly, answering a weaker question. `fail → pass → fail` cannot see it.
+
+**2. A surviving excuse.** When the declined-check falsifier returns zero hits, that means nothing was *named* —
+not that the reason is sound. "The GPU has no room" greps to nothing whether it was measured or guessed.
+
+**It produces a caveat, never a verdict**, and the finding is recorded *before* the reviewer is asked, so it
+cannot overturn an observation. It runs on the same model as the agent, and the stored text says so —
+`"(same-model review, so weak evidence)"` — because a same-model refuter that could overrule an observation
+manufactures the appearance of independent confirmation.
+
+**Tried live, and the two jobs are not equally good on this model:**
+
+- *Excuse* — genuinely useful, and not parroted: *"The reason is inferred, not measured; the cheapest check would
+  be measuring free VRAM. A weaker check could involve testing a smaller context window first."* That is exactly
+  the push toward measurement that was wanted.
+- *Sufficiency* — structurally right, shallow: it answered in the correct shape (*"this would satisfy the test's
+  condition while the claimed defect remains unaddressed"*) but reused the example from the prompt rather than
+  reasoning about the specific check. Pattern-matching more than analysis. Worth having; not worth trusting.
+
+**A defect written and removed inside this commit, worth recording.** The first version ended `catch { return ""; }`
+— so a reviewer that could not be reached was **indistinguishable from one that had nothing to say.** A check that
+cannot run must never read as a clean bill of health; that is the exact class this whole register exists to remove,
+and it reappeared in the mechanism built to prevent it. It now returns `"(the reviewer could not be reached: … —
+this is NOT a clean review)"`. Found because a probe returned two empty strings and the empties were investigated
+rather than accepted.
