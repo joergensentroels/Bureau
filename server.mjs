@@ -1103,7 +1103,7 @@ export function systemPrompt(org, agent) {
     "- github_pr: open a pull request containing the document(s) you already SAVED this run — title=the PR title, command=the PR description, details=why. You do NOT list files: it includes what you saved with file_write, so save the finished work first. The CEO approves every one (never auto).",
     "- plan_add: record a follow-up task you notice but shouldn't do right now into the company's persistent plan — title=the task, details=why/context. It is saved for a future run so nothing is lost. Runs instantly (no approval). Do NOT use it to defer the CURRENT objective.",
     "- register_finding: claim a DEFECT and prove it. title=the one-sentence claim, url=file:line, details=the defect class, command=the check that detects it (one of the project's own: npm test | npm run <script> | node --test [file] | node tools/<x>.mjs), fix={file,find,replace}=the change that makes the check pass. The runner verifies it ITSELF in a throwaway copy and requires three things: your check FAILS on the current code, PASSES with your fix, and FAILS AGAIN once the fix is reverted. A claim without that evidence is refused and you are told why, so do not register a hunch — register something you can make fail.",
-    findingRepo(org) ? "- read_repo: read the source of the repository under investigation — title=the path relative to the repo root (e.g. \"src/db.mjs\"), or a directory (or blank) to LIST what is there. Read-only, and confined to that one repository. Use it before claiming anything about the code: a check command and a fix have to quote text that is actually in the file." : "",
+    findingRepo(org) ? "- read_repo: read the source of the repository under investigation. title=the PATH, relative to the repo root, and nothing else — \"src/db.mjs\", not a description of what you are doing. Leave title blank (or name a directory) to LIST what is in the repository; a path that does not exist also returns the listing, so start there and read exact paths from it rather than guessing. Read-only and confined to that one repository. Use it before claiming anything about the code: a check command and a fix must quote text that is really in the file." : "",
     "- ask_stakeholder: record a question only the CEO can settle — scope, a policy choice, a name, a number nobody wrote down — WITHOUT stopping. title=the question, command=the assumption you are proceeding under meanwhile, url=where that assumption is written down (file, field, document). It does not wait for an answer and it must not: you keep working, the question is queued for the CEO to answer alongside others, and the answer reaches a later run. A question with no assumption is REFUSED, because that is just asking to stop. Use this instead of escalate whenever the work can continue on a stated guess.",
     "- ask_peer: consult a NAMED teammate for input, advice, or a quick review — title=their name or role, command=your question, details=any context. They reply with their expert opinion and it comes back to you. Use it to get a specialist's take or a second opinion instead of guessing. It is advice only — it does NOT make them do real work.",
     (org._mcpTools && org._mcpTools.length)
@@ -2412,19 +2412,34 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
           emitAct({ agent: who, depth, actionType: "read_repo", url: "", ok: false, bytes: 0, error: "no repo configured" });
           history.push({ role: "user", content: "No repository is configured (guardrails.findingRepo), so there is no source to read. Work from what you have been given, and do not state anything about code you cannot see." });
         } else {
-          const r = want ? await readRepoFile(repo, want) : { ok: false, error: "that is a directory — list it instead of reading it" };
+          // Resolve against the repository's own paths first: the agent writes a label ("Read PLAN.md") because that
+          // is what title means everywhere else, and arguing with that in the doc line does not work.
+          const all = await listRepoFiles(repo);
+          const target = want ? resolveRepoTarget(all.files || [], want) : null;
+          // A blank path, a directory, or a path that names nothing all mean the same thing in practice: the agent does
+          // not know what is in this repository yet. All three list. Only a confinement refusal is fatal, because that
+          // one is a boundary rather than a mistake about the contents.
+          const r = target ? await readRepoFile(repo, target)
+                  : want ? await readRepoFile(repo, want)
+                  : { ok: false, error: "that is a directory — list it instead of reading it" };
+          const listInstead = !r.ok && !/not inside the configured repository|leaves the repository/.test(r.error);
           if (r.ok) {
             didExecute = true;
             emitAct({ agent: who, depth, actionType: "read_repo", url: r.name, ok: true, bytes: r.bytes, error: "" });
             emit(run, "repoRead", { by: who, depth, file: r.name, bytes: r.bytes, truncated: !!r.truncated });
-            history.push({ role: "user", content: `APPROVED and EXECUTED — ${r.name} from the repository under investigation${r.truncated ? " (first 12000 characters; ask for a narrower path if you need more)" : ""}:\n---\n${r.content}\n---\nThis is the REAL current source. Anything you claim about it must quote text that appears above.` });
-          } else if (/is a directory/.test(r.error)) {
-            const l = await listRepoFiles(repo, want);
+            history.push({ role: "user", content: `APPROVED and EXECUTED — ${r.name} from the repository under investigation${r.truncated ? ` (first ${r.content.length} of ${r.bytes} characters)` : ""}:\n---\n${r.content}\n---\nThis is the REAL current source. Anything you claim about it must quote text that appears above.` });
+          } else if (listInstead) {
+            // List the requested subtree if it exists; otherwise the whole repository, because a wrong path is exactly
+            // when the agent most needs to see the real one.
+            const sub = await listRepoFiles(repo, want);
+            const l = sub.ok && sub.files.length ? sub : await listRepoFiles(repo);
             if (l.ok) {
               didExecute = true;
               emitAct({ agent: who, depth, actionType: "read_repo", url: (want || ".") + "/", ok: true, bytes: l.files.length, error: "" });
               emit(run, "repoRead", { by: who, depth, file: (want || ".") + "/", bytes: l.files.length, listing: true });
-              history.push({ role: "user", content: `APPROVED and EXECUTED — ${l.files.length} file(s) in the repository${l.truncated ? " (truncated)" : ""}:\n${l.files.join("\n")}\n\nRead one with read_repo before claiming anything about it.` });
+              const asked = want && !(sub.ok && sub.files.length);
+              history.push({ role: "user", content: (asked ? `There is no "${want}" in this repository. Here is what IS there` : `APPROVED and EXECUTED — ${l.files.length} file(s) in the repository`)
+                + `${l.truncated ? " (truncated)" : ""}:\n${l.files.join("\n")}\n\nThese paths are exact and relative to the repository root. Read one with read_repo — do NOT guess a path that is not in this list.` });
             } else {
               emitAct({ agent: who, depth, actionType: "read_repo", url: want, ok: false, bytes: 0, error: l.error });
               history.push({ role: "user", content: "read_repo could not list that: " + l.error });
@@ -2604,6 +2619,66 @@ export function expectsDeliverable(objective) {
 // only route to the paid API when it exists (otherwise they stay local — see runAgentTask.canUsePaid).
 export async function paidProviderAvailable() {
   try { const h = await latchHealth(); return !!(h.ok && h.paid); } catch { return false; }
+}
+
+// mode "hunt": the investigate phase on its own. No criteria, no construction, no deliverable — one agent, the
+// company's lens register, and the repository the operator configured. Nothing here can be reached without that repo:
+// with no repo a claim cannot be verified, and an unverifiable hunting round is only a way to spend money on guesses.
+async function runHunt(run) {
+  const org = await readOrg();
+  const agent = org.agents.find((a) => a.id === run.agentId) || org.agents[0];
+  if (!agent) return failRun(run, "no agents to hunt with — this company has no roster", { agent: "Manager" });
+  const repo = findingRepo(org);
+  if (!repo) return failRun(run, "no repository is configured (guardrails.findingRepo), so nothing found could be verified", { agent: agent.name });
+  emit(run, "start", { agent: agent.name, role: agent.role, objective: run.objective || `hunt for defects in ${repo}`, hush: run.hush });
+  run.memoryEntries = []; run.producedFiles = []; run.paidAvailable = await paidProviderAvailable();
+  run.maxPaidUsd = Number(org.guardrails?.maxPaidUsdPerRun) || 0;
+  org._mcpTools = await loadMcpTools();
+  run.orch = { payerId: agent.id, budgetUsd: Number(agent.budgetUsd) || 0, startPaidSpent: Number(agent.paidSpentUsd) || 0 };
+  const tally = {};
+  run.perAgentTally = tally;
+  run.phase = "investigate";
+  const reg = await updateOrg((o) => { seedLenses(o); }).then(() => readOrg()).catch(() => org);
+  const worker = async (objective) => {
+    const { summary, tokens } = await runAgentTask(run, agent, org, objective);
+    addTally(tally, agent.id, tokens);
+    return { product: summary, body: summary, tokens };
+  };
+  let tokens = 0;
+  try {
+    tokens = await investigate(run, worker, {
+      lenses: activeLenses(reg), lensStats: reg.lenses || [],
+      taxonomy: reg.taxonomy || {},
+      maxRounds: Number(reg.guardrails?.investigateRounds) || undefined,
+      onRound: async (r, round) => {
+        await updateOrg((o) => { seedLenses(o); bookLensRound(o, round.lens, round.confirmed, Date.now()); }).catch(() => {});
+        const fresh = (run.findings || []).filter((f) => !f._booked);
+        if (!fresh.length) return;
+        await updateOrg((o) => {
+          o.taxonomy = o.taxonomy || {};
+          for (const f of fresh) {
+            const k = String(f.cls || "new");
+            o.taxonomy[k] = { count: ((o.taxonomy[k] || {}).count || 0) + 1, lastAt: Date.now(), example: String(f.claim || "").slice(0, 160) };
+          }
+        }).catch(() => {});
+        for (const f of fresh) f._booked = true;
+      },
+    });
+  } catch (e) { return failRun(run, "the hunt failed: " + e.message, { agent: agent.name }); }
+  run.tokensSoFar = tokens;
+  // A hunt's verdict is what it FOUND. "passed" would be a lie either way: finding nothing is not success, and finding
+  // something is not failure — so it reports the count and lets the operator read it.
+  const verdict = (run.findings || []).length ? "found" : "clean";
+  const b = await persistRun(run.objective || `hunt: ${repo}`, tokens,
+    { agent: agent.name, hush: run.hush, hunt: true, verdict, findings: (run.findings || []).length, refused: (run.rejectedFindings || []).length, rounds: (run.rounds || []).length },
+    tally, run.memoryEntries, run.paidTally);
+  const paidSpentUsd = Math.round(Object.values(run.paidTally || {}).reduce((s, v) => s + v, 0) * 1e6) / 1e6;
+  emit(run, "budget", { runTokens: tokens, totalTokens: b.tokens, ranPaid: !!run.ranPaid, paidTokens: run.paidTokens || 0, orchPaidTokens: run.orchPaidTokens || 0, paidSpentUsd });
+  logAudit({ kind: "run", runId: run.id, agent: agent.name, objective: run.objective || `hunt: ${repo}`,
+    tokens, costUsd: paidSpentUsd || 0, verdict, met: (run.findings || []).length, unmet: 0, total: (run.rounds || []).length,
+    decision: run.autoApprove ? "auto" : "you" });
+  emit(run, "done", { verdict, findings: (run.findings || []).length, refused: (run.rejectedFindings || []).length });
+  run.done = true;
 }
 
 async function runSingle(run) {
@@ -3077,7 +3152,9 @@ function waitForPlan(run, ms = 10 * 60 * 1000) {
 
 // Shared gate: derive criteria, run `worker(objective)` (which produces the work), verify, and
 // remediate the specific gaps up to GATE_MAX_ATTEMPTS. worker returns { product, body, tokens }.
-async function runGated(run, worker, persistExtra, perAgentTally) {
+// `soloWorker` runs an objective on ONE agent, verbatim. In single mode that is the same thing as `worker`; in company
+// mode `worker` is a delegation that decomposes what it is given, which is fatal for the hunting rounds.
+async function runGated(run, worker, persistExtra, perAgentTally, soloWorker = null) {
   if (run.dryRun) emit(run, "dryrun", {});   // preview: plan + intended actions, nothing real happens
   const crit = await deriveCriteria(run.objective, run);
   run.criteria = crit.items;
@@ -3180,7 +3257,9 @@ async function runGated(run, worker, persistExtra, perAgentTally) {
     run.phase = "investigate";
     // Seed on first use so an existing company gets the register without a migration step.
     const reg = await updateOrg((o) => { seedLenses(o); }).then(() => readOrg()).catch(() => org0);
-    tokens += await investigate(run, worker, {
+    // Verbatim, on one agent. A lens that reaches the agent as a manager's paraphrase is not that lens.
+    const hunter = soloWorker || worker;
+    tokens += await investigate(run, hunter, {
       lenses: activeLenses(reg), lensStats: reg.lenses || [],
       taxonomy: org0.taxonomy || {},
       maxRounds: Number(org0.guardrails?.investigateRounds) || undefined,
@@ -3259,7 +3338,14 @@ async function runDelegation(run) {
     }
     return { product: result.product, body: result.body, tokens: result.tokens };
   };
-  await runGated(run, worker, { agent: "Manager", delegated: topReports.length, hush: run.hush }, tally);
+  // The hunting rounds run on the principal — the same agent that funds the gate's other orchestration calls — so a
+  // lens instruction is executed rather than decomposed. One reviewer with one way of looking is the unit of work here.
+  const soloWorker = principal ? async (objective) => {
+    const { summary, tokens } = await runAgentTask(run, principal, org, objective);
+    addTally(tally, principal.id, tokens);
+    return { product: summary, body: summary, tokens };
+  } : null;
+  await runGated(run, worker, { agent: "Manager", delegated: topReports.length, hush: run.hush }, tally, soloWorker);
 }
 
 function finishRun(run, done = {}) {
@@ -3655,7 +3741,7 @@ export function repoPathSafe(repo, rel) {
   return abs;
 }
 
-export async function readRepoFile(repo, rel, cap = 12000) {
+export async function readRepoFile(repo, rel, cap = 4000) {
   const abs = repoPathSafe(repo, rel);
   if (!abs) return { ok: false, error: "that path is not inside the configured repository" };
   try {
@@ -3671,6 +3757,30 @@ export async function readRepoFile(repo, rel, cap = 12000) {
     return { ok: true, name: path.relative(path.resolve(repo), real).split(path.sep).join("/"),
              content: content.slice(0, cap), truncated: content.length > cap, bytes: content.length };
   } catch (e) { return { ok: false, error: "could not read it: " + (e.code || e.message) }; }
+}
+
+// Turn whatever the agent said into a path in this repository, or null if it is not naming one.
+//   "src/db.mjs"            -> src/db.mjs        (already a path that exists)
+//   "Read PLAN.md"          -> PLAN.md           (one file is called that)
+//   "check the roster test"  -> null             (names nothing in the repo — list instead)
+//   "index.html"            -> null if two files have that basename, because guessing between them is worse than
+//                              showing both and being asked again.
+export function resolveRepoTarget(files, text) {
+  const raw = String(text == null ? "" : text).trim();
+  if (!raw) return null;
+  const norm = (s) => s.replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "");
+  const list = (files || []).map(norm);
+  const direct = norm(raw);
+  if (list.includes(direct)) return direct;
+  // Tokens that could be a path: they contain a slash or a dot-extension. Punctuation around them is stripped.
+  const tokens = [...new Set(raw.split(/[\s,;:()\[\]"'`]+/).map((w) => norm(w).replace(/[.,;:)\]]+$/, "")).filter((w) => w && (w.includes("/") || /\.[A-Za-z0-9]{1,8}$/.test(w))))];
+  for (const tok of tokens) {
+    if (list.includes(tok)) return tok;
+    const suffix = list.filter((f) => f === tok || f.endsWith("/" + tok));
+    if (suffix.length === 1) return suffix[0];
+    if (suffix.length > 1) return null;   // ambiguous: showing the listing beats picking one
+  }
+  return null;
 }
 
 export async function listRepoFiles(repo, sub = "", cap = 400) {
@@ -3923,7 +4033,7 @@ function beginRun(spec) {
     const done = [...runs.entries()].filter(([, r]) => r.done);
     for (const [id] of done.slice(0, Math.max(0, done.length - 20))) runs.delete(id);
   }
-  const mode = spec.mode === "company" ? "company" : "single";
+  const mode = spec.mode === "company" ? "company" : spec.mode === "hunt" ? "hunt" : "single";
   const run = {
     id: newId("run"), mode, agentId: spec.agentId,
     objective: String(spec.objective || "").slice(0, 1000),
@@ -3937,7 +4047,7 @@ function beginRun(spec) {
     paused: false, steer: [],     // mid-run human steering: `paused` holds every turn loop; `steer` is an append-only list of {text,at} CEO course-corrections each agent drains once
   };
   runs.set(run.id, run);
-  const go = mode === "company" ? runDelegation : runSingle;
+  const go = mode === "company" ? runDelegation : mode === "hunt" ? runHunt : runSingle;
   // Run the entire (async, timer-driven) execution inside the run's workspace context, so every
   // readOrg/updateOrg/draft it touches — even after the originating request returns — hits the right company.
   // The .catch lives INSIDE wsStore.run: registered there it inherits the workspace context, so the

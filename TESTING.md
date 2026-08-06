@@ -448,3 +448,26 @@ that probe took three tries — it first missed shorthand properties (`mode`), t
 in a helper, then missed optional chaining (`spec?.investigate`). Each time the probe was the defect and the
 code was fine, which is the third instance of that in this stretch and the reason the negative control is
 non-negotiable.
+
+## Pointing the hunting phase at a real repository
+
+The target: `4water-app`, 105 files, 156 commits of deliberate human-driven review behind it including a
+dead-code checker, a prose-claim checker and a pre-push hook. Anything found there is something a long review
+missed. Five live runs, and each one found a defect in **Bureau**, not in 4water.
+
+| run | what happened | the defect |
+|---|---|---|
+| 1 | 2 rounds, 327s, ~25 sub-verdicts, **0 files read** | in company mode the hunting objective went to `delegate()`, which hands it to a manager that **decomposes** it. A lens naming one way of looking and one action arrived as paraphrased sub-tasks. Fixed: the phase gets a solo worker and the objective reaches one agent verbatim. |
+| 2 | the phase did not run at all | `verdict === "passed"` requires *zero* unmet criteria, and the gate's minority-shortfall path leaves some unmet → verdict `"shortfall"`. The hook correctly declined. But the phase had **no way to be asked for**. Fixed: `mode: "hunt"`. |
+| 3 | 9 × `read_repo` → `ENOENT`, then it guessed `project/`, `app/`, `code/`, `source/` and escalated twice asking for the path | a path that does not exist returned ENOENT and never fell through to listing, so the listing was only reachable by sending a blank title. The error told the model nothing actionable, so it guessed — the exact behaviour this feature exists to remove. Fixed: any miss lists what is really there. |
+| 4 | listing worked (105 files), then `title="Read PLAN.md"` **9 times**, each returning the same listing | the model writes a human-readable label in `title` because that is what `title` means for every other action. Telling it otherwise in the doc line did not work and will not. Fixed: the runner resolves the target against the repository's own file list — `"Read PLAN.md"` → `PLAN.md`. |
+| 5 | listed 105 files, **read 10,246 bytes of README.md**, then: *"I'll provide a valid JSON response with the required structure"* and the round ended | the local 8B model loses the strict-JSON action format after a large file. Mitigated by capping a read at 4000 characters; **not fixed**, because the limit is the model. |
+
+**Where this leaves it.** The machinery is now correct and observed end to end: hunt mode starts the phase on
+demand, one agent executes the lens verbatim, it lists the repository, resolves a loosely-named file, and reads
+real source. What has still never happened is a **confirmed finding in code nobody pointed at** — and the
+remaining obstacle is model capability at the action format, not wiring.
+
+That is worth stating plainly because four of the five defects above were invisible to 600 unit tests and 152
+API tests. Every one needed a real repository, a real model, and a printout of what the agent actually did. The
+tests were not wrong; they were testing the parts, and every defect was in the joins.

@@ -14,7 +14,7 @@ import {
   normalizeFinding, verifyFinding, findingCheckAllowed,
   LENSES, pickLens, investigateObjective, investigate, seedLenses, activeLenses, bookLensRound,
   normalizeLens, lensParaphrase, addProposedLens, lensProposalObjective, sigWords,
-  repoPathSafe, readRepoFile, listRepoFiles,
+  repoPathSafe, readRepoFile, listRepoFiles, resolveRepoTarget,
   normalizeQuestion, questionKey, recordQuestion, answerQuestion, systemPrompt, unqueuedAssumption,
   buildUndecidedMsgs, normalizeUndecided, unaddressedUndecided, runInvestigateFlag,
 } from "../server.mjs";
@@ -842,6 +842,58 @@ console.log("# investigate — the lens register is the COMPANY's, and it learns
     chk("  investigate is given the register rather than the constant", src.includes("pickLens(run, lenses, lensStats)"));
     chk("  and every round is booked against the company, dry ones included", src.includes("bookLensRound(o, round.lens, round.confirmed"));
   }
+}
+console.log("# investigate — the runner works out which file was meant, instead of demanding a formatted path");
+{
+  // Every fixture here is from a live run. The model asked for a file as title="Read PLAN.md" nine times and got the
+  // repository listing back nine times, because there is no path called that. It is not being careless: for every other
+  // action `title` is a human-readable label, so it writes one, and saying "title=the PATH and nothing else" in the doc
+  // line did not change that and will not — the instruction fights the shape of every other action in the list.
+  const FILES = ["README.md", "PLAN.md", "src/db.mjs", "src/http.mjs", "test/roster.test.mjs", "tools/precheck.mjs", "public/app.css"];
+  eq("  a bare path that exists", resolveRepoTarget(FILES, "src/db.mjs"), "src/db.mjs");
+  eq("  the observed failure: a sentence naming one file", resolveRepoTarget(FILES, "Read PLAN.md"), "PLAN.md");
+  eq("  a longer sentence with the path inside it", resolveRepoTarget(FILES, "look at the src/db.mjs file"), "src/db.mjs");
+  eq("  a basename that is unique in the repo", resolveRepoTarget(FILES, "precheck.mjs"), "tools/precheck.mjs");
+  eq("  trailing punctuation does not defeat it", resolveRepoTarget(FILES, "check PLAN.md, then continue."), "PLAN.md");
+  eq("  backslashes are normalised", resolveRepoTarget(FILES, "src" + String.fromCharCode(92) + "db.mjs"), "src/db.mjs");
+  // The controls. Without them a resolver that returned FILES[0] for everything would pass all six lines above.
+  eq("  a label naming no file resolves to nothing, so the caller lists", resolveRepoTarget(FILES, "List repo"), null);
+  eq("  and so does a description of intent", resolveRepoTarget(FILES, "check the roster test"), null);
+  eq("  a file that is not in the repository resolves to nothing", resolveRepoTarget(FILES, "src/secrets.mjs"), null);
+  eq("  an escape attempt resolves to nothing, because it is not in the list", resolveRepoTarget(FILES, "../../etc/passwd"), null);
+  eq("  nothing at all", resolveRepoTarget(FILES, ""), null);
+  {
+    // Ambiguity: showing both beats picking one, because picking one silently reviews the wrong file.
+    const dup = [...FILES, "public/index.html", "docs/index.html"];
+    eq("  an ambiguous basename resolves to nothing", resolveRepoTarget(dup, "index.html"), null);
+    eq("  but the full path still works", resolveRepoTarget(dup, "docs/index.html"), "docs/index.html");
+  }
+  {
+    const src = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
+    chk("  the dispatch resolves before it reads", src.includes("const target = want ? resolveRepoTarget(all.files || [], want) : null"));
+    chk("  and a miss lists rather than dead-ending", src.includes("const listInstead ="));
+  }
+}
+console.log("# investigate — the hunting rounds are executed, not decomposed");
+{
+  // Found live, not by reading: pointed at a real repository the phase ran two rounds, spent 327 seconds, produced ~25
+  // sub-verdicts and read zero files. In company mode runGated's worker is a DELEGATION — it hands the objective to a
+  // manager that decomposes it — so a lens instruction naming one way of looking and one action arrived at the agents
+  // as paraphrased sub-tasks. A lens that reaches an agent as somebody's summary of it is not that lens.
+  const src = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
+  const iGated = src.indexOf("async function runGated(run, worker, persistExtra, perAgentTally");
+  chk("  runGated was located", iGated > 0);
+  chk("  it accepts a solo worker", src.slice(iGated, iGated + 200).includes("soloWorker"));
+  const iHunter = src.indexOf("const hunter = soloWorker || worker");
+  chk("  the investigate call uses it in preference to the delegating one", iHunter > iGated);
+  chk("  and passes THAT to investigate", src.slice(iHunter, iHunter + 200).includes("investigate(run, hunter,"));
+  const iDel = src.indexOf("async function runDelegation");
+  const del = src.slice(iDel, src.indexOf("async function runGated", iDel));
+  chk("  company mode was located and builds one", iDel > 0 && del.includes("const soloWorker = principal ?"));
+  chk("  from runAgentTask directly, so the objective is not decomposed", del.includes("runAgentTask(run, principal, org, objective)"));
+  chk("  and hands it to runGated", del.includes("tally, soloWorker)"));
+  // The control: every assertion above is a substring search, so prove the searches can fail.
+  chk("  and these checks can fail", !src.includes("const hunter = soloWorker || notAWorker") && !del.includes("runAgentTask(run, nobody,"));
 }
 console.log("# investigate — reading the repository under investigation, and staying inside it");
 {
