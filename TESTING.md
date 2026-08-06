@@ -712,3 +712,34 @@ round will be clipped — the two facts stated where they matter together, and n
 Currently configured (checked without reading any key material): primary is the local Ollama through its
 **OpenAI-compatible** endpoint `http://127.0.0.1:11434/v1` — which is precisely why `num_ctx` cannot be sent — and
 the fallback is Moonshot `kimi-k2.6`.
+
+## Looking at the UI: `node test/run-all.mjs --ui`
+
+Two panels and about a dozen feed renderers were added to `public/index.html` during this work and **none of them
+were ever opened in a browser.** They were verified by extracting the page's `<script>` and compiling it, plus
+`ui.test.mjs` asserting against the source text. That is a check on syntax and on strings, not on whether the page
+renders — and it was skipped on the stated grounds that "the authed UI needs the operator token, and putting it in
+a browser means putting it in the clear".
+
+That reason did not survive contact with the codebase. `bootServer()` in `run-all.mjs` has always generated its
+**own disposable token** (`"test_" + randomBytes(18)`) and the API suites have used it all along. The parallel test
+setup already existed; nobody had pointed a browser at it.
+
+`--ui` closes that: it runs the suites, then holds the throwaway server open and prints the URL and the run-only
+token. One command instead of an assembly job.
+
+```bash
+node test/run-all.mjs --ui
+```
+
+**Deliberately not a no-auth mode.** An auth-bypass flag is exactly the kind of switch that escapes into
+production, and this project has already found three switches that read as present and were never wired. A
+disposable credential keeps the boundary enforced and makes the secret worthless instead.
+
+Verified through the browser once the harness existed: the **Lenses** panel renders all 8 entries with their full
+instruction text, an on/off toggle each, "never run here yet", and the header line *"0 of 8 tried so far…"*; **Open
+questions** renders its empty state with the `+ Decision` and `Refresh` controls. Zero console errors after unlock
+(the only ones are a pre-unlock 401 on `/api/org`, which is the unlock flow, and a favicon 404).
+
+One thing only a look would show: each lens card prints its **entire** instruction, several over 200 characters, so
+eight of them make a very tall panel. Left as observed rather than changed — it is a presentation call.

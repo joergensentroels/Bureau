@@ -13,7 +13,8 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
 const PORT = process.env.BUREAU_PORT || 4174;
 const wantE2E = process.argv.includes("--e2e");
-const wantServe = process.argv.includes("--serve");
+const wantServe = process.argv.includes("--serve") || process.argv.includes("--ui");
+const wantUI = process.argv.includes("--ui");
 
 const PURE = ["decision.test.mjs", "units.test.mjs", "finding-gate.test.mjs", "net.test.mjs", "heartbeat.test.mjs", "readme-demo.test.mjs", "ui.test.mjs"];
 const SERVER = ["api.test.mjs", "workspaces.test.mjs", "endpoints.test.mjs", "robustness.test.mjs", "mcp-floor.test.mjs"];
@@ -83,6 +84,19 @@ async function bootServer() {
     else console.log("  can't run --e2e: no server");
   }
 
+  // --ui: hold the throwaway server open so the UI can be LOOKED at, on a token that exists only for this run.
+  // Deliberately not a no-auth mode: an auth-bypass flag is the kind of switch that escapes into production, and a
+  // disposable credential keeps the boundary enforced while making the secret worthless.
+  if (wantUI && child) {
+    console.log("");
+    console.log("=== --ui: the throwaway server is STILL RUNNING for a browser check ===");
+    console.log("  open:  http://127.0.0.1:" + PORT + "/");
+    console.log("  token: " + (process.env.OPERATOR_TOKEN || "(unset)"));
+    console.log("  (disposable, generated for this run, and it dies with this process)");
+    console.log("  look for: Lenses renders its 8 entries; Open questions shows its empty state; no console errors after unlock.");
+    console.log("  Ctrl-C when done.");
+    await new Promise(() => {});   // hold until interrupted
+  }
   if (child) { try { child.kill(); } catch {} }
 
   const failed = results.filter((r) => r.code !== 0);
