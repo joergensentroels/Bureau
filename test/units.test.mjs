@@ -12,6 +12,7 @@ import {
   chunkDocument, deliverableChunks, modelUnreachable, trimVersions, clientKey, isLoopback,
   startLogTee, webhookBody,
   normalizeFinding, verifyFinding, findingCheckAllowed,
+  LENSES, pickLens, investigateObjective, investigate,
 } from "../server.mjs";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -706,6 +707,94 @@ console.log("# probe gate — shape validation");
 console.log("# normalizeAction — register_finding and its aliases");
 for (const at of ["register_finding", "finding", "report_finding", "defect", "report_defect", "bug", "log_finding"])
   eq(`  ${at} -> register_finding`, normalizeAction({ actionType: at, title: "t", command: "npm test" }).actionType, "register_finding");
+
+
+// ---- the investigate phase --------------------------------------------------------------------------------------
+//
+// The exit condition IS the feature. A loop that stops when the criteria are met is what Bureau already had; a loop
+// that stops when consecutive rounds find nothing new is the thing the 4water benchmark says produces the quality.
+// So the tests are about when it stops, and about what makes it keep going.
+console.log("# investigate — the loop stops on EXHAUSTION, not on satisfaction");
+{
+  const mkRun = () => ({ events: [], listeners: new Set(), findings: [], rejectedFindings: [], rounds: [] });
+  {
+    // Nothing found, ever: two dry rounds and out. Not eight.
+    const run = mkRun();
+    let calls = 0;
+    await investigate(run, async () => { calls++; return { tokens: 1 }; }, { dryLimit: 2 });
+    eq("  a barren codebase costs two rounds", [calls, run.rounds.length], [2, 2]);
+    chk("  and reports why it stopped", run.events.some((e) => e.type === "investigated" && e.data?.stoppedBecause === "dry"));
+  }
+  {
+    // A find resets the counter — a productive lens must not be cut off by an earlier dry round.
+    const run = mkRun();
+    let n = 0;
+    await investigate(run, async () => { n++; if (n === 2) run.findings.push({ claim: "x", cls: "B" }); return { tokens: 1 }; }, { dryLimit: 2 });
+    chk("  a find resets the dry counter, so it keeps going", run.rounds.length >= 4);
+    eq("  and the round that found something records it", run.rounds[1].confirmed, 1);
+    eq("  while the barren ones record zero", [run.rounds[0].confirmed, run.rounds[2].confirmed], [0, 0]);
+  }
+  {
+    // A stream of REFUSED claims must not keep the loop alive: only confirmed findings reset the counter, or an
+    // over-confident critic bills forever while producing nothing.
+    const run = mkRun();
+    await investigate(run, async () => { run.rejectedFindings.push({ claim: "guess", reason: "passes already" }); return { tokens: 1 }; }, { dryLimit: 2 });
+    eq("  refused claims do not count as progress", run.rounds.length, 2);
+  }
+  {
+    // The round cap is a real ceiling on a lens that keeps finding things.
+    const run = mkRun();
+    await investigate(run, async () => { run.findings.push({ claim: "another", cls: "E" }); return { tokens: 1 }; }, { dryLimit: 2, maxRounds: 3 });
+    eq("  a productive loop still stops at the round cap", run.rounds.length, 3);
+    chk("  and says that is why", run.events.some((e) => e.type === "investigated" && e.data?.stoppedBecause === "round cap"));
+  }
+  {
+    // Stopping the run stops the loop.
+    const run = mkRun();
+    await investigate(run, async () => { run.stopped = true; return { tokens: 1 }; }, { dryLimit: 2 });
+    eq("  a stopped run ends the loop after the round in flight", run.rounds.length, 1);
+  }
+  {
+    const run = mkRun();
+    const t = await investigate(run, async () => ({ tokens: 7 }), { dryLimit: 2 });
+    eq("  tokens are returned so the run books them", t, 14);
+  }
+}
+console.log("# investigate — lens rotation is informed, not random");
+{
+  chk("  every lens is an instruction, not a topic", LENSES.every((l) => l.prompt.length > 60 && /\b(Read|Take|Find|Walk|Run|For each)\b/.test(l.prompt)));
+  chk("  every lens has a distinct id", new Set(LENSES.map((l) => l.id)).size === LENSES.length);
+  {
+    const run = { rounds: [] };
+    const first = pickLens(run);
+    run.rounds.push({ lens: first.id, confirmed: 0 });
+    chk("  an unproductive lens is not repeated immediately", pickLens(run).id !== first.id);
+  }
+  {
+    const run = { rounds: [{ lens: LENSES[0].id, confirmed: 1 }] };
+    eq("  a lens that just found something gets another turn", pickLens(run).id, LENSES[0].id);
+  }
+  {
+    // Two dry rounds retires a lens — the register's whole purpose.
+    const run = { rounds: [{ lens: LENSES[0].id, confirmed: 0 }, { lens: LENSES[0].id, confirmed: 0 }] };
+    chk("  two dry rounds retire a lens", pickLens(run).id !== LENSES[0].id);
+    const allDry = { rounds: LENSES.flatMap((l) => [{ lens: l.id, confirmed: 0 }, { lens: l.id, confirmed: 0 }]) };
+    chk("  and when every lens is retired it still returns one rather than crashing", !!pickLens(allDry));
+  }
+}
+console.log("# investigate — the round prompt carries what the agent needs and nothing it should repeat");
+{
+  const run = { findings: [{ claim: "the export omits notes" }], rejectedFindings: [{ claim: "a hunch", reason: "the check passes already" }] };
+  const o = investigateObjective(run, LENSES[0], { E: { count: 9 }, B: { count: 4 } });
+  chk("  it says the criteria passing is not the same as being right", /passed its acceptance criteria/.test(o));
+  chk("  it carries the lens instruction verbatim", o.includes(LENSES[0].prompt));
+  chk("  it lists the confirmed finding so it is not re-found", /CONFIRMED: the export omits notes/.test(o));
+  chk("  it lists the REFUSED claim with its reason, so it is not resubmitted", /ALREADY REFUSED \(the check passes already\): a hunch/.test(o));
+  chk("  it ranks the company's known classes, commonest first", /E x9, B x4/.test(o));
+  chk("  and it invites an honest empty round", /honest empty round/.test(o));
+  const bare = investigateObjective({ findings: [], rejectedFindings: [] }, LENSES[1], {});
+  chk("  with no history it says nothing about repeats", !/Do NOT repeat/.test(bare));
+}
 
 console.log(`\n${fail === 0 ? "ALL PASS ✓" : "FAILURES ✗"} — ${pass} passed, ${fail} failed`);
 

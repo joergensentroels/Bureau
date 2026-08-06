@@ -3003,6 +3003,31 @@ async function runGated(run, worker, persistExtra, perAgentTally) {
   const met = run.criteria.filter((c) => c.status === "met").length;
   const verdict = !run.criteria.length ? "none" : unmet.length ? "shortfall" : open.length ? "unverified" : "passed";
   await persistChecklist(Math.max(0, attempt - 1), verdict);   // final on-disk state carries the verdict
+  // ---- construction is done; now go looking for what the criteria never asked about ----
+  // Only on a PASS: investigating work that has not met its own definition of done is looking for a second problem
+  // while the first is still open. Opt out per run with investigate:false, and never on a dry run.
+  if (verdict === "passed" && !run.dryRun && !run.stopped && run.investigate !== false) {
+    run.phase = "investigate";
+    const org0 = await readOrg().catch(() => ({}));
+    tokens += await investigate(run, worker, {
+      taxonomy: org0.taxonomy || {},
+      // Each confirmed finding bumps its class on the company, so the NEXT run's lens choice is informed by this one.
+      onRound: async () => {
+        const fresh = (run.findings || []).filter((f) => !f._booked);
+        if (!fresh.length) return;
+        await updateOrg((o) => {
+          o.taxonomy = o.taxonomy || {};
+          for (const f of fresh) {
+            const k = String(f.cls || "new");
+            o.taxonomy[k] = { count: ((o.taxonomy[k] || {}).count || 0) + 1, lastAt: Date.now(),
+                              example: String(f.claim || "").slice(0, 160) };
+          }
+        }).catch(() => {});
+        for (const f of fresh) f._booked = true;
+      },
+    });
+    run.tokensSoFar = tokens;
+  }
   const b = await persistRun(run.objective, tokens, { ...persistExtra, criteria: run.criteria, unmet: unmet.length, verdict }, perAgentTally, run.memoryEntries, run.paidTally);
   const paidSpentUsd = Math.round(Object.values(run.paidTally || {}).reduce((s, v) => s + v, 0) * 1e6) / 1e6;
   emit(run, "budget", { runTokens: tokens, totalTokens: b.tokens, ranPaid: !!run.ranPaid, paidTokens: run.paidTokens || 0, orchPaidTokens: run.orchPaidTokens || 0, paidSpentUsd });
@@ -3104,6 +3129,100 @@ async function failRun(run, message, extra = {}) {
 // Create a run object and kick it off. Returns { run, done } where done resolves when it finishes.
 // Reused by POST /api/run and the scheduler.
 // Turn a goal into a concrete run objective (used by "Work on it" and goal schedules).
+// ---- the investigate phase: a second phase whose exit condition is EXHAUSTION, not satisfaction ---------------
+//
+// Why this exists, and it is the single finding from the 4water benchmark most worth building in. That app was
+// feature-complete at commit 35 — a criteria-satisfaction run would have shipped and stopped. The 121 commits after it
+// found: a GDPR export missing three tables, a retention sweep that only ran when a season expired, two volunteer
+// screens showing dates in the past, a demo that crashed on any second run, a version string naming a program 115
+// commits stale, an authentication guard never reached, five assertions that never ran. None of that was in the
+// acceptance criteria, and all of it was real. The record's own line: "feature-complete was never a property of the
+// software; it was a property of nobody having looked at it recently."
+//
+// So: criteria met ends CONSTRUCTION. Then this runs, and it stops only when consecutive rounds find nothing new.
+const INVESTIGATE_DRY_ROUNDS = 2;    // consecutive rounds with no NEW confirmed finding -> done
+const INVESTIGATE_MAX_ROUNDS = 8;    // hard stop regardless, so a productive lens cannot bill forever
+
+// The ways of looking, and they are NOT interchangeable — on the benchmark, reading the spec back and measuring the
+// rendered page found the most, while re-reading the code found almost nothing late on. Each is phrased as an
+// instruction because a lens is only useful if it changes what the agent does, not what it thinks about.
+export const LENSES = [
+  { id: "spec-descriptive", prompt: "Read the requirements or spec back against what exists, sentence by sentence, and START where it merely DESCRIBES the old system rather than where it says 'must'. A requirement phrased as an observation does not read like a requirement, which is why it survives a reader looking for obligations." },
+  { id: "sibling-path", prompt: "Take a fix or a piece of care that exists somewhere, and ask which sibling path did NOT get it. Same rule, other caller; same guard, other route; same filter, other screen." },
+  { id: "what-would-it-accept", prompt: "Read the existing checks as an adversary and ask what a defect could satisfy them WITH. Not 'does this check catch a planted bug' but 'what would pass it that should not'." },
+  { id: "collector-blind", prompt: "For each check, ask what happens if its COLLECTOR returns nothing — an empty file list, an empty match, a query with no rows. A check over nothing passes." },
+  { id: "walk-the-sequence", prompt: "Walk a whole journey in order as the actor: arrive, sign in, act, come back later, leave. Composition defects live in no single file." },
+  { id: "stale-claim", prompt: "Find every number, version, count or date stated in prose or config, and derive the true value. A claim about the past can be wrong forever because nothing will contradict it again." },
+  { id: "permissive-default", prompt: "Find defaults that mean 'no limit', 'all', 'any' or 'skip the check', and ask which caller relies on that default. Correct today is not the same property as hard to get wrong tomorrow." },
+  { id: "first-command", prompt: "Run the very first command the documentation tells a newcomer to run, on a machine that has already run it once. Setup paths are exercised least and documented most." },
+];
+
+// Least-recently-used within this run, skipping lenses that have already gone dry twice — the register that makes
+// rotation informed rather than random. It is deliberately NOT random: a lens that just found something gets another
+// turn before one that has produced nothing.
+export function pickLens(run, lenses = LENSES) {
+  const used = new Map((run.rounds || []).map((r, i) => [r.lens, i]));
+  const dry = new Map();
+  for (const r of run.rounds || []) if (!r.confirmed) dry.set(r.lens, (dry.get(r.lens) || 0) + 1);
+  const live = lenses.filter((l) => (dry.get(l.id) || 0) < 2);
+  const pool = live.length ? live : lenses;
+  const last = run.rounds?.length ? run.rounds[run.rounds.length - 1] : null;
+  if (last && last.confirmed) { const again = pool.find((l) => l.id === last.lens); if (again) return again; }
+  return pool.slice().sort((a, b) => (used.has(a.id) ? used.get(a.id) : -1) - (used.has(b.id) ? used.get(b.id) : -1))[0];
+}
+
+// The prompt for one round. Carries the lens, what has already been claimed (confirmed AND refused, so the agent does
+// not resubmit a refused claim), and the classes this company has found before — which is what made lens choice
+// informed on the benchmark rather than a fresh guess every time.
+export function investigateObjective(run, lens, taxonomy = {}) {
+  const seen = [...(run.findings || []).map((f) => "CONFIRMED: " + f.claim),
+               ...(run.rejectedFindings || []).map((f) => "ALREADY REFUSED (" + f.reason + "): " + f.claim)];
+  const classes = Object.entries(taxonomy).sort((a, b) => (b[1]?.count || 0) - (a[1]?.count || 0))
+    .slice(0, 6).map(([k, v]) => k + " x" + (v?.count || 0));
+  return [
+    "The work already passed its acceptance criteria. That is not the same as being right, so this is a HUNTING round:",
+    "look for a defect that the criteria did not describe.",
+    "",
+    "THIS ROUND'S LENS — use it, do not substitute your own:",
+    lens.prompt,
+    "",
+    classes.length ? "Defect shapes this company has found before, most common first: " + classes.join(", ") + "." : "",
+    seen.length ? "Do NOT repeat any of these:\n" + seen.slice(0, 20).join("\n") : "",
+    "",
+    "If you find something, register_finding it — a claim, a check that FAILS on the current code, and the fix that makes",
+    "it pass. If this lens shows you nothing, say so plainly and finish the round; an honest empty round is what tells the",
+    "loop to move on, and a fabricated one wastes everybody's time because the runner will refuse it.",
+  ].filter(Boolean).join("\n");
+}
+
+// The loop. `worker` is the same one runGated uses, so tallies, budgets and steering all keep working.
+export async function investigate(run, worker, opts = {}) {
+  const { taxonomy = {}, onRound = null, dryLimit = INVESTIGATE_DRY_ROUNDS, maxRounds = INVESTIGATE_MAX_ROUNDS } = opts;
+  run.rounds = run.rounds || []; run.findings = run.findings || []; run.rejectedFindings = run.rejectedFindings || [];
+  run.dryRounds = 0;
+  let tokens = 0;
+  while (run.dryRounds < dryLimit && run.rounds.length < maxRounds && !run.stopped) {
+    const lens = pickLens(run);
+    const roundNo = run.rounds.length + 1;
+    const before = run.findings.length;
+    emit(run, "lens", { lens: lens.id, round: roundNo });
+    const w = await worker(investigateObjective(run, lens, taxonomy));
+    tokens += (w && w.tokens) || 0;
+    const confirmed = run.findings.length - before;
+    // Dry counts NEW CONFIRMED findings only. Counting claims would let a stream of refused guesses keep the loop
+    // alive forever, which is precisely how an unbounded critic bills without producing anything.
+    run.dryRounds = confirmed ? 0 : run.dryRounds + 1;
+    run.rounds.push({ lens: lens.id, at: Date.now(), confirmed, dryAfter: run.dryRounds });
+    emit(run, "round", { round: roundNo, lens: lens.id, confirmed, dryRounds: run.dryRounds });
+    if (onRound) await onRound(run, run.rounds[run.rounds.length - 1]);
+  }
+  emit(run, "investigated", {
+    rounds: run.rounds.length, findings: run.findings.length, refused: run.rejectedFindings.length,
+    stoppedBecause: run.stopped ? "stopped" : run.dryRounds >= dryLimit ? "dry" : "round cap",
+  });
+  return tokens;
+}
+
 // The repository a finding may be verified against — ONE path, named by the operator in guardrails, because Bureau
 // otherwise has no notion of a local code repo at all (agents write deliverables, not commits). Naming it explicitly is
 // the boundary: the gate can never wander to a repo nobody chose, and an unset value means findings cannot be verified
