@@ -17,7 +17,7 @@ import {
   turnBudgetWarning,
   executorProbeMs,
   repoPathSafe, readRepoFile, listRepoFiles, resolveRepoTarget, searchRepoFiles, repoOutline,
-  looksLikeRegex, unsafeRegex,
+  looksLikeRegex, unsafeRegex, repoVocabulary, vocabularyText,
   normalizeQuestion, questionKey, recordQuestion, answerQuestion, systemPrompt, unqueuedAssumption, tierReason,
   blockerCandidates, falsifyBlocker, normalizeDeclinedCheck, recordDeclinedCheck, refuteMsgs,
   buildUndecidedMsgs, normalizeUndecided, unaddressedUndecided, runInvestigateFlag,
@@ -1052,6 +1052,54 @@ console.log("# a turn that proposes nothing must not pass in silence");
   chk('  "other" is no longer advertised in the actionType enum', !src.includes('|"note"|"other"'));
   chk('  while note — which IS implemented — still is', src.includes('|"email_draft"|"note"'));
 }
+console.log("# a round starts from the codebase's own names, not from conventions it may not use");
+{
+  // Isolated by a planted-defect run. The sibling-path round opened with requireAuth|requireAdmin|assertAdmin|
+  // guard|checkRole — the conventional names — and this codebase calls its guard gate()/postGate(). It missed the
+  // route table entirely, spent the round elsewhere, and never opened the file where the planted authorization
+  // defect sat. A codebase whose guard is named unconventionally looks, to a guessing agent, like one with no guard.
+  const R = mkdtempSync(join(tmpdir(), 'repo-vocab-'));
+  try {
+    const { mkdirSync, writeFileSync: wf } = await import('node:fs');
+    mkdirSync(join(R, 'src')); mkdirSync(join(R, 'test'));
+    const LF = String.fromCharCode(10);
+    wf(join(R, 'src', 'server.mjs'), ['export function buildApp() {}', 'const gate = (c) => c;', 'const postGate = (c) => c;'].join(LF) + LF);
+    wf(join(R, 'src', 'config.mjs'), ['export const REQUIRED_ROLES = [1];'].join(LF) + LF);
+    wf(join(R, 'test', 'a.test.mjs'), ['export const shouldNotAppear = 1;'].join(LF) + LF);
+    const v = await repoVocabulary(R);
+    const txt = vocabularyText(v);
+    chk('  it names the guard this repo actually uses', txt.includes('gate'));
+    chk('  and its sibling', txt.includes('postGate'));
+    chk('  and a constant that governs the rules', txt.includes('REQUIRED_ROLES'));
+    chk('  grouped by the file that defines them', txt.includes('src/server.mjs:'));
+    // The controls. Test files are excluded — their helpers are not the product's vocabulary — and nothing invents
+    // a name the repo does not contain, which is the failure this replaces.
+    chk('  test files are left out', !txt.includes('shouldNotAppear'));
+    chk('  and it does not invent conventional names', !txt.includes('requireAuth') && !txt.includes('checkRole'));
+    chk('  an empty repo yields no text rather than a header', vocabularyText({ ok: true, entries: [] }) === '');
+    chk('  and a failed scan yields nothing', vocabularyText({ ok: false }) === '');
+  } finally { rmSync(R, { recursive: true, force: true }); }
+  {
+    const src = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
+    chk('  the round prompt carries it', src.includes('taxonomy = {}, vocabulary = '));
+    chk('  runGated computes it once per run', src.includes('vocabulary: vocabularyText(vocab0)'));
+    chk('  and so does hunt mode', src.includes('vocabulary: vocabularyText(vocab)'));
+    // The read cap was a mitigation for a 4,096-token LOCAL window; on a paid turn it cost ten searches
+    // reconstructing a 4,785-byte file.
+    {
+      // No regex: this session has had escapes eaten nine times, and a pattern that silently matches nothing
+      // reports a defect that is not there. Also no pinned literal — the first version hardcoded 24000 and broke
+      // the moment the number was tuned. The PROPERTY is what matters: a paid turn gets more room than a local one.
+      const key = 'const readCap = canUsePaid() ? ';
+      const at = src.indexOf(key);
+      chk('  the read cap follows the tier', at >= 0);
+      const parts = at < 0 ? [] : src.slice(at + key.length, at + key.length + 40).split(':');
+      const paid = parseInt(parts[0], 10), local = parseInt(parts[1], 10);
+      chk('  and a paid turn gets more room than a local one',
+          Number.isFinite(paid) && Number.isFinite(local) && paid > local);
+    }
+  }
+}
 console.log("# investigate — the BODY of a read is capped, the OUTLINE never is");
 {
   // Both false claims this session were absence claims made from a 4,000-character prefix of a 20,279-byte file:
@@ -1135,7 +1183,24 @@ console.log("# the search takes a pattern too, and says which way it read the te
   chk('  and an over-long pattern', unsafeRegex('x'.repeat(201)));
   chk('  while a sane pattern is allowed', !unsafeRegex('assert\\.ok|assert\\.equal'));
   {
-    const R = mkdtempSync(join(tmpdir(), 'repo-regex-'));
+    // The bytes a search hands back ARE the bytes an agent anchors a fix to. Trimming them guarantees the anchor
+  // cannot match: measured on a live run, a finding with the right line, the right quote style and the right
+  // variable name was refused only because the leading indentation had been stripped before the model ever saw it.
+  {
+    const R2 = mkdtempSync(join(tmpdir(), 'repo-indent-'));
+    try {
+      const { mkdirSync: md, writeFileSync: wf } = await import('node:fs');
+      md(join(R2, 'src'));
+      const real = '    const c = gate({ req, res });';   // four leading spaces, as in real source
+      wf(join(R2, 'src', 'a.mjs'), 'export function h() {' + String.fromCharCode(10) + real + String.fromCharCode(10) + '}' + String.fromCharCode(10));
+      const r = await searchRepoFiles(R2, 'gate({ req', 'src/a.mjs');
+      // Control first: if it found nothing, the byte assertion below would pass on an empty list.
+      chk('  the indented line is found at all', r.ok === true && r.hits.length === 1);
+      chk('  search results keep the line exactly, indentation included',
+          r.ok === true && r.hits.length === 1 && r.hits[0].text === real);
+    } finally { rmSync(R2, { recursive: true, force: true }); }
+  }
+  const R = mkdtempSync(join(tmpdir(), 'repo-regex-'));
     try {
       const { mkdirSync, writeFileSync: wf } = await import('node:fs');
       mkdirSync(join(R, 'test'));

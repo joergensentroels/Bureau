@@ -2069,7 +2069,19 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
     let raw;
     const usePaid = canUsePaid();
     const meta = {};
-    try { raw = await askLlm(history, { maxTokens: 1000, routingPreference: usePaid ? "external" : "local", ...(usePaid && paidTier.model ? { model: paidTier.model } : {}), meta }); noteLlm(run, true); }
+    const ask = (maxTokens) => askLlm(history, { maxTokens, routingPreference: usePaid ? "external" : "local", ...(usePaid && paidTier.model ? { model: paidTier.model } : {}), meta });
+    try {
+      raw = await ask(1000);
+      // A reasoning model can spend the whole output budget thinking and return nothing at all — measured at 699/700
+      // and 3999/4000 reasoning tokens with empty text. Untreated that is an empty turn, and it looks like a flaky
+      // model rather than a budget that was too small. One retry, bounded: 2600 is what criteria derivation already
+      // uses, and it stays inside Latch's 120s ceiling.
+      if (!String(raw || "").replace(/<think>[\s\S]*?<\/think>/gi, "").trim()) {
+        emit(run, "retry", { agent: who, depth, why: "the model returned nothing — retrying with a larger output budget" });
+        raw = await ask(2600);
+      }
+      noteLlm(run, true);
+    }
     catch (e) { noteLlm(run, false); emit(run, "error", { agent: who, depth, message: e.message }); break; }
     const callTokens = estTokens(history) + Math.ceil((raw.length) / 4);
     tokens += callTokens;
@@ -2589,7 +2601,10 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
           // truncated read safe to reason about; without it the agent has to guess at what it cannot see, and twice
           // this session it guessed "absent".
           const full = target ? await readRepoFile(repo, target, 400000) : null;
-          const r = target ? await readRepoFile(repo, target)
+          // The 4,000-character cap is a mitigation for a 4,096-token LOCAL window. On a paid turn it costs more than
+          // it saves: a 4,785-byte file cost ten follow-up searches reconstructing what one read should have given.
+          const readCap = canUsePaid() ? 12000 : 4000;   // 24000 doubled a run's cost and overran the ceiling: the per-run cap is checked BETWEEN turns, so dearer turns overshoot it
+          const r = target ? await readRepoFile(repo, target, readCap)
                   : want ? await readRepoFile(repo, want)
                   : { ok: false, error: "that is a directory — list it instead of reading it" };
           const listInstead = !r.ok && !/not inside the configured repository|leaves the repository/.test(r.error);
@@ -2837,7 +2852,9 @@ async function runHunt(run) {
   };
   let tokens = 0;
   try {
+    const vocab = await repoVocabulary(repo).catch(() => null);
     tokens = await investigate(run, worker, {
+      vocabulary: vocabularyText(vocab),
       lenses: activeLenses(reg), lensStats: reg.lenses || [],
       taxonomy: reg.taxonomy || {},
       maxRounds: Number(reg.guardrails?.investigateRounds) || undefined,
@@ -3450,7 +3467,9 @@ async function runGated(run, worker, persistExtra, perAgentTally, soloWorker = n
     const reg = await updateOrg((o) => { seedLenses(o); }).then(() => readOrg()).catch(() => org0);
     // Verbatim, on one agent. A lens that reaches the agent as a manager's paraphrase is not that lens.
     const hunter = soloWorker || worker;
+    const vocab0 = await repoVocabulary(findingRepo(org0)).catch(() => null);
     tokens += await investigate(run, hunter, {
+      vocabulary: vocabularyText(vocab0),
       lenses: activeLenses(reg), lensStats: reg.lenses || [],
       taxonomy: org0.taxonomy || {},
       maxRounds: Number(org0.guardrails?.investigateRounds) || undefined,
@@ -4005,7 +4024,7 @@ export function pickLens(run, lenses = LENSES, stats = null) {
 // The prompt for one round. Carries the lens, what has already been claimed (confirmed AND refused, so the agent does
 // not resubmit a refused claim), and the classes this company has found before — which is what made lens choice
 // informed on the benchmark rather than a fresh guess every time.
-export function investigateObjective(run, lens, taxonomy = {}) {
+export function investigateObjective(run, lens, taxonomy = {}, vocabulary = "") {
   const seen = [...(run.findings || []).map((f) => "CONFIRMED: " + f.claim),
                ...(run.rejectedFindings || []).map((f) => "ALREADY REFUSED (" + f.reason + "): " + f.claim)];
   const classes = Object.entries(taxonomy).sort((a, b) => (b[1]?.count || 0) - (a[1]?.count || 0))
@@ -4023,6 +4042,8 @@ export function investigateObjective(run, lens, taxonomy = {}) {
     "You get a LIMITED number of actions in this round — each read, each search, each registration is one. Plan for it:",
     "read enough to be sure, then register or report. A round that spends every action reading ends with nothing.",
     "",
+    vocabulary || "",
+    "",
     "READ THE CODE FIRST with read_repo — leave the path blank to list the repository, then read the files this lens points at.",
     "A check command and a fix must quote text that is really in the file, so a claim made without reading it will be refused",
     "for the wrong reason and teach you nothing.",
@@ -4036,7 +4057,7 @@ export function investigateObjective(run, lens, taxonomy = {}) {
 // The loop. `worker` is the same one runGated uses, so tallies, budgets and steering all keep working.
 export async function investigate(run, worker, opts = {}) {
   const { taxonomy = {}, onRound = null, dryLimit = INVESTIGATE_DRY_ROUNDS, maxRounds = INVESTIGATE_MAX_ROUNDS,
-          lenses = LENSES, lensStats = null } = opts;
+          lenses = LENSES, lensStats = null, vocabulary = "" } = opts;
   run.rounds = run.rounds || []; run.findings = run.findings || []; run.rejectedFindings = run.rejectedFindings || [];
   run.dryRounds = 0;
   let tokens = 0;
@@ -4046,7 +4067,7 @@ export async function investigate(run, worker, opts = {}) {
     const before = run.findings.length;
     run.currentLens = lens;   // the read_repo result repeats it: by then it is behind a listing and 4000 characters of source
     emit(run, "lens", { lens: lens.id, round: roundNo });
-    const w = await worker(investigateObjective(run, lens, taxonomy));
+    const w = await worker(investigateObjective(run, lens, taxonomy, vocabulary));
     tokens += (w && w.tokens) || 0;
     const confirmed = run.findings.length - before;
     // Dry counts NEW CONFIRMED findings only. Counting claims would let a stream of refused guesses keep the loop
@@ -4172,6 +4193,40 @@ export const looksLikeRegex = (t) => /[|\\]|\.\*|\.\+|\[[^\]]+\]|\([^)]*\|/.test
 // timeout in Node, so a nested quantifier is refused rather than risked.
 export const unsafeRegex = (t) => String(t || "").length > 200 || /\([^)]*[+*][^)]*\)\s*[+*]/.test(String(t || ""));
 
+// What this codebase calls things. Built from repoOutline over the source files, so it is the repo's OWN names —
+// which is the point: an agent that has to guess reaches for requireAuth/requireAdmin/checkRole, and a codebase whose
+// guard is called gate() then looks like a codebase with no guard at all. Measured: that exact guess cost a whole
+// round on a repo with a planted authorization defect sitting in the route table it never opened.
+export async function repoVocabulary(repo, opts = {}) {
+  const { maxFiles = 40, perFile = 14, cap = 140 } = opts;   // 8 dropped postGate, the sibling of the guard that matters
+  const l = await listRepoFiles(repo);
+  if (!l.ok) return { ok: false, error: l.error };
+  // Source only, and biggest first: the files that define the most are the ones worth naming.
+  const src = l.files.filter((f) => /\.(mjs|js|ts|jsx|tsx|py)$/.test(f) && !/\.test\./.test(f)).slice(0, maxFiles);
+  const out = [];
+  for (const f of src) {
+    if (out.length >= cap) break;
+    const r = await readRepoFile(repo, f, 400000);
+    if (!r.ok) continue;
+    const o = repoOutline(r.content, perFile * 3);
+    const names = [];
+    for (const s of o.symbols) {
+      const m = /(?:function|class|const|let|var|def)\s+([A-Za-z_$][\w$]*)/.exec(s.text);
+      if (m && !names.includes(m[1])) names.push(m[1]);
+      if (names.length >= perFile) break;
+    }
+    if (names.length) out.push({ file: f, names });
+  }
+  return { ok: true, files: out.length, entries: out };
+}
+
+// Rendered for a prompt. Kept terse on purpose: this competes for the same context as the code the agent needs to read.
+export function vocabularyText(vocab) {
+  if (!vocab || !vocab.ok || !vocab.entries.length) return "";
+  return "What this codebase calls things — its OWN names, so you do not have to guess at conventions it may not use:\n"
+    + vocab.entries.map((e) => "  " + e.file + ": " + e.names.join(", ")).join("\n");
+}
+
 export async function searchRepoFiles(repo, needle, rel = "", cap = 60) {
   const term = String(needle == null ? "" : needle).trim();
   if (!term) return { ok: false, error: "no search term" };
@@ -4205,7 +4260,10 @@ export async function searchRepoFiles(repo, needle, rel = "", cap = 60) {
     for (let i = 0; i < lines.length && hits.length < cap; i++) {
       const line = lines[i].length > 2000 ? lines[i].slice(0, 2000) : lines[i];   // a minified bundle is one huge line
       const hit = re ? re.test(line) : line.toLowerCase().includes(low);
-      if (hit) hits.push({ file: r.name, line: i + 1, text: lines[i].trim().slice(0, 200) });
+      // NOT trimmed. A finding's fix is applied by exact string match, and this is where an agent gets the text it
+      // anchors to — stripping the indentation here guarantees the anchor cannot match. Measured: a byte-perfect
+      // finding, correct line and correct quote style, refused solely because the leading spaces were gone.
+      if (hit) hits.push({ file: r.name, line: i + 1, text: lines[i].length > 300 ? lines[i].slice(0, 300) : lines[i] });
     }
   }
   return { ok: true, term, mode, hits, scanned, truncated: hits.length >= cap };
@@ -4275,10 +4333,20 @@ export async function withFindingIo(repo, fn) {
       const { bin, argv } = c === "npm" ? npmArgv(a) : { bin: c, argv: a };
       return run1(bin, argv, wt);
     },
+    // Reports which way the anchor failed, so a refusal is diagnosable instead of just "did not apply".
+    anchor: async (fix) => {
+      const before = await readFile(path.join(wt, fix.file), "utf8").catch(() => null);
+      if (before == null) return { file: false, count: 0 };
+      return { file: true, count: before.split(fix.find).length - 1 };
+    },
     apply: async (fix) => {
       const f = path.join(wt, fix.file);
       const before = await readFile(f, "utf8").catch(() => null);
-      if (before == null || !before.includes(fix.find)) return false;
+      if (before == null) return false;
+      // String.replace with a STRING pattern changes only the FIRST match. An anchor that occurs more than once would
+      // therefore patch a site the finding never named — measured, and it left the real defect in place while the run
+      // blamed the fix. Exactly one occurrence, or nothing happens.
+      if (before.split(fix.find).length - 1 !== 1) return false;
       io2._undo = { f, before };
       await writeFile(f, before.replace(fix.find, fix.replace));
       return true;
@@ -4356,7 +4424,18 @@ export async function verifyFinding(finding, io) {
   try {
     obs.before = (await io.sh(f.check)).ok;
     if (obs.before) return { ok: false, reason: "the check passes already, so it does not see the defect described", obs };
-    if (!(await io.apply(f.fix))) return { ok: false, reason: "the fix did not apply — the anchor text was not found", obs };
+    if (!(await io.apply(f.fix))) {
+      // Name the failure. "not found" and "matches in several places" call for different corrections, and an agent
+      // told only "did not apply" retries with the same shape. Optional so older io doubles keep working.
+      let why = "the anchor text was not found";
+      if (io.anchor) {
+        const a = await io.anchor(f.fix).catch(() => null);
+        if (a && !a.file) why = "the file named in the fix does not exist in the repository";
+        else if (a && a.count > 1) why = "the anchor text appears " + a.count + " times, so it does not identify one place — include surrounding lines";
+        if (a) obs.anchor = a.count;
+      }
+      return { ok: false, reason: "the fix did not apply — " + why, obs };
+    }
     obs.after = (await io.sh(f.check)).ok;
     if (!obs.after) return { ok: false, reason: "the fix does not make the check pass", obs };
     await io.revert(f.fix);

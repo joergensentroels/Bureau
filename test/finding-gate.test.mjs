@@ -133,5 +133,33 @@ try {
     chk('and npm reporting a PASSING check refuses the claim: ' + (v2.reason || 'confirmed?!'), v2.ok === false && /passes already/.test(v2.reason || ''));
   } finally { rmSync(passing, { recursive: true, force: true }); }
 }
+// An anchor that matches in more than one place used to patch the FIRST match — which is not necessarily the site
+// the finding named. Measured on a real repo: a fix aimed at one route landed on another, left the defect in place,
+// and the run reported 'the fix does not make the check pass'. Here the first match is deliberately the wrong one.
+{
+  const repo = makeRepo();
+  // other comes FIRST, so a bare '10' anchor patches the line that does not matter.
+  writeFileSync(join(repo, 'value.mjs'), 'export const other = 10;' + String.fromCharCode(10) + 'export const value = 10;' + String.fromCharCode(10));
+  git(repo, 'add', '-A');
+  git(repo, 'commit', '-q', '-m', 'two tens, the first one irrelevant');
+  try {
+    const ambiguous = { claim: 'value is 10 and the suite wants 42', class: 'B', where: 'value.mjs:2',
+                        check: 'node --test test/v.test.mjs', fix: { file: 'value.mjs', find: '10', replace: '42' } };
+    const o = await withFindingIo(repo, (io) => verifyFinding(ambiguous, io));
+    const v = o.ok ? o.result : { ok: false, reason: o.reason };
+    chk('an anchor matching twice is refused, not applied to the first match: ' + (v.reason || 'CONFIRMED?!'),
+        v.ok === false && /does not identify one place/.test(v.reason || ''));
+    chk('  and the refusal reports how many times it matched', (v.obs || {}).anchor === 2);
+    // Nothing was patched. Reading `repo` would NOT establish that — apply() works inside a throwaway worktree, so the
+    // source tree is untouched either way and the assertion would pass vacuously. What discriminates is that the gate
+    // never reached its second observation: no `after` means apply() short-circuited instead of editing and re-running.
+    chk('  and the check was never re-run, so nothing was patched', (v.obs || {}).after === undefined);
+    // THE CONTROL: same repo, same defect, a UNIQUE anchor. This must confirm, or the refusal above proves nothing.
+    const unique = { ...ambiguous, fix: { file: 'value.mjs', find: 'value = 10', replace: 'value = 42' } };
+    const o2 = await withFindingIo(repo, (io) => verifyFinding(unique, io));
+    const v2 = o2.ok ? o2.result : { ok: false, reason: o2.reason };
+    chk('  while a UNIQUE anchor on the same defect still confirms' + (v2.ok ? '' : ' — got: ' + v2.reason), v2.ok === true);
+  } finally { rmSync(repo, { recursive: true, force: true }); }
+}
 console.log(`\n${fail === 0 ? "ALL PASS ✓" : "FAILURES ✗"} — ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

@@ -897,3 +897,86 @@ front, and a single warning fires with two actions left offering the two things 
 plainly what the lens showed. Silent during construction, where running out just means a shorter document.
 
 Cumulative paid spend across five runs, nine rounds: **$1.78**.
+
+## The forced-lens experiment — the first confirmed finding, and what it cost to get there
+
+Eight rounds against clean 4water and three against a repo with a **planted** authorization defect all came back
+empty. The planted defect is worth stating precisely: `GET /admin/person/:id/export.json` had its `gate({ req, res },
+"admin")` reduced to `gate({ req, res })`, so any signed-in volunteer could export another person's record.
+`node --test test/authz-audit.test.mjs` fails on it. Eleven rounds, roughly $0.90 each, none of them found it.
+
+**The experimental design was wrong, and the error was mine.** The question was "given the sibling-path lens and a
+repo containing a sibling-path defect, does the agent find it and prove it?" I kept asking it by starting a full round
+and hoping an eight-way lens rotation would happen to select `sibling-path`. That is one agent turn's worth of
+question routed through a mechanism with no reason to cooperate. Asked directly — one call, the lens stated, the
+route/guard table supplied — it costs about **three cents**.
+
+Asked directly, it worked:
+
+```
+{"claim":"The /admin/person/:id/export.json route only requires a signed-in user while all other /admin routes
+  require the admin role.","where":"src/server.mjs:916","check":"node --test test/authz-audit.test.mjs", …}
+verdict: *** CONFIRMED ***   observations: {"before":false,"after":true,"again":false}
+```
+
+Right route, right line, and the model's own control proved it: the check failed on the code as it stood, passed with
+the fix applied, and failed again when the fix was reverted. 21 seconds, 2,772 tokens.
+
+### Four attempts, four different defects — and every one of them in the probe
+
+The model named the defect correctly on the **first** try and on every try after. Four attempts were consumed by
+faults in the harness around it, which is the recurring shape of this whole exercise:
+
+1. **`maxTokens: 700` returned empty text.** Usage said `completion_tokens: 700`, of which `reasoning_tokens: 699`.
+   The model spent its entire budget thinking and never reached its output. At 4,000 it was 3,999. Without printing
+   usage this reads as a dead model.
+2. **A 120-second ceiling, not a token ceiling.** Raising the budget to 16,000 produced
+   `external_llm_connection_failed` at exactly 120s — Latch's `timeoutMs`, primary and fallback both 120000. My first
+   guess was another reasoning exhaustion; printing the envelope showed it was not. The 4,000-token run took 109
+   seconds and only just landed.
+3. **A non-unique anchor patched the wrong place.** `find: "gate({ req, res })"` occurs eight times. The gate reported
+   "the fix does not make the check pass" — because it had edited an unrelated route and left the defect sitting
+   there. The claim was correct; the fix was applied somewhere it was never aimed.
+4. **I demanded byte-exact anchors while withholding the bytes.** Given only a summary table, the model invented
+   plausible surrounding code — single quotes where the file has double, `const account = await gate(…)` where the
+   file says `const c = gate(…)`. It had nothing else to go on.
+5. **Then my own table destroyed the bytes it promised.** I rendered each source line with `.trim()`, so the model
+   faithfully reproduced the stripped indentation and the anchor missed by four spaces. Everything else in that
+   finding was byte-perfect.
+
+Fault 5 is the one worth dwelling on, because **Bureau did the same thing to its own agents**: `searchRepoFiles`
+returned `lines[i].trim().slice(0, 200)`. Search is how an agent locates the line it wants to anchor a fix to, and the
+gate requires that anchor to match exactly — so the one tool that shows candidate lines was corrupting the only thing
+they were needed for. I found that by inflicting it on myself first and then going to look.
+
+### What changed as a result
+
+- **`searchRepoFiles` no longer trims.** Leading whitespace is part of the anchor. Cap raised 200 → 300.
+- **An ambiguous anchor cannot patch anything.** `apply()` counts occurrences and requires exactly one.
+  `String.replace` with a string pattern hits only the first match, so the previous behaviour could edit a site the
+  finding never named — in a remediation flow that is an unrequested change to unrelated code, which is worse than a
+  refusal.
+- **Refusals say which way the anchor failed** — missing file, not found, or "appears N times … include surrounding
+  lines" — because an agent told only "did not apply" retries with the same shape.
+- **An empty turn is retried once at 2,600 tokens and emits a `retry` event.** Agent turns asked for 1,000 and never
+  escalated, while criteria derivation already climbs a ladder. A reasoning model that thinks past the cap produced a
+  silent empty turn indistinguishable from a flaky model.
+
+Tests: the ambiguity refusal is checked on a real repo where the first match is deliberately the *wrong* site, with
+the control that a **unique** anchor on the same defect still confirms — otherwise the refusal would only prove the
+fixture was broken. The indentation assertion has its own control that the line is found at all, or it would pass
+vacuously on zero hits. One assertion I wrote first was vacuous and was replaced: it read the source repo to check
+"nothing was patched", but `apply()` works in a throwaway worktree, so the source tree is untouched either way. What
+discriminates is that the gate never reached its second observation. 786 unit assertions, 22 in the gate suite, 12
+suites green.
+
+### Limits of this result
+
+One defect, one lens, one file, and the lens was **forced rather than selected**. It shows the gate and the lens work
+when pointed; it does not show the rotation will point them. The route/guard table was also assembled by the harness —
+an agent must build that itself from `read_repo`, and the round that tried searched
+`requireAuth|requireAdmin|checkRole` against a codebase whose guard is `gate()`. Nothing here has yet produced a
+confirmed finding on code nobody pointed at.
+
+Spend for the whole forced-lens experiment, all eight calls including the two that timed out: **~$0.035**.
+Cumulative paid spend across the session: **~$5.34**.
