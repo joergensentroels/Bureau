@@ -1131,7 +1131,7 @@ export function systemPrompt(org, agent, opts = {}) {
     "- github_pr: open a pull request containing the document(s) you already SAVED this run — title=the PR title, command=the PR description, details=why. You do NOT list files: it includes what you saved with file_write, so save the finished work first. The CEO approves every one (never auto).",
     "- plan_add: record a follow-up task you notice but shouldn't do right now into the company's persistent plan — title=the task, details=why/context. It is saved for a future run so nothing is lost. Runs instantly (no approval). Do NOT use it to defer the CURRENT objective.",
     "- register_finding: claim a DEFECT and prove it. title=the one-sentence claim, url=file:line, details=the defect class, command=the check that detects it (one of the project's own: npm test | npm run <script> | node --test [file] | node tools/<x>.mjs), fix={file,find,replace}=the change that makes the check pass. The runner verifies it ITSELF in a throwaway copy and requires three things: your check FAILS on the current code, PASSES with your fix, and FAILS AGAIN once the fix is reverted. A claim without that evidence is refused and you are told why, so do not register a hunch — register something you can make fail.",
-    findingRepo(org) ? "- read_repo: read the source of the repository under investigation. title=the PATH, relative to the repo root, and nothing else — \"src/db.mjs\", not a description of what you are doing. Leave title blank (or name a directory) to LIST what is in the repository; a path that does not exist also returns the listing, so start there and read exact paths from it rather than guessing. Put a TERM in \"command\" to search instead of read: it greps the whole file (or the whole repository if you give no path) and returns every matching line with its number — use that whenever you want to claim something is MISSING, because a read can be cut off and a search cannot. Read-only and confined to that one repository. Use it before claiming anything about the code: a check command and a fix must quote text that is really in the file." : "",
+    findingRepo(org) ? "- read_repo: read the source of the repository under investigation. title=the PATH, relative to the repo root, and nothing else — \"src/db.mjs\", not a description of what you are doing. Leave title blank (or name a directory) to LIST what is in the repository; a path that does not exist also returns the listing, so start there and read exact paths from it rather than guessing. Put a TERM in \"command\" to search instead of read — a literal substring, or a regular expression if you write one (alternation, .* and character classes are recognised; the reply tells you which way it was read): it greps the whole file (or the whole repository if you give no path) and returns every matching line with its number — use that whenever you want to claim something is MISSING, because a read can be cut off and a search cannot. Read-only and confined to that one repository. Use it before claiming anything about the code: a check command and a fix must quote text that is really in the file." : "",
     "- declined_check: record a check you could NOT perform — title=what you did not verify, command=why you could not, details=what would have to be true for it to become possible. All three are required: a reason nobody can test is the one claim that never gets examined, and it then licenses every later skip without being restated. The runner searches the repository for whatever your reason names and, if it finds it, hands the evidence back once — because an excuse is a claim and it gets a control like any other.",
     "- note: record what you checked and what you concluded, when there is nothing to run — title=the heading, details=what you looked at and what you found or ruled out. It runs instantly and changes nothing. Use it instead of inventing an action when the honest answer is that you looked and found nothing.",
     "- ask_stakeholder: record a question only the CEO can settle — scope, a policy choice, a name, a number nobody wrote down — WITHOUT stopping. title=the question, command=the assumption you are proceeding under meanwhile, url=where that assumption is written down (file, field, document). It does not wait for an answer and it must not: you keep working, the question is queued for the CEO to answer alongside others, and the answer reaches a later run. A question with no assumption is REFUSED, because that is just asking to stop. Use this instead of escalate whenever the work can continue on a stated guess.",
@@ -1972,11 +1972,6 @@ async function consultPeer(asker, peer, org, question) {
 async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 0) {
   const who = agent.name;
   const history = [{ role: "system", content: systemPrompt(org, agent, { phase: run.phase }) }];
-  {
-    // Said once per agent task, before any model call, so an unexpected tier is visible rather than deduced.
-    const t = tierReason({ paidAvailable: run.paidAvailable, hush: run.hush, budgetUsd, paidSpent: startPaidSpent + paidThisRun, phase: run.phase });
-    emit(run, "tier", { agent: who, depth, tier: t.tier, reason: t.reason, model: t.tier === "paid" ? (paidTier.model || "") : "" });
-  }
   if ((agent.lessons || []).length) history.push({ role: "user", content:
     "Coaching from the CEO's past feedback on your work — APPLY these; do not repeat the mistakes they point at:\n" +
     agent.lessons.slice(0, 8).map((l) => `- ${l.text}`).join("\n") });
@@ -2026,6 +2021,15 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
   const startPaidSpent = Number(agent.paidSpentUsd) || 0;
   const paidTier = tierOf(agent);   // which paid model this agent uses (its "seniority") + its price — NOT the autonomy `tier` used further down
   let paidThisRun = 0, paidTokensThisRun = 0;
+    {
+      // Said once per agent task, before any model call, so an unexpected tier is visible rather than deduced.
+      // Placed HERE and not earlier: it reads budgetUsd, startPaidSpent, paidThisRun and paidTier — all consts
+      // declared just above. Sitting above them put four identifiers in the temporal dead zone and threw
+      // "Cannot access 'paidTier' before initialization" on EVERY agent turn. The test that covered this asserted
+      // the line's text was present, which it always was.
+      const t = tierReason({ paidAvailable: run.paidAvailable, hush: run.hush, budgetUsd, paidSpent: startPaidSpent + paidThisRun, phase: run.phase });
+      emit(run, "tier", { agent: who, depth, tier: t.tier, reason: t.reason, model: t.tier === "paid" ? (paidTier.model || "") : "" });
+    }
   const canUsePaid = () => run.paidAvailable && !run.hush && budgetUsd > 0 && (startPaidSpent + paidThisRun) < budgetUsd
     && (!run.maxPaidUsd || runPaidTotal(run) < run.maxPaidUsd);   // server-side per-run paid ceiling (guardrails.maxPaidUsdPerRun)
   // reliability guards: the weak local model tends to "finish" claiming it did work it never did.
@@ -2553,16 +2557,21 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
           // to PREVENT false absence claims produced one: searching src/db.mjs for the string "src/db.mjs".
           const term = termRaw;
           if (term && term !== want && !resolveRepoTarget(all.files || [], term)) {
+            // If a path was asked for and did not resolve, say so instead of quietly searching everything: a scope
+            // that changes without being mentioned turns "not found here" into "not found anywhere".
+            const askedForPath = want && !target;
             const s = await searchRepoFiles(repo, term, target || "");
             if (s.ok) {
               didExecute = true;
               emitAct({ agent: who, depth, actionType: "read_repo", url: (target || "*") + ":" + term, ok: true, bytes: s.hits.length, error: "" });
               emit(run, "repoRead", { by: who, depth, file: (target || "the whole repository") + " for " + JSON.stringify(term), bytes: s.hits.length, search: true });
-              history.push({ role: "user", content: s.hits.length
+              history.push({ role: "user", content: (askedForPath ? `NOTE: "${want}" did not match any path, so this searched the WHOLE repository rather than that one place.\n` : "")
+                + (s.mode === "regex" ? "(read as a regular expression)\n" : "(read as a LITERAL substring, not a pattern)\n")
+                + (s.hits.length
                 ? `APPROVED and EXECUTED — every line containing ${JSON.stringify(term)}${target ? " in " + target : " in the repository"} (${s.hits.length} match(es) across ${s.scanned} file(s)${s.truncated ? ", capped" : ""}):\n`
                   + s.hits.map((h) => `${h.file}:${h.line}: ${h.text}`).join("\n")
                   + `\n\nThis search read the WHOLE file(s), so an empty result here IS evidence of absence — unlike a truncated read.${postReadGuidance(run)}`
-                : `APPROVED and EXECUTED — ${JSON.stringify(term)} appears NOWHERE${target ? " in " + target : " in the repository"} (${s.scanned} file(s) searched in full). This search was not truncated, so that is real evidence of absence.${postReadGuidance(run)}` });
+                : `APPROVED and EXECUTED — ${JSON.stringify(term)} appears NOWHERE${target ? " in " + target : " in the repository"} (${s.scanned} file(s) searched in full). This search was not truncated, so that is real evidence of absence — for THIS spelling. If you searched for a pattern and got nothing, try the plainest literal substring before concluding anything is missing.${postReadGuidance(run)}`) });
               continue;
             }
           }
@@ -4125,6 +4134,13 @@ export function resolveRepoTarget(files, text) {
 
 // Grep one file, or the whole repository, for a literal term. Capped by number of MATCHES, not by position in the
 // file, which is the point: a prefix cap can hide the one line that refutes a claim of absence.
+// Does this look like a regex rather than a literal? Deliberately conservative: only metacharacters that carry no
+// meaning in a plain code search count, so "db.prepare(" stays a literal while "assert\\.|for.*body" does not.
+export const looksLikeRegex = (t) => /[|\\]|\.\*|\.\+|\[[^\]]+\]|\([^)]*\|/.test(String(t || ""));
+// A crude catastrophic-backtracking guard. A model-supplied pattern runs in this process, and there is no regex
+// timeout in Node, so a nested quantifier is refused rather than risked.
+export const unsafeRegex = (t) => String(t || "").length > 200 || /\([^)]*[+*][^)]*\)\s*[+*]/.test(String(t || ""));
+
 export async function searchRepoFiles(repo, needle, rel = "", cap = 60) {
   const term = String(needle == null ? "" : needle).trim();
   if (!term) return { ok: false, error: "no search term" };
@@ -4138,6 +4154,14 @@ export async function searchRepoFiles(repo, needle, rel = "", cap = 60) {
     if (!l.ok) return l;
     files = l.files;
   }
+  // Literal by default; regex when the term plainly is one. Which mode ran is REPORTED, because a search that
+  // silently interprets its input differently from what the caller meant is how the zeros above happened.
+  let mode = "literal", re = null;
+  if (looksLikeRegex(term)) {
+    if (unsafeRegex(term)) return { ok: false, error: "that pattern could backtrack catastrophically — simplify it, or search for a literal substring" };
+    try { re = new RegExp(term, "i"); mode = "regex"; }
+    catch (e) { return { ok: false, error: "that looks like a regular expression but will not compile (" + e.message + ") — search for a literal substring instead" }; }
+  }
   const low = term.toLowerCase();
   const hits = [];
   let scanned = 0;
@@ -4148,10 +4172,12 @@ export async function searchRepoFiles(repo, needle, rel = "", cap = 60) {
     scanned++;
     const lines = r.content.split("\n");
     for (let i = 0; i < lines.length && hits.length < cap; i++) {
-      if (lines[i].toLowerCase().includes(low)) hits.push({ file: r.name, line: i + 1, text: lines[i].trim().slice(0, 200) });
+      const line = lines[i].length > 2000 ? lines[i].slice(0, 2000) : lines[i];   // a minified bundle is one huge line
+      const hit = re ? re.test(line) : line.toLowerCase().includes(low);
+      if (hit) hits.push({ file: r.name, line: i + 1, text: lines[i].trim().slice(0, 200) });
     }
   }
-  return { ok: true, term, hits, scanned, truncated: hits.length >= cap };
+  return { ok: true, term, mode, hits, scanned, truncated: hits.length >= cap };
 }
 
 export async function listRepoFiles(repo, sub = "", cap = 400) {

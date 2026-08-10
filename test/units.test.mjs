@@ -16,6 +16,7 @@ import {
   normalizeLens, lensParaphrase, addProposedLens, lensProposalObjective, sigWords, postReadGuidance,
   executorProbeMs,
   repoPathSafe, readRepoFile, listRepoFiles, resolveRepoTarget, searchRepoFiles, repoOutline,
+  looksLikeRegex, unsafeRegex,
   normalizeQuestion, questionKey, recordQuestion, answerQuestion, systemPrompt, unqueuedAssumption, tierReason,
   blockerCandidates, falsifyBlocker, normalizeDeclinedCheck, recordDeclinedCheck, refuteMsgs,
   buildUndecidedMsgs, normalizeUndecided, unaddressedUndecided, runInvestigateFlag,
@@ -956,6 +957,35 @@ console.log("# an excuse is a claim: the declined-check register");
     chk('  and a review round is offered the action', src.includes('"ask_peer", "declined_check"'));
   }
 }
+console.log("# nothing inside runAgentTask is used before it is declared (temporal dead zone)");
+{
+  // A crash I shipped, found by a live run and not by 884 tests. The tier emit was placed 49 lines ABOVE the four
+  // consts it reads, so every agent turn threw "Cannot access 'paidTier' before initialization" — hunts died between
+  // the lens event and the first model call. The test that supposedly covered it asserted
+  // src.includes('emit(run, \"tier\"'): the line's TEXT was present, which was never in question. And every
+  // server-suite test is model-free, so not one of them runs an agent turn.
+  const src = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
+  const start = src.indexOf('async function runAgentTask');
+  const body = src.slice(start, src.indexOf(String.fromCharCode(10) + 'async function ', start + 10));
+  chk('  runAgentTask was located', start > 0 && body.length > 5000);
+  // Whole-line comments are stripped first: the prose above the paid-model block MENTIONS budgetUsd, and a
+  // substring search counted that as a use, reporting a defect that was not there. Only full-line comments are
+  // removed, so no line that also carries code can be damaged.
+  const code = body.split(String.fromCharCode(10)).filter((l) => !l.trim().startsWith('//')).join(String.fromCharCode(10));
+  for (const name of ['paidTier', 'budgetUsd', 'startPaidSpent', 'canUsePaid']) {
+    // indexOf, not a regex: this file has had escapes eaten by a quoting layer five times, and a regex that
+    // silently matches nothing returns -1 and reports a defect that is not there — which is what it did here.
+    const decl = Math.max(code.indexOf('const ' + name), code.indexOf('let ' + name));
+    const use = code.indexOf(name);
+    chk('  ' + name + ' is declared before its first use', decl >= 0 && use >= decl);
+  }
+  // The control: the same test, run against a rigged body, must FAIL — otherwise the four lines above are decoration.
+  {
+    const rigged = 'async function x(){ emit(paidTier.model); const paidTier = 1; }';
+    const rd = rigged.indexOf('const paidTier'), ru = rigged.indexOf('paidTier');
+    chk('  and it catches a rigged use-before-declare', !(rd >= 0 && ru >= rd));
+  }
+}
 console.log("# which model tier serves a turn, and why it is not the other one");
 {
   // Working out why every hunt in this project ran on the local model took reading four conditions across three
@@ -1064,6 +1094,47 @@ console.log("# investigate — the BODY of a read is capped, the OUTLINE never i
     chk('  a truncated read carries the outline', s2.includes('Every declaration in the WHOLE'));
     chk('  built from the WHOLE file, not from the capped body', s2.includes('readRepoFile(repo, target, 400000)'));
     chk('  and it states the asymmetry both ways', s2.includes('it really is not declared here') && s2.includes('it exists even though you cannot see its body'));
+  }
+}
+console.log("# the search takes a pattern too, and says which way it read the term");
+{
+  // Found by a paid hunting round: the model sends regexes, because every search tool it has met takes them.
+  // Literal matching returned 0 for all of them and it read absence. The same file, searched for the plain
+  // literal 'assert', returned 16 — so the zeros were the tool, not the code. A false-absence machine inside
+  // the instrument built to prevent false absence.
+  chk('  alternation reads as a pattern', looksLikeRegex('a\\.b|c'));
+  chk('  and a dot-star', looksLikeRegex('for.*body'));
+  chk('  and a character class', looksLikeRegex('[A-Z]+Token'));
+  // The control: ordinary code text must NOT be reinterpreted, or every literal search changes meaning.
+  chk('  a call with parens stays literal', !looksLikeRegex('db.prepare('));
+  chk('  a plain word stays literal', !looksLikeRegex('assert'));
+  chk('  a path stays literal', !looksLikeRegex('src/db.mjs'));
+  // A model-supplied pattern runs in this process and Node has no regex timeout.
+  chk('  a nested quantifier is refused', unsafeRegex('(a+)+b'));
+  chk('  and an over-long pattern', unsafeRegex('x'.repeat(201)));
+  chk('  while a sane pattern is allowed', !unsafeRegex('assert\\.ok|assert\\.equal'));
+  {
+    const R = mkdtempSync(join(tmpdir(), 'repo-regex-'));
+    try {
+      const { mkdirSync, writeFileSync: wf } = await import('node:fs');
+      mkdirSync(join(R, 'test'));
+      const LF = String.fromCharCode(10);
+      wf(join(R, 'test', 'a.test.mjs'), ['assert.ok(x);', 'assert.equal(y, 1);', 'const z = 3;'].join(LF) + LF);
+      const rx = await searchRepoFiles(R, 'assert\\.ok\\(|assert\\.equal\\(', 'test/a.test.mjs');
+      eq('  the pattern that used to return zero now matches both lines', [rx.ok, rx.hits.length, rx.mode], [true, 2, 'regex']);
+      const lit = await searchRepoFiles(R, 'assert', 'test/a.test.mjs');
+      eq('  and a literal still runs as a literal', [lit.hits.length, lit.mode], [2, 'literal']);
+      const bad = await searchRepoFiles(R, 'foo|(', 'test/a.test.mjs');
+      chk('  a pattern that will not compile says so rather than returning nothing', bad.ok === false && /will not compile/.test(bad.error));
+      const uns = await searchRepoFiles(R, '(a+)+b|c', 'test/a.test.mjs');
+      chk('  and a dangerous one is refused, not run', uns.ok === false && /backtrack/.test(uns.error));
+    } finally { rmSync(R, { recursive: true, force: true }); }
+  }
+  {
+    const src = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
+    chk('  the reply states which mode ran', src.includes('read as a LITERAL substring'));
+    chk('  an unresolved path is reported instead of silently widening the scope', src.includes('const askedForPath = want && !target'));
+    chk('  and an empty result no longer claims absolute absence', src.includes('for THIS spelling'));
   }
 }
 console.log("# investigate — a truncated read cannot show ABSENCE, so there is a search that can");

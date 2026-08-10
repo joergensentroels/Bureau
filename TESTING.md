@@ -825,3 +825,41 @@ cannot run must never read as a clean bill of health; that is the exact class th
 and it reappeared in the mechanism built to prevent it. It now returns `"(the reviewer could not be reached: … —
 this is NOT a clean review)"`. Found because a probe returned two empty strings and the empties were investigated
 rather than accepted.
+
+## The paid tier, and two defects it exposed in my own tools
+
+Kimi (`kimi-k2.6`) on a funded agent, hunting 4water. Cost: **$0.163** for one round, **$0.287** for two. The
+behaviour is not a better version of the local model's — it is a different activity.
+
+Round 1, lens `spec-descriptive` (*"start where the spec merely DESCRIBES the old system"*): it listed the repo,
+read `PLAN.md` (38 kB), then ran nine targeted searches — `"spreadsheet"`, `"In the spreadsheet"`, `"used to"`,
+`" was "`, `"Imported ActiveCph"`, `"spec Q"`. Searching for past-tense prose is exactly how you find an
+observational requirement. qwen3 never did anything of the kind.
+
+Round 2, lens `what-would-it-accept`: it went after the audit tests themselves — reading `csrf-audit.test.mjs` and
+`authz-audit.test.mjs`, then checking whether the route-matching in those audits could miss routes. That is the
+lens working precisely as written.
+
+**And it found two defects in my search tool, both producing false absence.**
+
+```
+SEARCH … "assert\.ok\(|assert\.equal\(|assert\.match\("   -> 0
+SEARCH … "assert\.|for.*body"                             -> 0
+SEARCH … "assert"                                         -> 16   ← plain literal
+```
+
+The model sends **regexes**, because every search tool it has ever seen takes them. `searchRepoFiles` matched
+literal substrings, so every pattern returned zero and the agent read absence — a false-absence machine inside the
+instrument built to prevent false absence. The literal `"assert"` returning 16 is what proves the zeros were the
+tool. And `read_repo "test/"` with a term reported *"SEARCH the whole repository"*: the directory did not resolve
+to a file, so the scope silently widened from one directory to everything.
+
+Both fixed. The search now reads a pattern when the term plainly is one (alternation, `.*`, character classes),
+**reports which mode it used**, refuses a pattern that will not compile or that could backtrack catastrophically
+(a model-supplied regex runs in this process and Node has no regex timeout), and an empty result no longer claims
+absolute absence — only absence *of that spelling*. An unresolved path is stated rather than quietly widened.
+Replayed against the exact queries from the run: 0 → 9 hits, 0 → 14 hits, and `gate\(|postGate\(` still 0, which
+was always correct.
+
+Still no confirmed finding. But for the first time the reason is not "the mechanism misled it" — the model used
+every instrument correctly, and two of them lied to it.
