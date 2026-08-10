@@ -2044,7 +2044,14 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
   const actionExpected = /\b(write|draft|compose|save|create|make|search|find|look ?up|research|fetch|read|send|email|publish|build|document|report|note|guide|memo|summary|list|announcement|letter|plan)\b/i.test(String(objective));
   setAgentState(agent.id, "working", objective.slice(0, 80));
   try {
+  let warnedLowTurns = false;
   for (let turn = 1; turn <= run.maxTurns && !run.stopped; turn++) {
+    {
+      // Said once, near the end. Counted live: a hunting round spent all 12 turns reading and registered nothing,
+      // and nothing had told it the budget was running out.
+      const w = turnBudgetWarning({ turn, maxTurns: run.maxTurns, phase: run.phase, warned: warnedLowTurns });
+      if (w) { warnedLowTurns = true; history.push({ role: "user", content: w }); }
+    }
     // ---- Mid-run human steering ----------------------------------------------------------------
     // Hold here while the run is paused (cooperative, same as the stop guard), then splice any new
     // CEO course-corrections into this agent's history so the very next LLM turn incorporates them.
@@ -2537,7 +2544,10 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
         // One action rather than two, because a model given read_repo and list_repo picks the wrong one and burns a
         // turn on the correction. A blank path, or one that turns out to be a directory, lists instead of reading.
         const repo = findingRepo(org);
-        const want = String(next.title || next.command || next.details || "").trim();
+        // NOT `next.command` in this fallback. It was, and that silently turned every search with a blank title into a
+        // directory listing: want became the search term, so `term !== want` was false and the search never ran.
+        // A command that names a real file is still treated as a path — resolveRepoTarget does that below.
+        const want = String(next.title || next.details || "").trim();
         if (!repo) {
           emitAct({ agent: who, depth, actionType: "read_repo", url: "", ok: false, bytes: 0, error: "no repo configured" });
           history.push({ role: "user", content: "No repository is configured (guardrails.findingRepo), so there is no source to read. Work from what you have been given, and do not state anything about code you cannot see." });
@@ -3892,6 +3902,24 @@ export function addProposedLens(org, lens, now = 0, cap = LENS_PROPOSAL_CAP) {
 
 // What to say after handing an agent a file during a hunting round. Live run five is the reason this exists: given
 // 10kB of README and no direction, the model produced a valid turn and finished with nothing.
+// When to tell an agent its round is nearly over, and what to say. Fires ONCE, with two turns left, and only in a
+// review phase — a construction turn that runs out simply produces a shorter deliverable, while a hunting round that
+// runs out produces nothing at all and looks identical to a round that found nothing.
+export function turnBudgetWarning({ turn, maxTurns, phase, warned = false }) {
+  if (warned || phase !== "investigate") return "";
+  const left = Number(maxTurns) - Number(turn);
+  if (!(left >= 0) || left > 2) return "";
+  return [
+    left <= 0 ? "This is your LAST action in this round." : `Only ${left} action${left === 1 ? "" : "s"} left in this round.`,
+    "Reading another file will not fit. Do one of these two things now:",
+    "- register_finding, if you can already name a defect AND a command in this project that fails because of it;",
+    "- or say plainly what this lens showed you and finish. An honest empty round is a real answer and it is the right",
+    "  one most of the time — it is what tells the register this lens is spent here.",
+    "What you must not do is spend the last turns reading and end with nothing, because a round that ran out looks",
+    "exactly like a round that looked and found nothing.",
+  ].join("\n");
+}
+
 export function postReadGuidance(run) {
   if (run?.phase !== "investigate" || !run?.currentLens) return "";
   return [
@@ -3991,6 +4019,9 @@ export function investigateObjective(run, lens, taxonomy = {}) {
     "",
     classes.length ? "Defect shapes this company has found before, most common first: " + classes.join(", ") + "." : "",
     seen.length ? "Do NOT repeat any of these:\n" + seen.slice(0, 20).join("\n") : "",
+    "",
+    "You get a LIMITED number of actions in this round — each read, each search, each registration is one. Plan for it:",
+    "read enough to be sure, then register or report. A round that spends every action reading ends with nothing.",
     "",
     "READ THE CODE FIRST with read_repo — leave the path blank to list the repository, then read the files this lens points at.",
     "A check command and a fix must quote text that is really in the file, so a claim made without reading it will be refused",

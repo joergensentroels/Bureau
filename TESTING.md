@@ -863,3 +863,37 @@ was always correct.
 
 Still no confirmed finding. But for the first time the reason is not "the mechanism misled it" — the model used
 every instrument correctly, and two of them lied to it.
+
+## Two more rounds, two more defects — and the worst kind
+
+With the search reading patterns, `maxTurns` raised to 20 and the turn-budget warning in place, the round finally
+**ended with a conclusion instead of mid-sentence**: *"This lens revealed no dangerous defaults. Every bound I
+inspected is explicit and safe: rate limits use fixed constants, retention floors at 1, outbound…"*
+
+That conclusion was **false**, and not because the model was careless:
+
+```
+-> read_repo "" cmd="Infinity"   ->   read Infinity/ -> 106 files
+-> read_repo "" cmd="skip"       ->   read skip/     -> 106 files
+-> read_repo "" cmd="= null"     ->   read = null/   -> 106 files
+```
+
+Seven searches in that round — `Infinity`, `-1`, `skip`, `timeout`, `limit`, `= null`, `= true` — **silently became
+directory listings**. `want` fell back to `next.command` when the title was blank, so `want` *became* the search
+term, `term !== want` was false, the search branch was skipped, and it fell through to listing. The agent reported
+that it had inspected every bound, having run none of those searches.
+
+This is the worst of the three dispatch defects. The first two produced **zeros**, which look like absence. This
+one produced a **confident, specific, wrong conclusion** — and nothing in the transcript marks it as different from
+a real one.
+
+Fixed: `title` is the path, `command` is the term, and they are no longer conflated. A command that names a real
+file is still honoured as a path, which `resolveRepoTarget` already handled.
+
+**The turn-budget fix worked.** Counted from the previous run: exactly 12 actions with `maxTurns: 12`, ending one
+search into "how does `rolesOf` handle a missing personId". Zero findings *and* zero refused claims — it never made
+a claim, because the round ran out underneath it and nothing said so. Now the round prompt states the budget up
+front, and a single warning fires with two actions left offering the two things still possible: register, or say
+plainly what the lens showed. Silent during construction, where running out just means a shorter document.
+
+Cumulative paid spend across five runs, nine rounds: **$1.78**.

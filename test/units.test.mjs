@@ -14,6 +14,7 @@ import {
   normalizeFinding, verifyFinding, findingCheckAllowed, npmArgv,
   LENSES, pickLens, investigateObjective, investigate, seedLenses, activeLenses, bookLensRound,
   normalizeLens, lensParaphrase, addProposedLens, lensProposalObjective, sigWords, postReadGuidance,
+  turnBudgetWarning,
   executorProbeMs,
   repoPathSafe, readRepoFile, listRepoFiles, resolveRepoTarget, searchRepoFiles, repoOutline,
   looksLikeRegex, unsafeRegex,
@@ -1096,6 +1097,26 @@ console.log("# investigate — the BODY of a read is capped, the OUTLINE never i
     chk('  and it states the asymmetry both ways', s2.includes('it really is not declared here') && s2.includes('it exists even though you cannot see its body'));
   }
 }
+console.log("# a search with a blank title must not become a directory listing");
+{
+  // The worst of the three dispatch defects, because it produced a CONFIDENT WRONG CONCLUSION rather than a zero.
+  // `want` fell back to `command`, so with a blank title want BECAME the search term, `term !== want` was false,
+  // and the search branch was skipped entirely. Seven searches in one live round — Infinity, -1, skip, timeout,
+  // limit, '= null', '= true' — each returned a 106-file listing. The agent then reported 'this lens revealed no
+  // dangerous defaults; every bound I inspected is explicit and safe', having run none of them.
+  const src = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
+  // Scoped to the read_repo branch: another action legitimately uses the title||command||details fallback, so a
+  // whole-file search reports a defect that is not there.
+  const rr = src.slice(src.indexOf('=== "read_repo") {'));
+  const branch = rr.slice(0, rr.indexOf('=== "propose_lens") {'));
+  chk('  the read_repo branch was located', branch.length > 500);
+  chk('  its path field no longer falls back to the search term',
+      !branch.includes('next.title || next.command'));
+  // The control: the term must still come from command, or the search has no input at all.
+  chk('  and the term is still taken from command', branch.includes('termRaw = String(next.command'));
+  chk('  a command naming a real file is still honoured as a path',
+      branch.includes('resolveRepoTarget(all.files || [], termRaw)'));
+}
 console.log("# the search takes a pattern too, and says which way it read the term");
 {
   // Found by a paid hunting round: the model sends regexes, because every search tool it has met takes them.
@@ -1310,6 +1331,35 @@ console.log("# an absent worker executor must not be re-proved at full price");
     chk("  a success forgets the memo, so a returning worker is not penalised", src.includes("EXECUTOR_ABSENT_AT = 0;"));
     chk("  and a timeout records it", src.includes("EXECUTOR_ABSENT_AT = Date.now();"));
     chk("  a failed search during a hunt points back at the repository", src.includes("the repository is the place to check a claim about the code"));
+  }
+}
+console.log("# a round that runs out of turns must not look like a round that found nothing");
+{
+  // Counted from a live paid round: exactly 12 actions with maxTurns 12, ending mid-sentence one search into
+  // "how does rolesOf handle a missing personId". Zero findings AND zero refused claims — it never made a claim,
+  // because the round ran out underneath it and nothing said so. Same defect as the empty-action loop and the
+  // silent scope widening: a constraint the agent is subject to and never told about.
+  const w = (o) => turnBudgetWarning({ maxTurns: 12, phase: 'investigate', ...o });
+  eq('  nothing at turn 9 of 12', w({ turn: 9 }), '');
+  chk('  it warns with two left', w({ turn: 10 }).length > 0);
+  chk('  and with one', /Only 1 action left/.test(w({ turn: 11 })));
+  chk('  and says so on the last', /LAST action/.test(w({ turn: 12 })));
+  eq('  once only, never every turn', w({ turn: 11, warned: true }), '');
+  // The controls. A construction turn that runs out just makes a shorter document; only a review round ends with
+  // nothing and looks identical to one that genuinely found nothing.
+  eq('  silent during construction', turnBudgetWarning({ turn: 11, maxTurns: 12, phase: 'work' }), '');
+  eq('  and with no phase at all', turnBudgetWarning({ turn: 11, maxTurns: 12 }), '');
+  {
+    const m = w({ turn: 11 });
+    chk('  it offers registering a finding', /register_finding/.test(m));
+    chk('  it offers the honest empty answer as legitimate', /honest empty round is a real answer/.test(m));
+    chk('  and names the failure it is preventing', m.includes('looks') && m.includes('found nothing'));
+  }
+  {
+    const src = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
+    chk('  the turn loop fires it', src.includes('turnBudgetWarning({ turn, maxTurns: run.maxTurns'));
+    chk('  and latches so it cannot repeat', src.includes('let warnedLowTurns = false'));
+    chk('  the round prompt also states the budget up front', src.includes('You get a LIMITED number of actions'));
   }
 }
 console.log("# investigate — after a file comes back, the agent is told what to do with it");
