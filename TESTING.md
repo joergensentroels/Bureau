@@ -980,3 +980,70 @@ confirmed finding on code nobody pointed at.
 
 Spend for the whole forced-lens experiment, all eight calls including the two that timed out: **~$0.035**.
 Cumulative paid spend across the session: **~$5.34**.
+
+## The autonomous round — a confirmed finding on code nobody pointed at
+
+The paragraph above ends by saying nothing here had yet produced a confirmed finding on code nobody pointed at.
+One round, on the code with the anchor fixes in it, did.
+
+```
+[ 128s]   Reading the /admin/person/:id/export.json route and its siblings to verify if the admin role guard is missing.
+[ 153s]   read   test/authz-audit.test.mjs -> 10680
+[ 338s]   -> register_finding "GET /admin/person/:id/export.json lacks admin " cmd="node --test test/authz-audit.test.mjs"
+[ 345s]   *** CONFIRMED: GET /admin/person/:id/export.json lacks admin role guard
+           src/server.mjs:915  proved by: node --test test/authz-audit.test.mjs
+[ 348s]   round 1: 1 confirmed
+[ 761s] SPEND: paidTokens=351031 ranPaid=true  $0.702062
+```
+
+### Why this counts, step by step
+
+Every one of these was checked afterwards rather than assumed, because the eleven rounds before it failed for eleven
+different reasons and most of those reasons were in the harness.
+
+- **The lens chose itself.** The register was left as the previous rounds had left it: `spec-descriptive` at
+  `rounds=1`, the other seven at zero. Coverage-first ordering therefore picked `sibling-path`. Nothing was forced,
+  and this is the one condition that had never held before — six earlier rounds were spent on lenses with no reason
+  to find a sibling-path defect.
+- **The agent built its own route table.** Fifteen searches against `src/server.mjs`, assembling method, path and
+  guard for itself. In the three-cent experiment that table was handed over by the harness; here it was not.
+- **It found the route BEFORE it opened the test.** 128s versus 153s. And `test/authz-audit.test.mjs` does not name
+  the route in any case: its `expectedRule()` derives the expectation from the path prefix, `/admin/` implies the
+  admin role. So the test could confirm a suspicion but could not supply one. The order matters, because a finding
+  read off a failing test is a different and much weaker result than a finding reached by a lens and then proved
+  with whatever check the repository already offers.
+- **The gate proved it.** fail → pass → fail-again in a throwaway worktree. Afterwards the clone was byte-clean, the
+  planted weakening still at line 916, and the audit still failing 1 of 3 — the revert really reverted.
+- **The register learned.** `sibling-path` now reads `found: 1, dry: 0, rounds: 1`.
+- **The critic fired.** It proposed `route-role-alignment` — *trace the middleware chain for each route declaration
+  and verify the applied guard matches the privilege the URL claims* — citing the confirmed finding. Ninth lens in
+  the register, available to later rounds.
+
+### Two readouts that lied, both mine
+
+Neither was a Bureau defect, and both would have been reported as one.
+
+- The round launcher printed spend by calling `GET /api/agents`. That route does not exist — `/api/agents` is
+  POST/PATCH/DELETE only — so it 404'd, found no agent, and printed **nothing at all**. A spend line that silently
+  prints nothing reads as zero spent.
+- The register readout asked for `l.yield`, a field that does not exist on a lens. It fell back to `0`, so the lens
+  that had just confirmed a finding displayed as barren. The real field is `found`. This was one step away from
+  being written up as "the register does not record confirmations".
+
+Both now print `?` for anything genuinely absent, or say plainly that they could not read it. **A readout that
+invents a zero is worse than one that errors, because a zero looks like an answer.** That is the same failure as the
+search that returned 0 hits for a regex it was matching literally, and the `.length > 0` on a boolean — three
+instances in one session of a probe reporting absence it never established.
+
+### What it still does not show
+
+The planted defect was one the repository's **own audit already catches** — it was planted by weakening a guard
+until `test/authz-audit.test.mjs` failed. So a provable check was sitting in the repo waiting to be found. The agent
+still had to find the route, decide it was wrong, and pick that check; but it did not have to *construct* a check.
+
+The harder case is a defect no existing check catches, where the claim and its control both have to be built. That
+is untested, and it is now a cheap experiment rather than an expensive one.
+
+One round, one lens, one defect, one repository. It is a single observation, not a rate.
+
+Round cost **$0.702** (351,031 paid tokens). Cumulative paid spend across the session: **~$6.04**.
