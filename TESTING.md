@@ -1273,3 +1273,45 @@ saving from collapsed reads, and against three rounds spent discovering a file w
 trade being made deliberately rather than by accident.
 
 Suites: **819 unit assertions, 12 suites green.** No model calls were spent building any of it.
+
+### The fifth round: measurably better machinery, still nothing found
+
+Same lens, same repository, memory cleared — the conditions of the $0.885 baseline, with the digest and the
+collapse in.
+
+| | baseline | digest + collapse |
+|---|---|---|
+| cost | $0.885 | **$0.600** |
+| tokens | 442,274 | **300,110** |
+| behaviour | 13 whole files read, then reconstruct by search | 5 files, then targeted searches |
+
+**32% cheaper.** Predicted nearer 40–57%, and the gap is the digest paying itself back: the collapse saves on reads,
+the digest costs ~2,000 tokens on every turn. That trade was named before the round and is now measured.
+
+The behaviour is better in ways worth recording. It searched `app.get("|app.post("` and got all **50** routes on the
+first attempt — the outline fix — where earlier rounds spent a dozen turns reconstructing the route table. It read
+five files instead of thirteen. And it ended on a claim that is true of 4water: *"Every collector I found has a
+floor check that prevents a vacuous pass on an empty set."*
+
+**But the digest did not do the thing it was built for.** The round still opened on `src/server.mjs`, and
+`src/roster.mjs` — listed in the map, holding the planted defect — was never opened. Across five rounds no round has
+touched that file.
+
+### Where this honestly stands
+
+- A confirmed finding on code nobody pointed at: **once**, on a repository deliberately made **red**, where an
+  existing check already failed.
+- On a **green** repository: **zero, in five rounds**, about $3.00 of hunting.
+- Every mechanism is better than it was — probe gate, exact anchors, ambiguity refusal, empty-turn retry, outline,
+  collapse, digest — all unit-tested at 819 assertions. None of it has yet produced the outcome it exists for.
+
+The part that is not a tooling gap: the planted defect is *precisely* a `what-would-it-accept` defect. Every
+assertion on `workloadSpread` is about `spread`, so `min` can be anything — "what would this check accept?" is the
+exact question that exposes it. **Three rounds under that lens went to authorization instead.** Cheaper reads do not
+address that.
+
+The experiment worth running next, and it is now about $0.40: a **small** repository where no file exceeds the read
+cap. That isolates whether five dry rounds are about scale — a 79KB file against a 12KB window — or about judgement.
+Until that runs, both explanations remain live and this record should not claim either.
+
+Cumulative paid spend across the session: **~$9.11**.
