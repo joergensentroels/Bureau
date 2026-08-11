@@ -1200,6 +1200,39 @@ console.log("# the search takes a pattern too, and says which way it read the te
           r.ok === true && r.hits.length === 1 && r.hits[0].text === real);
     } finally { rmSync(R2, { recursive: true, force: true }); }
   }
+  // ---- the prompt's worked examples must survive the gate they demonstrate ----------------------------------
+  {
+    // Read here rather than borrowed: every other block in this file scopes its own `src`, so relying on one would
+    // depend on which block happened to run first.
+    const src = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
+    // From the BUILT prompt, not from the source text. Unescaping the source by hand needs two layers undone in the
+    // right order, and getting it wrong made these assertions fail against examples that were perfectly valid — the
+    // probe was broken, not the thing probed. The built string is also what the model actually reads.
+    const prompt = systemPrompt({ guardrails: { findingRepo: '/tmp/x' } }, { name: 'A', role: 'r' }, { phase: 'investigate' });
+    const lines = String(prompt).split(String.fromCharCode(10)).filter((l) => l.includes('register_finding","title"'));
+    chk('  both register_finding examples are present in the prompt', lines.length === 2);
+    let ok = 0, probeForm = 0;
+    for (const l of lines) {
+      const start = l.indexOf('{"thought"');
+      const end = l.lastIndexOf('}}}');
+      if (start < 0 || end < 0) continue;
+      let o; try { o = JSON.parse(l.slice(start, end + 3)); } catch { continue; }
+      const n = o.next || {};
+      const shape = normalizeFinding({ claim: n.title, class: n.details, where: n.url, check: n.command,
+                                       probe: n.probe, fix: n.fix });
+      if (shape.ok) ok++;
+      if (n.probe) probeForm++;
+    }
+    chk('  the register_finding examples are valid JSON the gate would ACCEPT', ok === 2);
+    chk('  and one of them demonstrates the probe form', probeForm === 1);
+    // Reachability: a field the dispatcher reads that nothing tells the model about is unreachable in practice.
+    chk('  the action description tells the agent about probe',
+        src.includes('supply probe={file,content}'));
+    chk('  and the dispatcher actually reads it off the action',
+        src.includes('probe: next.probe'));
+    chk('  and the hunting round tells the agent most real defects have no failing test',
+        src.includes('MOST REAL DEFECTS ARE NOT CAUGHT BY ANY EXISTING TEST'));
+  }
   const R = mkdtempSync(join(tmpdir(), 'repo-regex-'));
     try {
       const { mkdirSync, writeFileSync: wf } = await import('node:fs');

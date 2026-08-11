@@ -10,7 +10,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { withFindingIo, verifyFinding, findingRepo } from "../server.mjs";
+import { withFindingIo, verifyFinding, findingRepo, normalizeFinding } from "../server.mjs";
 
 let pass = 0, fail = 0;
 const chk = (label, cond) => { console.log(`${cond ? "✓" : "✗"} ${label}`); cond ? pass++ : fail++; };
@@ -160,6 +160,100 @@ try {
     const v2 = o2.ok ? o2.result : { ok: false, reason: o2.reason };
     chk('  while a UNIQUE anchor on the same defect still confirms' + (v2.ok ? '' : ' — got: ' + v2.reason), v2.ok === true);
   } finally { rmSync(repo, { recursive: true, force: true }); }
+}
+// ---- the probe path: a defect NO existing check catches ------------------------------------------------------
+//
+// The gate used to begin with "the check FAILS before the fix", so a defect nothing already tests for was refused
+// on step one and the agent had no way to supply the missing check. Against a green repository it could confirm
+// nothing at all. These run against a repo whose suite PASSES and which contains a real off-by-one: sum() skips
+// the last element, and the shipped test only checks the empty case.
+function makeGreenRepo() {
+  const dir = mkdtempSync(join(tmpdir(), 'bureau-probe-repo-'));
+  mkdirSync(join(dir, 'test'));
+  writeFileSync(join(dir, 'sum.mjs'), 'export function sum(xs) {\n  let t = 0;\n  for (let i = 0; i < xs.length - 1; i++) t += xs[i];\n  return t;\n}\n');
+  writeFileSync(join(dir, 'test', 'sum.test.mjs'), 'import { sum } from "../sum.mjs";\nif (sum([]) !== 0) process.exit(1);\nconsole.log("ok");\n');
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'probe-fixture', private: true, type: 'module',
+    scripts: { test: 'node --test test/sum.test.mjs' } }, null, 2) + String.fromCharCode(10));
+  git(dir, 'init', '-q');
+  git(dir, 'add', '-A');
+  git(dir, '-c', 'user.email=t@e', '-c', 'user.name=t', 'commit', '-q', '-m', 'green suite, latent off-by-one');
+  return dir;
+}
+const GOOD_PROBE = 'import { sum } from "../sum.mjs";\nconst got = sum([1, 2, 3]);\nif (got !== 6) { console.error("sum([1,2,3]) = " + got); process.exit(1); }\nconsole.log("ok");\n';
+const THE_FIX = { file: 'sum.mjs', find: 'i < xs.length - 1', replace: 'i < xs.length' };
+
+{
+  const repo = makeGreenRepo();
+  try {
+    // THE CONTROL FIRST: the repo's own suite passes, so this defect is invisible to everything that exists.
+    // Without this, a confirmation below could just mean the fixture was broken to begin with.
+    const pre = { claim: 'sum drops the last element', class: 'off-by-one', where: 'sum.mjs:3',
+                  check: 'npm test', fix: THE_FIX };
+    const o0 = await withFindingIo(repo, (io) => verifyFinding(pre, io));
+    const v0 = o0.ok ? o0.result : { ok: false, reason: o0.reason };
+    chk('without a probe, a defect no existing check catches is refused: ' + (v0.reason || 'CONFIRMED?!'),
+        v0.ok === false && /passes already/.test(v0.reason || ''));
+
+    const withProbe = { claim: 'sum drops the last element', class: 'off-by-one', where: 'sum.mjs:3',
+                        probe: { file: 'test/probe-sum.test.mjs', content: GOOD_PROBE }, fix: THE_FIX };
+    const o1 = await withFindingIo(repo, (io) => verifyFinding(withProbe, io));
+    const v1 = o1.ok ? o1.result : { ok: false, reason: o1.reason };
+    chk('but WITH a probe the same defect is confirmed' + (v1.ok ? '' : ' — got: ' + v1.reason), v1.ok === true);
+    chk('  and all four observations were made: ' + JSON.stringify(v1.obs || {}),
+        !!v1.obs && v1.obs.before === false && v1.obs.after === true && v1.obs.again === false
+        && v1.obs.suiteBefore === true && v1.obs.suiteAfter === true);
+    chk('  and the check was derived from the probe, not taken on trust',
+        (v1.finding || {}).check === 'node --test test/probe-sum.test.mjs');
+
+    // A probe that reads the fixed file and asserts on its TEXT fails-passes-fails just like a real one, while
+    // testing nothing about behaviour. This is the proxy problem, refused mechanically.
+    const proxy = { ...withProbe, probe: { file: 'test/probe-proxy.test.mjs', content: 'import { readFileSync } from "node:fs";\nconst src = readFileSync(new URL("../sum.mjs", import.meta.url), "utf8");\nif (!src.includes("xs.length;")) process.exit(1);\nconsole.log("ok");\n' } };
+    const o2 = await withFindingIo(repo, (io) => verifyFinding(proxy, io));
+    const v2 = o2.ok ? o2.result : { ok: false, reason: o2.reason };
+    chk('a probe asserting on the source TEXT is refused: ' + (v2.reason || 'CONFIRMED?!'),
+        v2.ok === false && /asserts on its TEXT|reads the file it is about/.test(v2.reason || ''));
+
+    // A probe that ignores the code cannot survive step four: reverting the fix must break it again.
+    const inert = { ...withProbe, probe: { file: 'test/probe-inert.test.mjs',
+                    content: 'if (1 !== 1) process.exit(1);' + String.fromCharCode(10) + 'console.log("always ok");' + String.fromCharCode(10) } };
+    const o3 = await withFindingIo(repo, (io) => verifyFinding(inert, io));
+    const v3 = o3.ok ? o3.result : { ok: false, reason: o3.reason };
+    chk('a probe that passes regardless is refused: ' + (v3.reason || 'CONFIRMED?!'),
+        v3.ok === false && /passes already/.test(v3.reason || ''));
+
+    // A fix that repairs the named defect and breaks the existing suite is not a fix.
+    const breaks = { claim: 'sum drops the last element', class: 'off-by-one', where: 'sum.mjs:3',
+                     probe: { file: 'test/probe-breaks.test.mjs', content: GOOD_PROBE },
+                     fix: { file: 'sum.mjs', find: 'let t = 0;', replace: 'let t = 6; return t;' } };
+    const o4 = await withFindingIo(repo, (io) => verifyFinding(breaks, io));
+    const v4 = o4.ok ? o4.result : { ok: false, reason: o4.reason };
+    chk('a fix that passes the probe but breaks the suite is refused: ' + (v4.reason || 'CONFIRMED?!'),
+        v4.ok === false && /breaks the project/.test(v4.reason || ''));
+
+    // A probe may only ADD. Overwriting an existing test would let an agent replace a check that disagrees.
+    const overwrite = { ...withProbe, probe: { file: 'test/sum.test.mjs', content: GOOD_PROBE } };
+    const o5 = await withFindingIo(repo, (io) => verifyFinding(overwrite, io));
+    const v5 = o5.ok ? o5.result : { ok: false, reason: o5.reason };
+    chk('a probe may not overwrite an existing test: ' + (v5.reason || 'CONFIRMED?!'),
+        v5.ok === false && /already exists/.test(v5.reason || ''));
+
+    // And the repo is left as it was found: no probe file survives any of the above.
+    chk('  and no probe file was left behind in the source repo',
+        !existsSync(join(repo, 'test', 'probe-sum.test.mjs')) && !existsSync(join(repo, 'test', 'probe-proxy.test.mjs')));
+  } finally { rmSync(repo, { recursive: true, force: true }); }
+}
+
+// Shape refusals, which need no repo at all.
+{
+  const base = { claim: 'x is wrong', class: 'y', where: 'a.mjs:1', fix: { file: 'a.mjs', find: 'p', replace: 'q' } };
+  const bad = (probe) => normalizeFinding({ ...base, probe });
+  chk('a probe outside test/ is refused', bad({ file: 'src/sneaky.mjs', content: 'x'.repeat(50) }).ok === false);
+  chk('a probe not named like a test is refused', bad({ file: 'test/notatest.mjs', content: 'x'.repeat(50) }).ok === false);
+  chk('an empty probe is refused', bad({ file: 'test/p.test.mjs', content: '  ' }).ok === false);
+  // The control: a well-formed probe passes shape validation, or the three above prove only that everything fails.
+  const good = bad({ file: 'test/p.test.mjs', content: 'import { a } from "../a.mjs";' + String.fromCharCode(10) + 'if (a() !== 1) process.exit(1);' });
+  chk('  while a well-formed probe is accepted' + (good.ok ? '' : ' — got: ' + good.reason), good.ok === true);
+  chk('  and it derives its own check', good.ok && good.finding.check === 'node --test test/p.test.mjs');
 }
 console.log(`\n${fail === 0 ? "ALL PASS ✓" : "FAILURES ✗"} — ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

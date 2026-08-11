@@ -1047,3 +1047,91 @@ is untested, and it is now a cheap experiment rather than an expensive one.
 One round, one lens, one defect, one repository. It is a single observation, not a rate.
 
 Round cost **$0.702** (351,031 paid tokens). Cumulative paid spend across the session: **~$6.04**.
+
+## The limit that made all of this narrower than it looked — and the probe that lifts it
+
+The section above ends by naming the untested case: a defect **no existing check catches**, where the agent must
+construct the control as well as the claim. Attempting it produced an architectural answer rather than an empirical
+one, and it needed no model call.
+
+The gate's sequence begins *the check FAILS before the fix*. If nothing already fails because of the defect, that is
+false on step one. And the agent could not supply the missing check either: a fix is one find/replace against an
+**existing** file, so `apply()` could not create a test. Measured on real 4water, with a real defect:
+
+```
+a real defect in real 4water, whose check passes:
+  -> REFUSED — the check passes already, so it does not see the defect described
+     obs {"before":true}
+```
+
+**So the hunt phase could confirm only defects that some existing check already failed on. Against a green
+repository it could confirm nothing, by construction.** Three consequences, all of which were being misread:
+
+- The **eight dry rounds against clean 4water** were guaranteed dry before any lens was chosen. They were written up
+  as lens-register and tooling problems. Those problems were real; they were also not why those rounds were empty.
+- The one confirmed finding came from a repository deliberately made **red**.
+- It compounds. Dry rounds count *confirmed* findings only and two dry rounds retire a lens — so a lens that kept
+  surfacing true-but-unprovable defects would be retired as barren. The register was set up to discard exactly the
+  lenses that were working.
+
+And it cuts at the subsystem's own origin. The motivating observation was that 4water was feature-complete at commit
+35 while the 121 commits after it found real defects, none of them in any acceptance criterion. **None of those had
+a failing test at the time either.** The mechanism built to catch that class of defect could not catch any of it.
+
+### What changed
+
+The principle is unchanged — the RUNNER performs the control, never the agent. What changes is that the control no
+longer has to pre-exist. A finding may carry a **probe**: a new test the agent writes, which the runner writes into
+the worktree, runs, and throws away. `check` is *derived* from the probe rather than accepted alongside it, so a
+probe cannot be paired with a command that runs something else. The runner then observes:
+
+1. the probe **fails** on the code as it stands
+2. it **passes** once the fix is applied
+3. the project's **existing suite still passes** with the fix — new, and it stops a "fix" that breaks the app
+4. it **fails again** with the fix reverted and the probe kept
+
+Step 4 is what makes an agent-authored control admissible: a probe insensitive to the source cannot survive it.
+
+Four refusals guard the rest, each with its own test: a probe that **reads the source file and asserts on its text**
+(the proxy problem in its purest form — fails, passes, fails again, while testing nothing about behaviour); a probe
+that passes regardless; a fix that satisfies the probe but breaks the existing suite; and a probe that would
+**overwrite** an existing test rather than add one, which would let an agent replace a check that disagreed with it.
+
+### End to end on the real repository
+
+4water at HEAD, one planted defect: `workloadSpread()` reports `min: 0` whatever the counts are, so a planner reading
+the distribution concludes somebody has no shifts while everyone has three. `spread` and `max` stay correct, which is
+why nothing notices — every assertion on this function is about `spread`. **All 534 of 4water's own tests pass with
+it in place.**
+
+```
+with an EXISTING check (npm test):      REFUSED — the check passes already      obs {"before":true}
+with a PROBE the agent writes:          *** CONFIRMED ***
+    obs {"suiteBefore":true,"before":false,"after":true,"suiteAfter":true,"again":false}
+the same probe, defect reverted:        REFUSED — the check passes already      obs {"before":true}
+```
+
+The third line is the control and it is the point: the same probe against code without the defect **refuses**. It is
+sensitive to the defect rather than a test that always fails. Without that line, "confirmed" would mean only that the
+probe failed somewhere.
+
+The middle line also failed on the first attempt — `the anchor text appears 2 times` — because `min: 0,` occurs
+twice in that file. That was a sloppy anchor of mine, caught by the ambiguity guard added earlier in this same
+session. Worth recording as the guard doing its job on its author.
+
+### Reachability, which is a separate thing from working
+
+A field the dispatcher reads that nothing tells the model about is not a capability — 4water's lesson, applied here.
+So: the action description explains the probe form, the round's own instructions state plainly that **most real
+defects are not caught by any existing test — if one were, somebody would already know**, and there are now two
+worked `register_finding` examples in the prompt, one per form. A test parses both **out of the built prompt** and
+pushes them through the real `normalizeFinding`: an example the gate itself would refuse teaches the model to emit
+findings that get refused.
+
+That test failed first against examples that were perfectly valid, because it unescaped the source text by hand and
+undid two layers in the wrong order — turning `\n` into a real newline inside a JSON string. Reading the *built*
+prompt is simpler and is also what the model actually sees. The probe was broken, not the thing probed; third time
+in this session.
+
+Suites after this work: **792 unit assertions, 36 in the gate suite, 12 suites green.** No model calls were spent on
+any of it.

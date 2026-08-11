@@ -1130,7 +1130,7 @@ export function systemPrompt(org, agent, opts = {}) {
     "- github_comment: reply on an EXISTING issue — title=the issue NUMBER (e.g. \"42\", from read_issues), command=your comment text, details=why. The CEO approves every one (never auto), for the same reason.",
     "- github_pr: open a pull request containing the document(s) you already SAVED this run — title=the PR title, command=the PR description, details=why. You do NOT list files: it includes what you saved with file_write, so save the finished work first. The CEO approves every one (never auto).",
     "- plan_add: record a follow-up task you notice but shouldn't do right now into the company's persistent plan — title=the task, details=why/context. It is saved for a future run so nothing is lost. Runs instantly (no approval). Do NOT use it to defer the CURRENT objective.",
-    "- register_finding: claim a DEFECT and prove it. title=the one-sentence claim, url=file:line, details=the defect class, command=the check that detects it (one of the project's own: npm test | npm run <script> | node --test [file] | node tools/<x>.mjs), fix={file,find,replace}=the change that makes the check pass. The runner verifies it ITSELF in a throwaway copy and requires three things: your check FAILS on the current code, PASSES with your fix, and FAILS AGAIN once the fix is reverted. A claim without that evidence is refused and you are told why, so do not register a hunch — register something you can make fail.",
+    "- register_finding: claim a DEFECT and prove it. title=the one-sentence claim, url=file:line, details=the defect class, command=the check that detects it (one of the project's own: npm test | npm run <script> | node --test [file] | node tools/<x>.mjs), fix={file,find,replace}=the change that makes the check pass. The runner verifies it ITSELF in a throwaway copy and requires three things: your check FAILS on the current code, PASSES with your fix, and FAILS AGAIN once the fix is reverted. A claim without that evidence is refused and you are told why, so do not register a hunch — register something you can make fail. IF NOTHING IN THE PROJECT ALREADY FAILS because of the defect — which is the usual case for a real one — omit \"command\" and supply probe={file,content} instead: a NEW test, file named test/<name>.test.mjs, content = a test that FAILS on the code as it stands and passes once your fix is applied. The runner writes it, runs all four observations including that the project's existing suite still passes with your fix, and throws it away. The probe must exercise BEHAVIOUR — import the module and call it, or drive the app's own entry point. A probe that reads the source file and asserts on its text is refused, because it would pass whatever the code does.",
     findingRepo(org) ? "- read_repo: read the source of the repository under investigation. title=the PATH, relative to the repo root, and nothing else — \"src/db.mjs\", not a description of what you are doing. Leave title blank (or name a directory) to LIST what is in the repository; a path that does not exist also returns the listing, so start there and read exact paths from it rather than guessing. Put a TERM in \"command\" to search instead of read — a literal substring, or a regular expression if you write one (alternation, .* and character classes are recognised; the reply tells you which way it was read): it greps the whole file (or the whole repository if you give no path) and returns every matching line with its number — use that whenever you want to claim something is MISSING, because a read can be cut off and a search cannot. Read-only and confined to that one repository. Use it before claiming anything about the code: a check command and a fix must quote text that is really in the file." : "",
     "- declined_check: record a check you could NOT perform — title=what you did not verify, command=why you could not, details=what would have to be true for it to become possible. All three are required: a reason nobody can test is the one claim that never gets examined, and it then licenses every later skip without being restated. The runner searches the repository for whatever your reason names and, if it finds it, hands the evidence back once — because an excuse is a claim and it gets a control like any other.",
     "- note: record what you checked and what you concluded, when there is nothing to run — title=the heading, details=what you looked at and what you found or ruled out. It runs instantly and changes nothing. Use it instead of inventing an action when the honest answer is that you looked and found nothing.",
@@ -1157,6 +1157,10 @@ export function systemPrompt(org, agent, opts = {}) {
     '  fetch a page: {"thought":"...","speak":"Reading their pricing.","next":{"type":"propose_action","actionType":"web_research","title":"Pricing page","details":"exact page","command":"https://example.com/pricing"}}',
     '  deliver a document: {"thought":"...","speak":"Saving the welcome note.","next":{"type":"propose_action","actionType":"file_write","title":"welcome-note","details":"customer welcome note","command":"# Welcome\\n\\nHi there — thanks for joining..."}}',
     '  consult a teammate: {"thought":"...","speak":"Getting Dana\'s read on the numbers.","next":{"type":"propose_action","actionType":"ask_peer","title":"Dana","details":"need a finance sanity-check","command":"Do these Q3 margins look plausible, or am I missing a cost?"}}',
+    // Two examples on purpose. The probe form is the one that gets used for a REAL defect — nothing already fails —
+    // and it is the more complex payload, so leaving it to prose would leave the capability unreachable in practice.
+    '  a defect an existing test catches: {"thought":"...","speak":"The export route lost its role guard.","next":{"type":"propose_action","actionType":"register_finding","title":"GET /admin/x is signed-in-only while every other /admin route requires admin","url":"src/server.mjs:915","details":"broken access control","command":"node --test test/authz-audit.test.mjs","fix":{"file":"src/server.mjs","find":"  app.get(\\"/admin/x\\", ({ req, res }) => {\\n    const c = gate({ req, res });","replace":"  app.get(\\"/admin/x\\", ({ req, res }) => {\\n    const c = gate({ req, res }, \\"admin\\");"}}}',
+    '  a defect NOTHING catches yet: {"thought":"...","speak":"sum() drops the last element; no test covers it.","next":{"type":"propose_action","actionType":"register_finding","title":"sum() skips the final element of its input","url":"src/sum.mjs:3","details":"off-by-one","probe":{"file":"test/probe-sum.test.mjs","content":"import { sum } from \\"../src/sum.mjs\\";\\nconst got = sum([1,2,3]);\\nif (got !== 6) { console.error(\\"sum([1,2,3]) = \\" + got); process.exit(1); }\\n"},"fix":{"file":"src/sum.mjs","find":"i < xs.length - 1","replace":"i < xs.length"}}}',
     "",
     "Propose ONE action at a time. Prefer the smallest useful step.",
     "If you are BLOCKED — you need a decision or information that no teammate can supply and you",
@@ -2697,6 +2701,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
         // useful thing an over-confident critic can be told, and it is what a human reviewer would say.
         const repo = findingRepo(org);
         const body = { claim: next.title, class: next.details, where: next.url || next.details, check: next.command,
+                       probe: next.probe || (next.payload && next.payload.probe),
                        fix: next.fix || (next.payload && next.payload.fix) };
         const shape = normalizeFinding(body);
         if (!repo) {
@@ -4048,8 +4053,13 @@ export function investigateObjective(run, lens, taxonomy = {}, vocabulary = "") 
     "A check command and a fix must quote text that is really in the file, so a claim made without reading it will be refused",
     "for the wrong reason and teach you nothing.",
     "",
-    "If you find something, register_finding it — a claim, a check that FAILS on the current code, and the fix that makes",
-    "it pass. If this lens shows you nothing, say so plainly and finish the round; an honest empty round is what tells the",
+    "If you find something, register_finding it — a claim, the fix, and the evidence that the fix is the fix.",
+    "MOST REAL DEFECTS ARE NOT CAUGHT BY ANY EXISTING TEST — if one were, somebody would already know. So do not go",
+    "looking only for something that already fails. When nothing in the project fails because of what you found, write",
+    "the test yourself: supply probe={file,content} instead of a command, naming a NEW file test/<name>.test.mjs whose",
+    "content fails on the code as it stands. Import the module and call it; a probe that reads the source and asserts on",
+    "its text is refused, because it would pass whatever the code does.",
+    "If this lens shows you nothing, say so plainly and finish the round; an honest empty round is what tells the",
     "loop to move on, and a fabricated one wastes everybody's time because the runner will refuse it.",
   ].filter(Boolean).join("\n");
 }
@@ -4352,6 +4362,24 @@ export async function withFindingIo(repo, fn) {
       return true;
     },
     revert: async () => { if (io2._undo) { await writeFile(io2._undo.f, io2._undo.before).catch(() => {}); io2._undo = null; } },
+    // ADD only. An existing path is refused rather than overwritten, so a probe can never replace a real test with
+    // one that agrees with the finding.
+    writeProbe: async (file, content) => {
+      const f = path.join(wt, file);
+      if (!f.startsWith(wt + path.sep)) return { ok: false, reason: "the probe path escapes the repository" };
+      const exists = await readFile(f, "utf8").then(() => true).catch(() => false);
+      if (exists) return { ok: false, reason: "that test file already exists — a probe may only add a new one" };
+      await writeFile(f, content);
+      io2._probe = f;
+      return { ok: true };
+    },
+    removeProbe: async () => { if (io2._probe) { await rm(io2._probe, { force: true }).catch(() => {}); io2._probe = null; } },
+    // The project's OWN suite, to check the fix breaks nothing. Whatever it reports is only compared against the
+    // same command run before the fix, so a repository whose suite is already red does not fail every finding.
+    suite: async () => {
+      const { bin, argv } = npmArgv(["test"]);
+      return run1(bin, argv, wt);
+    },
   };
   try { return { ok: true, result: await fn(io2) }; }
   finally {
@@ -4385,6 +4413,21 @@ const FINDING_CHECK_ALLOW = [
 ];
 export const findingCheckAllowed = (cmd) => FINDING_CHECK_ALLOW.some((re) => re.test(String(cmd || "").trim()));
 
+// A probe is a NEW test the agent writes. Confined to test/, named like the project's own tests, and never
+// overwriting anything: it may only ADD a file, so an agent cannot quietly rewrite an existing test into one that
+// agrees with it.
+export const PROBE_FILE_OK = /^test\/[A-Za-z0-9._-]{1,60}\.test\.mjs$/;
+
+// The one cheat step 4 does NOT catch. A probe that reads the fixed file as TEXT and asserts on the patch string
+// fails before, passes after, and fails again on revert — all three, while testing nothing about behaviour. It is
+// the proxy problem in its purest form, so it is refused mechanically rather than left to the refuter alone.
+export function probeAssertsSourceText(content, fixFile) {
+  const c = String(content || "");
+  if (!/readFile|readFileSync|createReadStream|fs\.promises/.test(c)) return false;
+  const base = String(fixFile || "").split("/").pop();
+  return !!base && c.includes(base);
+}
+
 // Shape validation, pure so it is testable without a repo. Returns { ok, finding } or { ok:false, reason }.
 export function normalizeFinding(body) {
   const str = (v, n) => String(v == null ? "" : v).trim().slice(0, n);
@@ -4393,6 +4436,7 @@ export function normalizeFinding(body) {
     cls: str(body?.class ?? body?.cls, 40) || "new",
     where: str(body?.where, 160),
     check: str(body?.check, 200),
+    probe: body?.probe ? { file: str(body.probe.file, 200), content: String(body.probe.content ?? "").slice(0, 8000) } : null,
     fix: {
       file: str(body?.fix?.file, 200),
       find: String(body?.fix?.find ?? "").slice(0, 4000),
@@ -4401,7 +4445,20 @@ export function normalizeFinding(body) {
   };
   if (!f.claim) return { ok: false, reason: "a finding needs a claim: one sentence naming what is wrong" };
   if (!f.where) return { ok: false, reason: "a finding needs a location — file:line or a route" };
-  if (!f.check) return { ok: false, reason: "a finding needs a check: the command that detects it" };
+  if (f.probe) {
+    // The check is DERIVED from the probe rather than accepted alongside it, so a probe cannot be paired with a
+    // check that runs something else entirely.
+    if (!PROBE_FILE_OK.test(f.probe.file)) {
+      return { ok: false, reason: `a probe must be a new file named like test/<name>.test.mjs — "${f.probe.file}" is not` };
+    }
+    if (f.probe.content.trim().length < 40) return { ok: false, reason: "a probe needs a body: the test that fails because of this defect" };
+    if (probeAssertsSourceText(f.probe.content, body?.fix?.file)) {
+      return { ok: false, reason: "this probe reads the file it is about and asserts on its TEXT — that passes whatever "
+        + "the code does. Exercise the behaviour: import the module and call it, or drive the app's own entry point" };
+    }
+    f.check = "node --test " + f.probe.file;
+  }
+  if (!f.check) return { ok: false, reason: "a finding needs a check: the command that detects it, or a probe that becomes one" };
   if (!findingCheckAllowed(f.check))
     return { ok: false, reason: `the check must be one of this project's own entry points (npm test, node --test <file>, `
       + `node tools/<x>.mjs) — "${f.check}" is arbitrary shell, which requires the CEO and is not what this action is for` };
@@ -4422,6 +4479,13 @@ export async function verifyFinding(finding, io) {
   const f = norm.finding;
   const obs = {};
   try {
+    // With a probe, the control is BUILT rather than found. Baseline the project's own suite first: the comparison
+    // is before-versus-after, never "must be green", so this works on a repository that is already failing.
+    if (f.probe && io.writeProbe) {
+      obs.suiteBefore = (await io.suite()).ok;
+      const w = await io.writeProbe(f.probe.file, f.probe.content);
+      if (!w.ok) return { ok: false, reason: w.reason, obs };
+    }
     obs.before = (await io.sh(f.check)).ok;
     if (obs.before) return { ok: false, reason: "the check passes already, so it does not see the defect described", obs };
     if (!(await io.apply(f.fix))) {
@@ -4438,6 +4502,14 @@ export async function verifyFinding(finding, io) {
     }
     obs.after = (await io.sh(f.check)).ok;
     if (!obs.after) return { ok: false, reason: "the fix does not make the check pass", obs };
+    // A fix that repairs the named defect and breaks something else is not a fix. Only asserted when the suite was
+    // passing to begin with — otherwise a red repository could never produce a finding at all.
+    if (f.probe && io.suite) {
+      obs.suiteAfter = (await io.suite()).ok;
+      if (obs.suiteBefore && !obs.suiteAfter) {
+        return { ok: false, reason: "the fix makes the probe pass but breaks the project's existing suite", obs };
+      }
+    }
     await io.revert(f.fix);
     obs.again = (await io.sh(f.check)).ok;
     if (obs.again) return { ok: false, reason: "the check still passes with the fix reverted, so it is not reading the code", obs };
@@ -4447,6 +4519,11 @@ export async function verifyFinding(finding, io) {
     // tools/proseproof.mjs in the 4water repo: cleanup that only runs on the happy path is not cleanup.
     try { await io.revert(f.fix); } catch {}
     return { ok: false, reason: `verification itself failed: ${e?.message || e}`, obs };
+  } finally {
+    // The probe goes on EVERY path, including each refusal above and the throw. Same rule as the revert: cleanup
+    // that only runs on the happy path is not cleanup. First draft put this BEFORE the catch, which is not even
+    // valid JavaScript — caught by `node --check`, which is why the patch script runs it.
+    if (io.removeProbe) await io.removeProbe().catch(() => {});
   }
 }
 
