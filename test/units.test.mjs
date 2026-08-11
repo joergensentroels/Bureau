@@ -17,7 +17,7 @@ import {
   turnBudgetWarning,
   executorProbeMs,
   repoPathSafe, readRepoFile, listRepoFiles, resolveRepoTarget, searchRepoFiles, repoOutline,
-  looksLikeRegex, unsafeRegex, repoVocabulary, vocabularyText,
+  looksLikeRegex, unsafeRegex, repoVocabulary, vocabularyText, collapseReads,
   normalizeQuestion, questionKey, recordQuestion, answerQuestion, systemPrompt, unqueuedAssumption, tierReason,
   blockerCandidates, falsifyBlocker, normalizeDeclinedCheck, recordDeclinedCheck, refuteMsgs,
   buildUndecidedMsgs, normalizeUndecided, unaddressedUndecided, runInvestigateFlag,
@@ -1200,6 +1200,49 @@ console.log("# the search takes a pattern too, and says which way it read the te
           r.ok === true && r.hits.length === 1 && r.hits[0].text === real);
     } finally { rmSync(R2, { recursive: true, force: true }); }
   }
+  // ---- old read bodies collapse, because history is re-sent whole on every turn -------------------------------
+  {
+    // A REALISTIC body. The first version of this test used five lines, and the collapsed form — a warning plus an
+    // outline — came out LARGER than what it replaced, 542 characters becoming 869. That is what the shrink
+    // assertion at the end is for, and it is why collapseReads has a size floor.
+    const filler = new Array(60).fill('  // a line of implementation that carries no declaration at all').join(String.fromCharCode(10));
+    const body = ['export function alpha() {', '  return 1;', '}', 'const beta = () => {};',
+                  'app.get("/thing", handler);', filler].join(String.fromCharCode(10));
+    const mk = (file) => ({ role: 'user', _read: { file, content: body, bytes: body.length },
+                            content: 'APPROVED and EXECUTED — ' + file + ':' + String.fromCharCode(10) + body });
+    const history = [{ role: 'system', content: 'sys' }, mk('a.mjs'), { role: 'assistant', content: 'ok' },
+                     mk('b.mjs'), mk('c.mjs')];
+    const out = collapseReads(history, 2);
+    chk('  collapsing preserves the message count and order', out.length === history.length && out[0].content === 'sys');
+    chk('  the two most recent read bodies are kept verbatim',
+        out[3].content.includes('return 1;') && out[4].content.includes('return 1;'));
+    chk('  an older read body is gone', !out[1].content.includes('return 1;'));
+    chk('  and it names the file it was', out[1].content.includes('a.mjs'));
+    // The load-bearing part: an agent that half-remembers a body invents fix anchors, which is a refused finding.
+    chk('  a collapsed read says it can no longer be quoted from',
+        /NO LONGER QUOTE FROM IT/.test(out[1].content));
+    chk('  while still reporting what the file declares, so absence stays answerable',
+        out[1].content.includes('export function alpha') && out[1].content.includes('app.get("/thing"'));
+    // Nothing local may reach a provider: askLlm passes the array straight through to Latch.
+    chk('  no message carries anything but role and content',
+        out.every((m) => Object.keys(m).length === 2 && 'role' in m && 'content' in m));
+    // Non-read messages must be untouched, or collapsing would eat the conversation itself.
+    chk('  non-read messages pass through unchanged', out[2].content === 'ok');
+    // CONTROL: with fewer reads than the keep count, nothing is collapsed at all.
+    const few = collapseReads([{ role: 'system', content: 'sys' }, mk('a.mjs')], 2);
+    chk('  and with fewer reads than the keep count nothing collapses', few[1].content.includes('return 1;'));
+    // CONTROL: a SMALL body is left alone however old it is, because replacing it would cost more than it saves.
+    const small = { role: 'user', _read: { file: 'tiny.mjs', content: 'export const x = 1;', bytes: 19 },
+                    content: 'APPROVED and EXECUTED — tiny.mjs:' + String.fromCharCode(10) + 'export const x = 1;' };
+    const withSmall = collapseReads([small, mk('b.mjs'), mk('c.mjs'), mk('d.mjs')], 2);
+    chk('  a small old read is left verbatim rather than "saved" into something bigger',
+        withSmall[0].content.includes('export const x = 1;'));
+    // It must actually SHRINK, or the whole exercise is decorative.
+    const before = JSON.stringify(history.map((m) => ({ role: m.role, content: m.content }))).length;
+    const after = JSON.stringify(out).length;
+    chk('  the collapsed history is smaller than the original (' + before + ' -> ' + after + ')', after < before);
+  }
+
   // ---- the outline must report what a file is MADE of, not only what it declares -----------------------------
   //
   // A truncated read leans on the outline for everything it could not show. 4water's src/server.mjs is 79,219

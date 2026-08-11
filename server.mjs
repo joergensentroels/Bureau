@@ -2073,7 +2073,10 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
     let raw;
     const usePaid = canUsePaid();
     const meta = {};
-    const ask = (maxTokens) => askLlm(history, { maxTokens, routingPreference: usePaid ? "external" : "local", ...(usePaid && paidTier.model ? { model: paidTier.model } : {}), meta });
+    // Collapsed ONCE per turn and used for both the call and the cost estimate, so the estimate reflects what was
+    // actually sent rather than what the history holds.
+    const sendable = collapseReads(history);
+    const ask = (maxTokens) => askLlm(sendable, { maxTokens, routingPreference: usePaid ? "external" : "local", ...(usePaid && paidTier.model ? { model: paidTier.model } : {}), meta });
     try {
       raw = await ask(1000);
       // A reasoning model can spend the whole output budget thinking and return nothing at all — measured at 699/700
@@ -2087,7 +2090,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
       noteLlm(run, true);
     }
     catch (e) { noteLlm(run, false); emit(run, "error", { agent: who, depth, message: e.message }); break; }
-    const callTokens = estTokens(history) + Math.ceil((raw.length) / 4);
+    const callTokens = estTokens(sendable) + Math.ceil((raw.length) / 4);
     tokens += callTokens;
     if (meta.paid) {
       // Latch really served this turn from the paid provider. Prefer the provider's reported total
@@ -2616,7 +2619,11 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
             didExecute = true;
             emitAct({ agent: who, depth, actionType: "read_repo", url: r.name, ok: true, bytes: r.bytes, error: "" });
             emit(run, "repoRead", { by: who, depth, file: r.name, bytes: r.bytes, truncated: !!r.truncated });
-            history.push({ role: "user", content: `APPROVED and EXECUTED — ${r.name} from the repository under investigation${r.truncated ? ` (the FIRST ${r.content.length} of ${r.bytes} characters — you have NOT seen the rest)` : ""}:\n---\n${r.content}\n---\nThis is the REAL current source. Anything you claim about it must quote text that appears above.`
+            // `_read` is local bookkeeping for collapseReads — stripped before anything is sent to a provider.
+            // The outline is taken from the FULL file when we have it, so a collapsed read still answers "is X
+            // declared here" even though its body is gone.
+            history.push({ role: "user", _read: { file: r.name, content: (full && full.ok ? full.content : r.content), bytes: r.bytes },
+              content: `APPROVED and EXECUTED — ${r.name} from the repository under investigation${r.truncated ? ` (the FIRST ${r.content.length} of ${r.bytes} characters — you have NOT seen the rest)` : ""}:\n---\n${r.content}\n---\nThis is the REAL current source. Anything you claim about it must quote text that appears above.`
               + (r.truncated
                 ? ` The file was CUT OFF after ${r.content.length} of ${r.bytes} characters, so the body above is partial.\n`
                   + (() => {
@@ -4168,6 +4175,42 @@ export function repoOutline(content, cap = 150) {
     if (OUTLINE_PATTERNS.some((re) => re.test(l))) symbols.push({ line: i + 1, text: l.trim().slice(0, 120) });
   }
   return { lines: lines.length, symbols, truncated: symbols.length >= cap };
+}
+
+// Old read bodies collapse to their outline before the history is sent.
+//
+// History is re-sent in FULL on every turn, so a 12,000-character read made at turn 3 of a 15-turn round is
+// retransmitted twelve more times: cost is quadratic in reads, not linear in them. Measured on one round that read
+// seventeen files — 442,274 paid tokens, $0.885, in 201 SECONDS — against $0.467 for a 450-second round that read
+// far less. Wall-clock was never the driver; accumulated bodies were.
+//
+// The most recent `keep` bodies stay VERBATIM, and that is not a rounding choice. A finding's fix has to quote text
+// that really appears in the file, and an agent working from a half-remembered body invents anchors instead: earlier
+// in this project a model shown only a summary table produced a finding that was right about the route, the line and
+// the variable, and wrong about the quote style — because it had never been shown the bytes. So a collapsed read
+// says outright that it can no longer be quoted from, and names what it still knows to be there.
+//
+// Returns plain {role, content} messages: the tag is local bookkeeping and must not be sent to a provider.
+// `minBytes` exists because the replacement is not free: the warning plus the outline runs to a few hundred
+// characters, so collapsing a SMALL read makes the history bigger. Caught by the assertion written to stop this
+// being decorative — a five-line file went from 542 to 869 characters when "saved". Below the floor, keep the body.
+export function collapseReads(history, keep = 2, minBytes = 1500) {
+  const reads = [];
+  for (let i = 0; i < (history || []).length; i++) if (history[i] && history[i]._read) reads.push(i);
+  const older = reads.slice(0, Math.max(0, reads.length - keep));
+  const drop = new Set(older.filter((i) => String(history[i]._read?.content || "").length >= minBytes));
+  return (history || []).map((m, i) => {
+    if (!drop.has(i)) return { role: m.role, content: m.content };
+    const r = m._read || {};
+    const o = repoOutline(String(r.content || ""));
+    return { role: m.role, content:
+      `[AN EARLIER READ OF ${r.file || "a file"}, COLLAPSED] Its body was shown to you before and has been removed to `
+      + `keep this conversation affordable. You can NO LONGER QUOTE FROM IT — read or search it again before quoting `
+      + `anything from it, because a fix whose anchor you reconstruct from memory will not match the file.`
+      + (o.symbols.length
+          ? `\nWhat it declares and registers, which is still reliable:\n` + o.symbols.map((s) => `  ${s.line}: ${s.text}`).join("\n")
+          : "") };
+  });
 }
 
 export async function readRepoFile(repo, rel, cap = 4000) {

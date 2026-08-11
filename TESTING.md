@@ -1202,3 +1202,36 @@ the planted defect — 4water's own `PLAN.md` says `workloadSpread` "was compute
 If the lens steers, that round opens `src/roster.mjs`.
 
 Cumulative paid spend across the session: **~$7.63**.
+
+### The fourth round, and where the money actually goes
+
+`collector-blind` — *"for each check, ask what happens if its COLLECTOR returns nothing"* — went somewhere
+completely different: `tools/precheck`, `tools/deadassert`, `tools/sourcewalk`, `tools/proseproof`, the
+reachable / docs / strings / css-audit tests, `src/retention.mjs`. **Zero authorization, and `src/server.mjs` never
+opened.** After three rounds that all went to `gate`/`postGate`, one lens change moved attention wholesale. **The
+register works** — coverage-first is choosing between ways of looking, not between labels. It ended on a conclusion
+that is correct about 4water: the codebase really has been hardened against empty-collector blind spots, which is
+why `tools/sourcewalk.mjs` exists at all.
+
+Still dry, and still nothing in `src/roster.mjs`. Four rounds, four dry, on a repository with a planted defect.
+
+**But it measured the cost driver.** That round: 201 seconds, 442,274 tokens, **$0.885** — the shortest and the most
+expensive of the four, against $0.467 for one that ran 450 seconds. Wall-clock is not the driver; **accumulated read
+bodies are**, because the history is re-sent whole on every turn.
+
+Fixed by collapsing older read bodies to their outline before sending (`collapseReads`), keeping the two most recent
+verbatim. Simulated on exactly the files that round read: **500,636 tokens → 217,718, a 57% saving** on what gets
+billed; $1.00 → $0.44. That estimate brackets the 442,274 actually observed, so the model is sound.
+
+Two things the tests forced, both of which would otherwise have been defects:
+
+- The two most recent bodies stay **verbatim**. A finding's anchor has to quote text that really appears in the
+  file, and an agent working from a half-remembered body invents anchors instead — measured earlier in this
+  session, when a model shown only a summary table got the route, the line and the variable right and the quote
+  style wrong. So a collapsed read says outright that it can no longer be quoted from, and lists only what it still
+  knows is declared there.
+- **A size floor.** The first version made the history BIGGER for small files: the warning plus the outline runs to
+  a few hundred characters, so a five-line file went from 542 to 869 when "saved". The assertion written to stop
+  this being decorative is exactly what caught it. Below the floor, the body stays.
+
+Cumulative paid spend across the session: **~$8.51**.
