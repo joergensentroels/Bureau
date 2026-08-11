@@ -1200,6 +1200,40 @@ console.log("# the search takes a pattern too, and says which way it read the te
           r.ok === true && r.hits.length === 1 && r.hits[0].text === real);
     } finally { rmSync(R2, { recursive: true, force: true }); }
   }
+  // ---- the outline must report what a file is MADE of, not only what it declares -----------------------------
+  //
+  // A truncated read leans on the outline for everything it could not show. 4water's src/server.mjs is 79,219
+  // characters against a 12,000-character cap, and the outline reported 15 symbols and NONE of its 50 routes — so
+  // the file's most prominent entries were `gate` and `postGate`, and two live hunting rounds spent themselves
+  // trying to read those two bodies by search. One of those rounds had the agent's memory deliberately cleared,
+  // which ruled out the anchoring explanation and left this one.
+  {
+    const NL = String.fromCharCode(10);
+    const routeFile = [
+      'export function buildApp({ db }) {',
+      '  const gate = ({ req, res }, role = null) => {};',
+      '  app.get("/healthz", ({ res }) => send(res, 200));',
+      '  app.post("/board/:id/claim", async ({ req, res }) => {});',
+      '  if (devAuth) app.post("/auth/dev", async ({ req, res }) => {});',
+      '  app.get(notAStringSoNotARoute, handler);',
+      '  helper.getThing(1);',
+      '}',
+    ].join(NL);
+    const texts = repoOutline(routeFile).symbols.map((s) => s.text);
+    chk('  the outline reports route registrations, not only declarations',
+        texts.filter((t) => t.startsWith('app.get("') || t.startsWith('app.post("')).length === 2);
+    chk('  including one registered behind a condition',
+        texts.some((t) => t.startsWith('if (devAuth) app.post("/auth/dev"')));
+    // CONTROL 1: the new patterns must not DISPLACE the old ones — an outline of only routes is the same failure
+    // pointing the other way.
+    chk('  and the declarations are still reported',
+        texts.some((t) => t.startsWith('export function buildApp')));
+    // CONTROL 2: a pattern that matched every method call would satisfy both assertions above while making the
+    // outline noise. The string-literal first argument is what keeps it to things being REGISTERED under a name.
+    chk('  while a call with no string argument is not mistaken for a registration',
+        !texts.some((t) => t.startsWith('app.get(notAString')) && !texts.some((t) => t.startsWith('helper.getThing')));
+  }
+
   // ---- the prompt's worked examples must survive the gate they demonstrate ----------------------------------
   {
     // Read here rather than borrowed: every other block in this file scopes its own `src`, so relying on one would

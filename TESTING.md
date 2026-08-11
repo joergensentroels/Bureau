@@ -1135,3 +1135,70 @@ in this session.
 
 Suites after this work: **792 unit assertions, 36 in the gate suite, 12 suites green.** No model calls were spent on
 any of it.
+
+## Three live rounds on a GREEN repository, two refuted hypotheses, and one real defect in the outline
+
+The probe path works in the gate. Whether a model *reaches for* it when nothing already fails is a different
+question, and it needs a live round. Target: a clone of 4water at HEAD with one planted defect its own suite passes
+straight over — `workloadSpread()` returns `min: 0` whatever the counts are, so the reported distribution says
+somebody has no shifts while everyone has three. **534/534 of its own tests pass with it in place.**
+
+Three rounds, same lens (`what-would-it-accept`, selected by the register's own coverage-first ordering, not set by
+me), same repository. All three dry, and **`src/roster.mjs` — where the defect lives — was never opened once.**
+
+### Hypothesis 1: company memory was anchoring the rounds. REFUTED.
+
+The first round opened by reading `test/authz-audit.test.mjs` — the exact file from the previous round's confirmed
+finding, in a clone that does not contain that defect — then spent itself on guards. Memory looked obvious.
+
+It was not even the right mechanism. `recallSharedMemory` skips the agent's own entries (`if (a.id ===
+excludeAgentId) continue`) and Ada is the only agent, so shared recall was **empty**. The actual injection is
+`ownWork` at `runAgentTask`: the agent's own last five memories, ordered by RECENCY with no relevance filter at all,
+framed *"build on it, don't repeat it"* — which the lens cannot influence even in principle.
+
+So the control: clear Ada's memory, reset the lens so the same one is picked, change nothing else. **The round went
+to authorization again.** Memory was not the cause, and without that run this would have been written up as a
+finding. (`rounds` is not stored either — it is derived as `found + dry`. Resetting the field I first reached for
+would have done nothing.)
+
+### Hypothesis 2: the outline was steering them. ALSO REFUTED — but it was a real defect.
+
+`src/server.mjs` is 79,219 characters against a 12,000-character paid read cap, so a turn sees **15%** of it and
+leans on the attached outline for the rest. That outline reported **15 symbols and none of the file's 50 routes** —
+`repoOutline` matched declarations only, and the routes are `app.get("…", …)` expressions. Its most prominent
+entries were `gate` and `postGate`, near the top. Both rounds duly tried to read those two bodies by search.
+
+Fixed: the outline now also reports route registrations and test declarations, including one behind a condition
+(`if (devAuth) app.post("/auth/dev", …)` was the single route of fifty still missed without that). On the real file:
+**50 of 50 routes, and the 15 declarations still there** — controls both ways, since an outline of only routes is
+the same failure pointing the other direction, and a pattern matching every method call would be noise.
+
+Re-run with the fix, everything else held identical to the control:
+
+| | round 1 (memory) | control (no memory) | fixed outline |
+|---|---|---|---|
+| time | 773s | 626s | **450s** |
+| cost | $0.563 | $0.593 | **$0.467** |
+| tokens | 281k | 297k | **233k** |
+| ending | hit the round cap | hit the round cap | **stated a conclusion** |
+
+28% faster, 21% cheaper, and it stopped burning turns on exact-string searches that returned nothing — the control
+searched `return gate({ req, res }, role);` for 0 hits **twice**. Most importantly it ended by *saying* what it
+found: *"This lens showed nothing. All routes in the admin and planner groups have consistent guards, and the
+authz-audit test already enforces that every route…"* — an honest empty round instead of one that simply ran out.
+
+**But it did not change WHERE the round looked.** The outline was a genuine defect worth fixing on its own merits;
+it was not the steering cause.
+
+### What is left, and it is the register's own credibility
+
+Three rounds under `what-would-it-accept` — *"ask what this check would ACCEPT"* — all went to authorization. That
+lens's wording reads as an authorization question to a model looking at a web app. If a lens cannot move attention
+off the biggest file in the repository, coverage-first ordering is choosing between labels rather than between ways
+of looking, and the register is weaker than it appears.
+
+The test is cheap and direct: `collector-blind` (something computed and shown to nobody) is almost a description of
+the planted defect — 4water's own `PLAN.md` says `workloadSpread` "was computed for the tests and shown to no one".
+If the lens steers, that round opens `src/roster.mjs`.
+
+Cumulative paid spend across the session: **~$7.63**.

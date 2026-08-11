@@ -4140,6 +4140,24 @@ const OUTLINE_PATTERNS = [
   /^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:function\b|\()/,
   /^\s*def\s+([A-Za-z_][\w]*)/,                       // python, in case a repo is mixed
   /^\s*(?:public|private|protected|static)\s+[\w<>\[\]]+\s+([A-Za-z_][\w]*)\s*\(/,
+  // A file's STRUCTURE is not only its declarations. In a route table the declarations are a dozen helpers while
+  // the routes are `app.get("/x", …)` EXPRESSIONS, which every pattern above is blind to.
+  //
+  // Measured, and it cost two live rounds: 4water's src/server.mjs is 79,219 characters against a 12,000-character
+  // read cap, so a paid turn sees 15% of it and leans on the outline for the rest. That outline listed 15 symbols
+  // and NONE of the file's 50 routes — its most visible entries being `gate` and `postGate` near the top. Both
+  // rounds duly spent themselves trying to read those two function bodies by search, one of them with the agent's
+  // memory deliberately cleared to rule out anchoring. An outline that misses what a file is mostly MADE of is
+  // worse than no outline at all, because it reads as a complete inventory of what is there.
+  //
+  // Indentation is not required: these sit inside a factory function in this codebase and would be missed at
+  // column 0. The string-literal first argument is what keeps it specific — it is the shape of a thing being
+  // REGISTERED under a name, which is what a reader needs the outline for.
+  // The optional `if (…)` prefix is not tidiness: 4water registers its dev-auth endpoint as
+  // `if (devAuth) app.post("/auth/dev", …)`, and a route that exists only under a condition is precisely the one a
+  // reviewer needs to see. Without the prefix it was the single route of fifty that the outline still missed.
+  /^\s*(?:if\s*\([^)]{0,80}\)\s*)?[A-Za-z_$][\w$.]*\.(?:get|post|put|patch|delete|head|options|all|use|route|on)\s*\(\s*["'`]/,
+  /^\s*(?:test|it|describe|suite|bench)\s*\(\s*["'`]/,
 ];
 export function repoOutline(content, cap = 150) {
   const lines = String(content == null ? "" : content).split("\n");
@@ -4218,7 +4236,9 @@ export async function repoVocabulary(repo, opts = {}) {
     if (out.length >= cap) break;
     const r = await readRepoFile(repo, f, 400000);
     if (!r.ok) continue;
-    const o = repoOutline(r.content, perFile * 3);
+    // Pull deeper than before: the outline now also reports route registrations and tests, which do not match the
+    // declaration regex below and would otherwise consume slots before any real name was found.
+    const o = repoOutline(r.content, perFile * 6);
     const names = [];
     for (const s of o.symbols) {
       const m = /(?:function|class|const|let|var|def)\s+([A-Za-z_$][\w$]*)/.exec(s.text);
