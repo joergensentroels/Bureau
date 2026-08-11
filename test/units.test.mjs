@@ -17,7 +17,7 @@ import {
   turnBudgetWarning,
   executorProbeMs,
   repoPathSafe, readRepoFile, listRepoFiles, resolveRepoTarget, searchRepoFiles, repoOutline,
-  looksLikeRegex, unsafeRegex, repoVocabulary, vocabularyText, collapseReads,
+  looksLikeRegex, unsafeRegex, repoVocabulary, vocabularyText, collapseReads, repoDigest, digestText,
   normalizeQuestion, questionKey, recordQuestion, answerQuestion, systemPrompt, unqueuedAssumption, tierReason,
   blockerCandidates, falsifyBlocker, normalizeDeclinedCheck, recordDeclinedCheck, refuteMsgs,
   buildUndecidedMsgs, normalizeUndecided, unaddressedUndecided, runInvestigateFlag,
@@ -1081,9 +1081,14 @@ console.log("# a round starts from the codebase's own names, not from convention
   } finally { rmSync(R, { recursive: true, force: true }); }
   {
     const src = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
-    chk('  the round prompt carries it', src.includes('taxonomy = {}, vocabulary = '));
-    chk('  runGated computes it once per run', src.includes('vocabulary: vocabularyText(vocab0)'));
-    chk('  and so does hunt mode', src.includes('vocabulary: vocabularyText(vocab)'));
+    // The DIGEST superseded the vocabulary block in the round prompt: the same names, plus line numbers, file sizes
+    // and route registrations. repoVocabulary/vocabularyText stay exported and tested above — still the right shape
+    // for a names-only summary — but sending both would pay twice for the same information every turn.
+    chk('  the round prompt carries the digest', src.includes('taxonomy = {}, digest = '));
+    chk('  runGated computes it once per run', src.includes('digest: digestText(dg0)'));
+    chk('  and so does hunt mode', src.includes('digest: digestText(dg)'));
+    chk('  and the round no longer sends the vocabulary block as well',
+        !src.includes('vocabulary: vocabularyText('));
     // The read cap was a mitigation for a 4,096-token LOCAL window; on a paid turn it cost ten searches
     // reconstructing a 4,785-byte file.
     {
@@ -1200,6 +1205,47 @@ console.log("# the search takes a pattern too, and says which way it read the te
           r.ok === true && r.hits.length === 1 && r.hits[0].text === real);
     } finally { rmSync(R2, { recursive: true, force: true }); }
   }
+  // ---- the whole-repo digest: what exists, how big, and what it declares --------------------------------------
+  //
+  // Four live rounds were spent groping file by file, three of them never leaving the first big file they opened.
+  // The agent had no way to know what existed until it opened something. This is repomix's --compress idea using
+  // what Bureau already has: no dependency, no shell, and computed at round start so it cannot go stale.
+  {
+    const R3 = mkdtempSync(join(tmpdir(), 'repo-digest-'));
+    try {
+      const { mkdirSync: md, writeFileSync: wf } = await import('node:fs');
+      md(join(R3, 'src'));
+      const NL = String.fromCharCode(10);
+      wf(join(R3, 'src', 'small.mjs'), 'export function tiny() { return 1; }' + NL);
+      wf(join(R3, 'src', 'big.mjs'),
+         'export function alpha() {}' + NL + 'app.get("/route", h);' + NL + 'x'.repeat(20000) + NL);
+      wf(join(R3, 'src', 'quiet.mjs'), '// no declarations at all' + NL + 'y'.repeat(50) + NL);
+      wf(join(R3, 'notes.md'), 'not source' + NL);
+      const d = await repoDigest(R3, { readCap: 1000 });
+      chk('  the digest covers the source files and skips non-source', d.ok === true && d.total === 3);
+      const t = digestText(d);
+      // THE load-bearing property: every file appears, whatever the budget did to the symbol breakdown. A partial
+      // inventory is how an agent concludes something is absent when it was simply never shown.
+      chk('  every source file appears in the index',
+          t.includes('src/small.mjs') && t.includes('src/big.mjs') && t.includes('src/quiet.mjs'));
+      chk('  a file with no declarations is still listed', t.includes('src/quiet.mjs'));
+      chk('  and a non-source file is not', !t.includes('notes.md'));
+      chk('  a file too big for one read is marked as such', /src\/big\.mjs\s+[\d,.]+\s+\(>read\)/.test(t));
+      chk('  while a small one is not', !/src\/small\.mjs\s+[\d,.]+\s+\(>read\)/.test(t));
+      chk('  route registrations reach the digest, not only declarations', t.includes('app.get("/route"'));
+      // A budget too small to break anything down must still yield the complete index, and say what it left out.
+      const tight = digestText(d, 400);
+      chk('  under a tight budget the index survives and the breakdown is what gives way',
+          tight.includes('src/small.mjs') && tight.includes('src/big.mjs') && tight.includes('src/quiet.mjs'));
+      chk('  and it says how many were not broken down', /not broken down/.test(tight));
+      // CONTROL: an unreadable repo returns a reason rather than an empty digest that reads as "nothing here".
+      const bad = await repoDigest(join(R3, 'nope'));
+      chk('  a repo that cannot be listed reports why instead of looking empty',
+          bad.ok === false && !!bad.error);
+      chk('  and renders as nothing at all rather than a misleading heading', digestText(bad) === '');
+    } finally { rmSync(R3, { recursive: true, force: true }); }
+  }
+
   // ---- old read bodies collapse, because history is re-sent whole on every turn -------------------------------
   {
     // A REALISTIC body. The first version of this test used five lines, and the collapsed form — a warning plus an

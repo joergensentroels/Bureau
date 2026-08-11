@@ -2864,9 +2864,11 @@ async function runHunt(run) {
   };
   let tokens = 0;
   try {
-    const vocab = await repoVocabulary(repo).catch(() => null);
+    // The digest supersedes the old vocabulary block: same names, plus line numbers, sizes and route registrations.
+    // Sending both would pay twice for the same information.
+    const dg = await repoDigest(repo).catch(() => null);
     tokens = await investigate(run, worker, {
-      vocabulary: vocabularyText(vocab),
+      digest: digestText(dg),
       lenses: activeLenses(reg), lensStats: reg.lenses || [],
       taxonomy: reg.taxonomy || {},
       maxRounds: Number(reg.guardrails?.investigateRounds) || undefined,
@@ -3479,9 +3481,9 @@ async function runGated(run, worker, persistExtra, perAgentTally, soloWorker = n
     const reg = await updateOrg((o) => { seedLenses(o); }).then(() => readOrg()).catch(() => org0);
     // Verbatim, on one agent. A lens that reaches the agent as a manager's paraphrase is not that lens.
     const hunter = soloWorker || worker;
-    const vocab0 = await repoVocabulary(findingRepo(org0)).catch(() => null);
+    const dg0 = await repoDigest(findingRepo(org0)).catch(() => null);
     tokens += await investigate(run, hunter, {
-      vocabulary: vocabularyText(vocab0),
+      digest: digestText(dg0),
       lenses: activeLenses(reg), lensStats: reg.lenses || [],
       taxonomy: org0.taxonomy || {},
       maxRounds: Number(org0.guardrails?.investigateRounds) || undefined,
@@ -4036,7 +4038,7 @@ export function pickLens(run, lenses = LENSES, stats = null) {
 // The prompt for one round. Carries the lens, what has already been claimed (confirmed AND refused, so the agent does
 // not resubmit a refused claim), and the classes this company has found before — which is what made lens choice
 // informed on the benchmark rather than a fresh guess every time.
-export function investigateObjective(run, lens, taxonomy = {}, vocabulary = "") {
+export function investigateObjective(run, lens, taxonomy = {}, digest = "") {
   const seen = [...(run.findings || []).map((f) => "CONFIRMED: " + f.claim),
                ...(run.rejectedFindings || []).map((f) => "ALREADY REFUSED (" + f.reason + "): " + f.claim)];
   const classes = Object.entries(taxonomy).sort((a, b) => (b[1]?.count || 0) - (a[1]?.count || 0))
@@ -4054,7 +4056,7 @@ export function investigateObjective(run, lens, taxonomy = {}, vocabulary = "") 
     "You get a LIMITED number of actions in this round — each read, each search, each registration is one. Plan for it:",
     "read enough to be sure, then register or report. A round that spends every action reading ends with nothing.",
     "",
-    vocabulary || "",
+    digest || "",
     "",
     "READ THE CODE FIRST with read_repo — leave the path blank to list the repository, then read the files this lens points at.",
     "A check command and a fix must quote text that is really in the file, so a claim made without reading it will be refused",
@@ -4074,7 +4076,7 @@ export function investigateObjective(run, lens, taxonomy = {}, vocabulary = "") 
 // The loop. `worker` is the same one runGated uses, so tallies, budgets and steering all keep working.
 export async function investigate(run, worker, opts = {}) {
   const { taxonomy = {}, onRound = null, dryLimit = INVESTIGATE_DRY_ROUNDS, maxRounds = INVESTIGATE_MAX_ROUNDS,
-          lenses = LENSES, lensStats = null, vocabulary = "" } = opts;
+          lenses = LENSES, lensStats = null, digest = "" } = opts;
   run.rounds = run.rounds || []; run.findings = run.findings || []; run.rejectedFindings = run.rejectedFindings || [];
   run.dryRounds = 0;
   let tokens = 0;
@@ -4084,7 +4086,7 @@ export async function investigate(run, worker, opts = {}) {
     const before = run.findings.length;
     run.currentLens = lens;   // the read_repo result repeats it: by then it is behind a listing and 4000 characters of source
     emit(run, "lens", { lens: lens.id, round: roundNo });
-    const w = await worker(investigateObjective(run, lens, taxonomy, vocabulary));
+    const w = await worker(investigateObjective(run, lens, taxonomy, digest));
     tokens += (w && w.tokens) || 0;
     const confirmed = run.findings.length - before;
     // Dry counts NEW CONFIRMED findings only. Counting claims would let a stream of refused guesses keep the loop
@@ -4263,6 +4265,69 @@ export const looksLikeRegex = (t) => /[|\\]|\.\*|\.\+|\[[^\]]+\]|\([^)]*\|/.test
 // A crude catastrophic-backtracking guard. A model-supplied pattern runs in this process, and there is no regex
 // timeout in Node, so a nested quantifier is refused rather than risked.
 export const unsafeRegex = (t) => String(t || "").length > 200 || /\([^)]*[+*][^)]*\)\s*[+*]/.test(String(t || ""));
+
+// A MAP OF THE WHOLE REPOSITORY, given to a round before it starts groping.
+//
+// Four live rounds were spent file-by-file: list the repository, open the biggest file, discover it is truncated,
+// then reconstruct the rest by search. Three of them never left src/server.mjs. The agent had no way to know what
+// existed until it opened something, so "where should I look" was answered by whatever the listing put first.
+//
+// This is the idea behind repomix's --compress, using what Bureau already has. It stays deliberately OUTSIDE the
+// hard floor: no dependency, no shell, no snapshot on disk that could go stale — computed from the repository at
+// the moment the round starts, by the same reader the agent uses.
+//
+// SIZES ARE THE POINT, not decoration. A file bigger than one read returns gives a PREFIX, and every false-absence
+// claim this project has produced came from reasoning about a prefix as though it were the file. Saying so up front
+// is cheaper than the agent discovering it per file, which is what the wasted rounds were.
+export async function repoDigest(repo, opts = {}) {
+  const { maxFiles = 400, perFile = 12, readCap = 12000 } = opts;
+  // listRepoFiles answers {ok:true, files:[]} for a path that does not exist, so "the operator mistyped
+  // guardrails.findingRepo" and "this repository contains no source" arrive identically — and the first would render
+  // as a silently empty map. Same species as a search reporting zero hits for a pattern it never compiled.
+  if (!repo || !(await stat(repo).then((s) => s.isDirectory()).catch(() => false))) {
+    return { ok: false, error: `no repository at ${repo || "(unset)"} — check guardrails.findingRepo` };
+  }
+  const l = await listRepoFiles(repo);
+  if (!l.ok) return { ok: false, error: l.error };
+  const src = (l.files || []).filter((f) => /\.(mjs|js|ts|jsx|tsx|py|go|rb|rs|java)$/.test(f));
+  const entries = [];
+  for (const f of src) {
+    if (entries.length >= maxFiles) break;
+    const r = await readRepoFile(repo, f, 400000);
+    if (!r.ok) continue;
+    const o = repoOutline(r.content, perFile);
+    entries.push({ file: f, bytes: r.bytes, symbols: o.symbols, more: o.truncated, big: r.bytes > readCap });
+  }
+  return { ok: true, entries, shown: entries.length, total: src.length, readCap };
+}
+
+// Rendered under a character budget. What does NOT fit is COUNTED and named as missing: a map that silently stops
+// is the same failure as a search that silently matches nothing, and this project has shipped that twice.
+export function digestText(d, cap = 8000) {
+  if (!d || !d.ok || !d.entries.length) return "";
+  // TWO PARTS, and the split is the whole design. WHAT EXISTS is always complete: one line per file, every file,
+  // because a partial inventory is exactly how an agent concludes something is absent when it simply was not shown.
+  // The first version budgeted symbols first and rendered ten files of eighty-seven — a map that stopped at the
+  // letter N while announcing itself as a map. Symbols are the OPTIONAL half and get whatever budget is left.
+  const head = `A MAP OF THIS REPOSITORY, as it is right now. "(>read)" marks a file LARGER than one read returns —\n`
+    + `reading one of those gives you a PREFIX, so search it rather than concluding anything from what comes back.\n\n`
+    + `EVERY source file, with its size:\n`;
+  const index = d.entries.map((e) => `  ${e.file}  ${e.bytes.toLocaleString()}${e.big ? "  (>read)" : ""}`).join("\n") + "\n";
+  const out = [];
+  let used = head.length + index.length, detailed = 0;
+  for (const e of d.entries) {
+    if (!e.symbols.length) continue;
+    const block = `\n${e.file}:\n` + e.symbols.map((s) => `  ${s.line}: ${s.text}`).join("\n")
+                + (e.more ? "\n  …and more" : "") + "\n";
+    if (used + block.length > cap) break;
+    out.push(block); used += block.length; detailed++;
+  }
+  const rest = d.entries.length - detailed;
+  return head + index
+    + (out.length ? `\nWhat the first ${detailed} of them declare and register:\n` + out.join("") : "")
+    + (rest > 0 ? `\n(The other ${rest} file${rest === 1 ? " is" : "s are"} listed above with sizes but not broken down — `
+        + `read or search any of them directly.)\n` : "");
+}
 
 // What this codebase calls things. Built from repoOutline over the source files, so it is the repo's OWN names —
 // which is the point: an agent that has to guess reaches for requireAuth/requireAdmin/checkRole, and a codebase whose

@@ -1235,3 +1235,41 @@ Two things the tests forced, both of which would otherwise have been defects:
   this being decorative is exactly what caught it. Below the floor, the body stays.
 
 Cumulative paid spend across the session: **~$8.51**.
+
+### The whole-repo digest — repomix's idea without repomix
+
+Four rounds groped file by file, and three never left the first big file they opened, because nothing told the
+agent what existed until it opened something. `repomix --compress` is built for exactly this: Tree-sitter keeps
+signatures and drops bodies. Its per-file token counts would have identified `src/server.mjs` at 79KB against a
+12KB cap in seconds rather than over two live rounds and a refuted hypothesis.
+
+Not wired in, for two reasons that are not preference. Bureau is **zero-dependency by design** and repomix brings
+Tree-sitter grammars plus tokenizers. And the **hard floor blocks it anyway**: `shell` always requires the CEO,
+which is why a finding's check is confined to the project's own entry points, so a round cannot invoke it. It could
+only enter as a pre-computed pack — and a pack is a *snapshot*, so a round reading a stale one produces false
+absence, the exact bug class this session kept hitting.
+
+So: the idea, from what Bureau already has. `repoDigest` walks the repository at round start and `digestText`
+renders it under a budget. For 4water that is **87 files in ~2,000 tokens**.
+
+Two design points that are the whole value:
+
+- **The index is always complete; the breakdown is what gives way.** Every source file gets its line, whatever the
+  budget does. The first version budgeted symbols first and rendered ten files of eighty-seven — a map that stopped
+  at the letter N while calling itself a map, which is how an agent concludes something is absent when it was
+  simply never shown. Tested under a budget too small for any breakdown at all.
+- **Sizes are the point.** A file marked `(>read)` is larger than one read returns, so reading it yields a prefix.
+  Every false-absence claim this project has produced came from reasoning about a prefix as though it were the
+  file, and 48 of 4water's 87 files are over that line. Saying so once up front is cheaper than the agent
+  discovering it per file, which is what the wasted rounds were.
+
+It also closed a silent zero found while testing it: `listRepoFiles` answers `{ok:true, files:[]}` for a path that
+does not exist, so a mistyped `guardrails.findingRepo` rendered as an empty map rather than an error. `repoDigest`
+now stats the path first and says which it is.
+
+The digest replaces the vocabulary block rather than joining it — same names plus line numbers, sizes and routes,
+and sending both would pay twice every turn. It is not free: ~2,000 tokens on each turn of a round. Against a 57%
+saving from collapsed reads, and against three rounds spent discovering a file was too big to read, that is the
+trade being made deliberately rather than by accident.
+
+Suites: **819 unit assertions, 12 suites green.** No model calls were spent building any of it.
