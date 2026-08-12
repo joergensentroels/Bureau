@@ -22,7 +22,7 @@ import {
   blockerCandidates, falsifyBlocker, normalizeDeclinedCheck, recordDeclinedCheck, refuteMsgs,
   buildUndecidedMsgs, normalizeUndecided, unaddressedUndecided, runInvestigateFlag,
 } from "../server.mjs";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -557,8 +557,13 @@ console.log("# startLogTee — the log a boot task leaves behind when nobody is 
   chk("  a write ending mid-line gets one stamp, not one per write",
     all.split("\n").some((l) => /^\S+Z no newline here and the rest$/.test(l)));
   chk("  stop() restores the real streams", process.stdout.write === realOut);
+  // This read `!readdirSync(tmpdir()).includes(dir)` and could never fail: mkdtemp returns an ABSOLUTE path and
+  // readdir returns basenames, so the list could not contain the needle whatever happened to the directory. A
+  // check that cannot fail reports the same words as one that verified something. Found while chasing a different
+  // defect, which is the only way this class ever gets found — nothing in a green suite points at it.
+  chk("  precondition: the directory is there to be removed", existsSync(dir));
   rmSync(dir, { recursive: true, force: true });    // only possible because stop() closed the handle
-  chk("  the temp dir is removable after stop() (no leaked handle)", !readdirSync(tmpdir()).includes(dir));
+  chk("  the temp dir is removable after stop() (no leaked handle)", !existsSync(dir));
 }
 {
   // The actual reported bug, end to end: limit=2 used to come back as the same entry twice.
@@ -1548,16 +1553,36 @@ console.log("# investigate — reading the repository under investigation, and s
     chk("  a normal path resolves inside the repo", inside("src/db.mjs"));
     chk("  and it is refused for a repo that is not configured", repoPathSafe("", "src/db.mjs") === null);
     chk("  and for the filesystem root itself", repoPathSafe(process.platform === "win32" ? "C:" + BS : "/", "x") === null);
+    // Refused everywhere: these mean the same thing on every platform. A forward slash is a separator and a NUL is
+    // never a filename, whatever the OS.
     for (const [label, p] of [
       ["dot-dot with forward slashes", "../../etc/passwd"],
-      ["dot-dot with backslashes", ".." + BS + ".." + BS + "secret"],
-      ["dot-dot buried mid-path", "src" + BS + ".." + BS + ".." + BS + ".." + BS + "secret"],
-      ["a windows absolute path", "C:/Windows/win.ini"],
       ["the git directory", ".git/config"],
       ["a dependency", "node_modules/dep.js"],
       ["nothing at all", ""],
       ["a null byte", "src/db" + String.fromCharCode(0) + ".mjs"],
     ]) chk("  refused: " + label, repoPathSafe(R, p) === null);
+
+    // Windows path SYNTAX, which is not path syntax anywhere else. `\` is a separator and `C:` a drive only on
+    // win32; on Linux both are ordinary filename characters, so these resolve to one strangely-named file INSIDE
+    // the repo — which is the safe outcome, not a weaker one.
+    //
+    // These three assertions asserted refusal unconditionally and cost this project ten days of red CI. They pass
+    // on the machine they were written on and cannot pass on the machine the gate runs on, and the runner printed
+    // the wrong 25 lines, so nothing said which two of eight hundred assertions had gone red.
+    //
+    // The invariant is the same in both branches — the guard NEVER yields a path outside the repository — and only
+    // the mechanism differs: refusal on win32, containment elsewhere. Asserting the invariant is what makes this a
+    // security check rather than a check on `path.sep`.
+    for (const [label, p] of [
+      ["dot-dot with backslashes", ".." + BS + ".." + BS + "secret"],
+      ["dot-dot buried mid-path", "src" + BS + ".." + BS + ".." + BS + ".." + BS + "secret"],
+      ["a windows absolute path", "C:/Windows/win.ini"],
+    ]) {
+      const got = repoPathSafe(R, p);
+      chk(`  windows-shaped path stays inside the repo or is refused: ${label}`,
+          process.platform === "win32" ? got === null : (got === null || inside(p)));
+    }
     // Deliberate: a leading separator is STRIPPED, not honoured, so an absolute-looking path lands inside the repo
     // rather than on the real filesystem. The property under test is where it ends up, not whether it was allowed.
     chk("  a unix-absolute path is read as repo-relative, not as absolute", inside("/etc/passwd"));
