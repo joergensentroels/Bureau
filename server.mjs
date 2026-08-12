@@ -415,7 +415,7 @@ export function ensureBudget(org) {
   // investigate: hunt for defects the acceptance criteria never described, after a run PASSES. Default ON, because
   // that phase is the point — but it is an operator switch and not a constant, because it costs rounds of real model
   // time on work that already met its definition of done. investigateRounds caps how many, 0 = the built-in default.
-  org.guardrails = { autoApproveUnderUsd: 0, maxActionsPerRun: 0, maxPaidUsdPerRun: 0, investigate: true, investigateRounds: 0, findingRepo: "", refute: true, ...(org.guardrails || {}) };
+  org.guardrails = { autoApproveUnderUsd: 0, maxActionsPerRun: 0, maxPaidUsdPerRun: 0, investigate: true, investigateRounds: 0, findingRepo: "", refute: true, coverageMap: true, ...(org.guardrails || {}) };
   if (!Array.isArray(org.agents)) org.agents = [];                      // self-sufficient even on a bare {}
   org.agents.forEach((a) => {
     if (!a) return;
@@ -2872,6 +2872,7 @@ async function runHunt(run) {
     const dg = await repoDigest(repo).catch(() => null);
     tokens = await investigate(run, worker, {
       digest: dg,
+      coverageMap: reg.guardrails?.coverageMap !== false,
       lenses: activeLenses(reg), lensStats: reg.lenses || [],
       taxonomy: reg.taxonomy || {},
       maxRounds: Number(reg.guardrails?.investigateRounds) || undefined,
@@ -3487,6 +3488,7 @@ async function runGated(run, worker, persistExtra, perAgentTally, soloWorker = n
     const dg0 = await repoDigest(findingRepo(org0)).catch(() => null);
     tokens += await investigate(run, hunter, {
       digest: dg0,
+      coverageMap: org0.guardrails?.coverageMap !== false,
       lenses: activeLenses(reg), lensStats: reg.lenses || [],
       taxonomy: org0.taxonomy || {},
       maxRounds: Number(org0.guardrails?.investigateRounds) || undefined,
@@ -4081,7 +4083,7 @@ export async function investigate(run, worker, opts = {}) {
   // `digest` is the digest OBJECT now, not its rendered text, because the map is re-rendered every round: what a
   // round has already opened changes between rounds, and coverage-first ordering is worthless if computed once.
   const { taxonomy = {}, onRound = null, dryLimit = INVESTIGATE_DRY_ROUNDS, maxRounds = INVESTIGATE_MAX_ROUNDS,
-          lenses = LENSES, lensStats = null, digest = null } = opts;
+          lenses = LENSES, lensStats = null, digest = null, coverageMap = true } = opts;
   run.rounds = run.rounds || []; run.findings = run.findings || []; run.rejectedFindings = run.rejectedFindings || [];
   run.dryRounds = 0;
   let tokens = 0;
@@ -4092,7 +4094,7 @@ export async function investigate(run, worker, opts = {}) {
     run.currentLens = lens;   // the read_repo result repeats it: by then it is behind a listing and 4000 characters of source
     emit(run, "lens", { lens: lens.id, round: roundNo });
     const w = await worker(investigateObjective(run, lens, taxonomy,
-      typeof digest === "string" ? digest : digestText(digest, 8000, run.filesSeen)));
+      typeof digest === "string" ? digest : digestText(digest, 8000, coverageMap ? run.filesSeen : null)));
     tokens += (w && w.tokens) || 0;
     const confirmed = run.findings.length - before;
     // Dry counts NEW CONFIRMED findings only. Counting claims would let a stream of refused guesses keep the loop
@@ -5263,6 +5265,9 @@ const server = createServer(async (req, res) => {
         if (body.findingRepo !== undefined) o.guardrails.findingRepo = String(body.findingRepo || "").slice(0, 300);
         if (body.maxPaidUsdPerRun !== undefined) o.guardrails.maxPaidUsdPerRun = Math.max(0, Math.round((parseFloat(body.maxPaidUsdPerRun) || 0) * 100) / 100);
         if (body.investigate !== undefined) o.guardrails.investigate = !(body.investigate === false || body.investigate === "false" || body.investigate === 0 || body.investigate === "0");
+        // The coverage marking, as a switch, so its EFFECT can be measured against a control arm rather than
+        // asserted. An operator who does not want the map re-rendered per round can also turn it off.
+        if (body.coverageMap !== undefined) o.guardrails.coverageMap = !!body.coverageMap;
         if (body.investigateRounds !== undefined) o.guardrails.investigateRounds = Math.max(0, Math.min(20, Math.round(Number(body.investigateRounds) || 0)));
       });
       return send(res, 200, org.guardrails);

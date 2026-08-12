@@ -774,6 +774,22 @@ console.log("# investigate — the loop stops on EXHAUSTION, not on satisfaction
     const bare = mkRun();
     await investigate(bare, async () => ({ tokens: 1 }), { dryLimit: 2 });
     chk("  a run with no repository map reports no coverage at all", !bare.events.some((e) => e.type === "coverage"));
+
+    // The SWITCH, which exists so the marking's effect can be measured against a control arm instead of asserted.
+    // Coverage is still RECORDED when it is off — the switch changes what the agent is SHOWN, not what the run
+    // knows — or the control arm could not report where it looked and the comparison would have nothing to compare.
+    const off = mkRun();
+    const seenOff = [];
+    await investigate(off, async (obj) => {
+      seenOff.push(obj);
+      if (seenOff.length === 1) noteRepoRead(off, "src/a.mjs");
+      return { tokens: 1 };
+    }, { dryLimit: 2, digest, coverageMap: false });
+    chk("  with the switch off, round two's map carries no marking", !seenOff[1].includes("(read)"));
+    chk("  and the untouched files are no longer sorted first",
+        seenOff[1].indexOf("src/a.mjs") < seenOff[1].indexOf("src/c.mjs"));
+    chk("  but coverage is still RECORDED, so the control arm can still be measured",
+        off.rounds[1].filesSeen === 1 && off.events.some((e) => e.type === "coverage" && e.data.seen === 1));
   }
   {
     // A stream of REFUSED claims must not keep the loop alive: only confirmed findings reset the counter, or an
