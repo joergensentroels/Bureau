@@ -100,7 +100,18 @@ async function bootServer() {
   if (child) { try { child.kill(); } catch {} }
 
   const failed = results.filter((r) => r.code !== 0);
-  for (const r of failed) console.log(`\n----- ${r.file} output -----\n${r.out.split("\n").slice(-25).join("\n")}`);
+  // Print the FAILING lines, not the last 25. The suites print one line per assertion — units alone prints over
+  // eight hundred — so the tail of a failing run is whatever executed last, which is almost never what went wrong.
+  // This cost ten days of red CI: the workflow forwarded these 25 lines into a GitHub annotation and the annotation
+  // showed twenty consecutive ticks under the heading "SUITE(S) FAILED". Anyone running it locally saw the same.
+  // Falls back to the tail when no line carries a marker, because a crash or a syntax error has no ✗ to find.
+  const MARK = /^\s*(?:✗|✖|not ok\b|FAIL\b|FAILURES\b|AssertionError|Error:)/;
+  for (const r of failed) {
+    const lines = r.out.split("\n");
+    const bad = lines.filter((l) => MARK.test(l));
+    const head = bad.length ? `${bad.length} failing line(s)` : "no failure marker found — last 25 lines";
+    console.log(`\n----- ${r.file}: ${head} -----\n${(bad.length ? bad.slice(0, 40) : lines.slice(-25)).join("\n")}`);
+  }
   console.log(`\n═══ ${failed.length ? failed.length + " SUITE(S) FAILED ✗" : "ALL SUITES PASS ✓"} — ran ${results.length} ═══`);
   process.exit(failed.length ? 1 : 0);
 })();
