@@ -1389,4 +1389,59 @@ mistakenly reported partial, and the function that *was* fully shown carries no 
 
 Suite: **832 assertions**, up from 819.
 
-Cumulative paid spend across the session: **~$9.11**.
+### And the judgement half, for 21 cents
+
+With visibility eliminated as a confound, the remaining question is answerable without a repository at all: hand
+the model `workloadSpread` whole, plus every assertion in the suite that touches it, and ask. 2×2 — defective
+against the **correct** version as a control, with the lens and without it — three samples a cell, then a longer
+control run.
+
+| | named the defect |
+|---|---|
+| lens + defective | 2 / 3 |
+| lens + correct *(control)* | 0 / 3 |
+| no lens + defective | 2 / 3 |
+| no lens + correct *(control)* | 0 / 3 |
+
+Pooled with the follow-up control run, same model and prompt shape:
+
+| | calls | named the defect | blank |
+|---|---|---|---|
+| **defective** | 8 | **5** | 3 |
+| **correct** | 12 | **0** | 11 (+1 explicit `NOTHING`) |
+
+The claims are exact, and one of them supplies the lens unprompted:
+
+> *"In the non-empty branch `min` is hardcoded to `0` instead of `Math.min(...counts)`, so the returned minimum is
+> wrong for every populated roster **yet no assertion checks `min` when `counts` is non-empty**."*
+
+That second clause is the `what-would-it-accept` question, produced without being asked it — and the no-lens arm
+found the defect at the same rate, so for this defect the lens is not what was missing.
+
+**Judgement is not the bottleneck. Attention is.** Five rounds, ~$3.00, spent 41 of 50 searches on one file and
+never opened the one holding the defect. Every mechanism improvement so far — cheaper reads, the collapse, the
+digest — makes looking cheaper. None makes it *broader*, and breadth is the thing that was missing.
+
+**The blank rate is evidence, not noise.** Every blank reply spent exactly `out=4000`, the whole token budget, and
+returned no visible content; the fastest correct answer used 2,658 tokens and 47 seconds. On code with a defect the
+model converges and stops. On correct code it reasons to the end of its budget and emits nothing — 11 times out of
+12, with **zero false positives**. A silence that costs the full budget is a different event from a silence that
+comes back quickly, and only the per-call token count distinguishes them.
+
+_Two corrections earned here, both from checks rather than from care._ A guard asserting the control code did not
+contain `min: 0` fired on the **correct** version — its empty-list branch legitimately returns `min: 0`, and the
+defect is in the second return. The guard was wrong, not the extract. And the blanks were first attributed to
+Latch's 120-second timeout on the strength of one `ok=false`; raising `maxTokens` to 16,000 to test that made
+**every** call time out, because a larger budget lets the model spend longer. Printing `out=` per call showed the
+original blanks were all exactly at the 4,000 cap. Both explanations were real, in different regimes, and the
+tell was a column I nearly did not print.
+
+### What this says to build next
+
+A round records `{ lens, at, confirmed, dryAfter }`. **Lens coverage is tracked; file coverage is not tracked at
+all** — nothing in Bureau knows that five rounds never opened `src/roster.mjs`, and the digest that lists all 87
+files has no idea which of them anyone has looked at. The lens register exists precisely because coverage beats
+exploitation when choosing what to try next; the same argument applies to files, and `emit(run, "repoRead", …)`
+is already the single choke point every read and search passes through.
+
+Cumulative paid spend across the session: **~$9.32**.
