@@ -11,7 +11,7 @@ import {
   objectiveSignature, dedupeMemories, deliverableEmbedText, deliverableTitle,
   chunkDocument, deliverableChunks, modelUnreachable, trimVersions, clientKey, isLoopback,
   startLogTee, webhookBody,
-  normalizeFinding, verifyFinding, findingCheckAllowed, npmArgv,
+  normalizeFinding, verifyFinding, findingCheckAllowed, npmArgv, agentMayRun,
   LENSES, pickLens, investigateObjective, investigate, seedLenses, activeLenses, bookLensRound,
   normalizeLens, lensParaphrase, addProposedLens, lensProposalObjective, sigWords, postReadGuidance,
   turnBudgetWarning,
@@ -1187,6 +1187,34 @@ console.log("# investigate — the BODY of a read is capped, the OUTLINE never i
     chk('  a truncated read carries the outline', s2.includes('Every declaration in the WHOLE'));
     chk('  built from the WHOLE file, not from the capped body', s2.includes('readRepoFile(repo, target, 400000)'));
     chk('  and it states the asymmetry both ways', s2.includes('it really is not declared here') && s2.includes('it exists even though you cannot see its body'));
+  }
+}
+console.log("# a hunt refuses at the START if its agent cannot read the repository");
+{
+  // Measured, not imagined: a live round spent 505 seconds and $0.36 opening ZERO files. The prompt advertises
+  // read_repo whenever guardrails.findingRepo is set, without asking whether the agent may use it, so an agent whose
+  // allow list omits it was told to use a tool it could not use. It reached for read_file, the deliverables,
+  // github_file and a raw GitHub URL, then said "I cannot examine the repository because read_repo is blocked".
+  // The round was unwinnable when it started, and nothing said so until the money was gone.
+  chk('  an empty allow list means unrestricted, which is the default', agentMayRun({ allow: [] }, 'read_repo'));
+  chk('  and so does no list at all', agentMayRun({}, 'read_repo') && agentMayRun(null, 'read_repo'));
+  chk('  a list that names the action permits it', agentMayRun({ allow: ['read_file', 'read_repo'] }, 'read_repo'));
+  chk('  a list that does not, refuses it', !agentMayRun({ allow: ['read_file', 'github_file'] }, 'read_repo'));
+  // The exact allow list the live round ran with, so the case that cost the money is the fixture rather than my
+  // idea of it — the same discipline that turned "Done." into a fixture after a detector was fooled by one.
+  const LIVE = ['web_search', 'web_research', 'file_write', 'read_file', 'api_call', 'github_file',
+                'read_issues', 'github_issue', 'github_comment', 'github_pr'];
+  chk('  the real allow list from that round is refused read_repo', !agentMayRun({ allow: LIVE }, 'read_repo'));
+  chk('  while the actions it did reach for were all permitted',
+      ['read_file', 'github_file', 'web_research'].every((a) => agentMayRun({ allow: LIVE }, a)));
+  {
+    // The turn loop and the pre-flight must ask the SAME question, or the pre-flight predicts something else.
+    const src = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
+    chk('  the turn loop asks it', /if \(!agentMayRun\(agent, actType\)\)/.test(src));
+    chk('  and the hunt asks the SAME function, before spending a turn', /if \(!agentMayRun\(agent, "read_repo"\)\)/.test(src));
+    // The half that matters: no second copy of the rule left behind to drift out of step with this one.
+    chk('  and the inlined original is gone',
+        !/Array\.isArray\(agent\.allow\) && agent\.allow\.length && !agent\.allow\.includes/.test(src));
   }
 }
 console.log("# the map puts what nobody has opened first, and says how much of the repo a round has not been near");

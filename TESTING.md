@@ -1465,6 +1465,51 @@ any prompt for the better part of an hour while being wired up, and a source gre
 
 Suite: **852 assertions**, 12 suites green.
 
+### The ledger against a real model, and what the round actually showed
+
+Two rounds, paid tier, `kimi-k2.6`, against the same probe repository. Round one has opened nothing, so its map is
+identical to the one five earlier rounds saw; only round TWO can show the ledger. Recounted from the transcript,
+because the first tally split search labels on `:` and reported every search as a distinct file:
+
+| | actions | on `src/server.mjs` | distinct targets |
+|---|---|---|---|
+| round 1 — `what-would-it-accept` | 16 | **14 (88%)** | 3 |
+| round 2 — `collector-blind` | 16 | **0** | 5, plus five whole-repository searches |
+| the five-round baseline | 50 | 41 (82%) | — |
+
+**The ledger itself is verified live**: coverage went `3 → 6 of 87`, the numbers reached the round record and the
+`coverage` event, and round two never returned to the three files marked `(read)`.
+
+**Its effect is NOT established, and the reason is a confound I introduced.** Round two ran a different lens, and
+`collector-blind` is inherently repository-wide — "find a check that passes vacuously on an empty collection" sends
+an agent to `.every(` and `.some(` everywhere. Two variables moved at once, so the spread cannot be attributed to
+the marking. The clean version is the same lens twice, or a control round with the marking suppressed.
+
+Worth recording separately: round one ran **`what-would-it-accept`** — the lens the planted defect was chosen to
+need — and spent 88% of its actions on authorization inside `src/server.mjs`. That is the fourth time that lens has
+gone to authorization. And `src/roster.mjs` is now untouched across **seven** rounds.
+
+### A hunting round that could not read the repository, and cost $0.36 finding out
+
+The first attempt at the round above opened **zero** files in two rounds and 505 seconds. The agent reached for
+`read_file`, then the company's deliverables, then `github_file`, then a raw GitHub URL, and finally said: *"I cannot
+examine the repository because read_repo is blocked."* It was right, and it behaved correctly throughout.
+
+The hunting prompt advertises `read_repo` whenever `guardrails.findingRepo` is set — **without asking whether the
+agent is permitted to use it.** That agent's `allow` list named ten actions and `read_repo` was not among them; the
+four it reached for all were. Same shape as the `other` action that was advertised and unimplemented, and it costs
+more, because a hunt with no repository access cannot produce a finding the gate would accept: the gate proves a
+claim by running a check against that repository.
+
+`runHunt` already refuses when no repository is configured. It now refuses just as loudly when the agent cannot read
+the one that is, before a turn is spent. The permission rule is one exported `agentMayRun`, used by both the turn
+loop and the new pre-flight — two copies is how a pre-flight comes to disagree with the thing it predicts.
+
+_And the setup error underneath it is worth as much as the fix._ I created a fresh workspace believing it meant a
+clean slate. It meant a **different company**: twelve default agents, and the hunt picked an "Assistant" with a
+restrictive allow list, where the baseline workspace holds one purpose-built "Software reviewer" with none. A fresh
+workspace is not a controlled one.
+
 ### The gate had been red for ten days and could not say why
 
 Four commits landed against a red CI while the notification said only *"All jobs have failed"*. Three separate
@@ -1490,4 +1535,4 @@ Found in the same file while chasing it: `chk("the temp dir is removable after s
 compared an **absolute path** against readdir's **basenames**, so the needle could never be in the list and the check
 could never fail. It now asserts the directory is gone, with a precondition that it was there first.
 
-Cumulative paid spend across the session: **~$9.32**.
+Cumulative paid spend across the session: **~$11.11** (the two hunting attempts above cost $0.36 and $1.22).

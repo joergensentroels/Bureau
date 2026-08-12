@@ -2223,7 +2223,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
       history.push({ role: "user", content: `BLOCKED: "${actType}" needs the CEO to approve it, and nobody is watching a hunting round — waiting on that would stall this round for ten minutes and then fail. You do NOT need it: put the command in a register_finding "check" instead (npm test | npm run <script> | node --test [file] | node tools/<x>.mjs) and the runner will run it itself, in a throwaway copy, and tell you whether it fails. That is how a finding gets proved here. Or use read_repo to look at the code.` });
       continue;
     }
-    if (Array.isArray(agent.allow) && agent.allow.length && !agent.allow.includes(actType)) {
+    if (!agentMayRun(agent, actType)) {
       emit(run, "blocked", { agent: who, depth, actionType: actType, reason: "not in this agent's allowlist" });
       logAudit({ kind: "blocked", runId: run.id, agentId: agent.id, agent: who, actionType: actType, error: "not permitted for this agent", decision: "denied" });
       history.push({ role: "user", content: `BLOCKED: you are not permitted to run "${actType}". Your allowed actions are: ${agent.allow.join(", ")}. Use one of those or finish.` });
@@ -2838,6 +2838,19 @@ async function runHunt(run) {
   if (!agent) return failRun(run, "no agents to hunt with — this company has no roster", { agent: "Manager" });
   const repo = findingRepo(org);
   if (!repo) return failRun(run, "no repository is configured (guardrails.findingRepo), so nothing found could be verified", { agent: agent.name });
+  // ...and this agent has to be ALLOWED to read it. The hunting prompt advertises read_repo whenever a repository is
+  // configured, without asking whether the agent may use it, so an agent whose allow-list omits it is told to use a
+  // tool it cannot use. Measured: two rounds, 505 seconds, $0.36, ZERO files opened. The agent reached for read_file,
+  // then the company's deliverables, then github_file, then a raw GitHub URL, and finally said "I cannot examine the
+  // repository because read_repo is blocked". It behaved correctly throughout; the round was unwinnable at the start.
+  // Same shape as the `other` action that was advertised and unimplemented, and it costs more: a hunt with no
+  // repository access cannot produce a finding the gate would accept, because the gate proves a claim by running a
+  // check against that repository.
+  if (!agentMayRun(agent, "read_repo")) {
+    return failRun(run, `${agent.name} is not permitted to run read_repo, so this round could only reach for tools `
+      + `that cannot see the repository. Add it to that agent's allow list, or clear the list to lift the restriction `
+      + `— a hunt without repository access cannot produce a verifiable finding.`, { agent: agent.name });
+  }
   emit(run, "start", { agent: agent.name, role: agent.role, objective: run.objective || `hunt for defects in ${repo}`, hush: run.hush });
   run.memoryEntries = []; run.producedFiles = []; run.paidAvailable = await paidProviderAvailable();
   run.maxPaidUsd = Number(org.guardrails?.maxPaidUsdPerRun) || 0;
@@ -4542,6 +4555,13 @@ export function npmArgv(args, execPath = process.execPath, cli = NPM_CLI, exists
 // the boundary: the gate can never wander to a repo nobody chose, and an unset value means findings cannot be verified
 // rather than that they are taken on trust.
 export const findingRepo = (org) => String(org?.guardrails?.findingRepo || "").trim();
+
+// May this agent run this action? An EMPTY allow list means unrestricted, which is the default and is why most
+// agents never notice this exists. Extracted so the turn loop and the hunt's pre-flight check ask the same question:
+// the pre-flight was added after a round spent 505 seconds discovering that the answer was no, and two copies of a
+// permission rule is how a pre-flight comes to disagree with the thing it is meant to predict.
+export const agentMayRun = (agent, actionType) =>
+  !Array.isArray(agent?.allow) || agent.allow.length === 0 || agent.allow.includes(actionType);
 
 // sh/apply/revert against a throwaway git worktree at HEAD. The operator's working tree is never touched — the same
 // reason tools/proseproof.mjs in the 4water repo works in a worktree — and the worktree is removed in a finally, which
