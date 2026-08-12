@@ -28,7 +28,14 @@ jobs:
           node test/run-all.mjs --serve 2>&1 | tee /tmp/test-output.txt
           code=${PIPESTATUS[0]}
           if [ "$code" -ne 0 ]; then
-            body=$(tail -80 /tmp/test-output.txt | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | awk '{printf "%s%%0A", $0}')
+            # The FAILING lines first, then the tail. A tail alone is the wrong 80 lines: the suites print one line
+            # per assertion, so the end of the output is whatever ran last, not what went wrong. The first version
+            # of this annotation showed twenty consecutive ticks under the words "suite failed".
+            { grep -nE '^(✗|not ok|FAILURES|  FAIL )' /tmp/test-output.txt | head -40
+              echo "-- last 40 lines --"
+              tail -40 /tmp/test-output.txt
+            } > /tmp/test-report.txt
+            body=$(sed -e 's/%/%25/g' -e 's/\r/%0D/g' /tmp/test-report.txt | awk '{printf "%s%%0A", $0}')
             echo "::error title=Test suite failed (exit $code)::$body"
           fi
           exit $code
