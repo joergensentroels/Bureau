@@ -48,8 +48,24 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const dAfter = await orgOf("default");
   ok(dAfter.agents.length === dAgents && (dAfter.policies || []).length === dPolicies, "default is unaffected by writes to A");
 
-  // unknown workspace header falls back to default (never a phantom company)
-  ok((await orgOf("no-such-ws-xyz")).agents.length === dAgents, "unknown workspace id falls back to default");
+  // An unknown workspace is REFUSED, not silently answered from the default company.
+  //
+  // This asserted the opposite — "falls back to default (never a phantom company)" — and that intent is right: a
+  // header must not conjure a company. Refusing satisfies it just as well, because refusing creates nothing
+  // either, and it does not carry what the fallback carried. Measured: an experiment ran two arms under
+  // `x-workspace: cov-on` and `cov-off`, neither of which existed. Both wrote guardrails, an agent allow list and
+  // a budget onto the DEFAULT company; both ran there; the second overwrote the first; and every readback
+  // confirmed the settings, because the readback landed in the same place. $1.40 of model time bought a
+  // comparison of a company with itself, and every response was a 200. On a live deployment the same typo
+  // reconfigures the real company rather than a throwaway.
+  {
+    const r = await api("GET", "/api/org", null, "no-such-ws-xyz");
+    ok(r.status === 400, `unknown workspace id is refused rather than served from default (got ${r.status})`);
+    ok(/no workspace/i.test(r.j.error || ""), "and the refusal says which name was not found");
+    ok((await orgOf("default")).agents.length === dAgents, "default is untouched by the refused request");
+  }
+  // The control: a workspace that DOES exist still resolves, so the guard is not refusing everything.
+  ok((await orgOf(a.id)).agents.length === 2, "a real workspace id still resolves to its own company");
 
   // A run that ends abnormally must still be accounted for. Both of these fail before any LLM call, so
   // they belong in the model-free suite — and B is empty, which is exactly the precondition. Before the

@@ -5073,8 +5073,21 @@ const server = createServer(async (req, res) => {
   // Establish the workspace for this request (and its async continuation) from the X-Workspace
   // header, falling back to ?ws= then "default". Unknown ids fall back to default rather than error,
   // so a stale client can never read/write a phantom file. readOrg/updateOrg/drafts resolve off this.
+  // A workspace that does not exist used to fall back SILENTLY to "default", and that is not a lenient default, it
+  // is a wrong answer delivered with a 200. Measured, on this project: an experiment ran two arms under
+  // `x-workspace: cov-on` and `cov-off`, neither of which existed. Both wrote guardrails, an agent allow list and a
+  // budget onto the DEFAULT company, both ran there, the second overwrote the first, and every readback confirmed
+  // the settings because the readback landed in the same place. $1.40 of model time bought a comparison of a
+  // company with itself. On a real deployment a typo'd workspace header reconfigures the live company instead.
+  //
+  // No header at all still means "default" — that is a genuine default, and the UI relies on it. Naming a
+  // workspace that is not there is a mistake, and it is answered as one.
   const reqWs = String(req.headers["x-workspace"] || url.searchParams.get("ws") || "default");
-  wsStore.enterWith({ ws: wsExists(reqWs) ? reqWs : "default" });
+  if (!wsExists(reqWs)) {
+    return send(res, 400, { error: `no workspace "${reqWs}" — create it first (POST /api/workspaces). `
+      + `Existing: ${WORKSPACES.map((w) => w.id).join(", ")}. Omit the header to use the default company.` });
+  }
+  wsStore.enterWith({ ws: reqWs });
   try {
     // AUTH GATE: every /api and /mcp call requires the operator token. Exempt: the static UI shell
     // (served below — HTML/CSS/JS, no secrets) and /api/trigger/:token (external webhooks carry their

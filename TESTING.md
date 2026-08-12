@@ -1508,7 +1508,49 @@ loop and the new pre-flight — two copies is how a pre-flight comes to disagree
 _And the setup error underneath it is worth as much as the fix._ I created a fresh workspace believing it meant a
 clean slate. It meant a **different company**: twelve default agents, and the hunt picked an "Assistant" with a
 restrictive allow list, where the baseline workspace holds one purpose-built "Software reviewer" with none. A fresh
-workspace is not a controlled one.
+workspace is not a controlled one. _(It was not even a fresh workspace — see below. It never existed at all.)_
+
+### The planted defect, found and confirmed — and a $1.40 comparison of a company with itself
+
+The controlled version: two arms, the lens forced to `what-would-it-accept` in every round, differing only in
+`guardrails.coverageMap`. **Arm A round one registered a finding the gate accepted:**
+
+> *"workloadSpread reports min=0 even when every volunteer has positive assignments"* — `src/roster.mjs:213`
+
+That is the planted defect. It is the **first confirmed finding on a green repository** in this work, after seven
+rounds that never opened the file, and it arrived under the lens the defect was chosen to need.
+
+**Arm B found it too, and the gate refused every attempt — correctly.** Six `register_finding` calls, and the
+reasons are the rules doing their job:
+
+```
+the anchor text appears 2 times, so it does not identify   x3
+the anchor text was not found
+the fix does not make the check pass                       x3
+```
+
+`min: 0` really does appear twice in that function — the empty-list guard and the defective return — so the
+ambiguous-anchor refusal fired on exactly the case it was written for. Both arms located the defect; the anchor
+rule decided which one could land it.
+
+**The A/B itself is void, and the harness said so before I did**, ending with
+`*** LENSES DIFFER — the comparison is void, same flaw as last time ***` because arm B's first round ran
+`inspect-identity-elements`. The cause was not the lens switch: **the two arms were the same company.**
+
+`x-workspace` fell back to `default` for any name that did not exist, silently. `cov-on` and `cov-off` were never
+created, so both arms wrote guardrails, an agent allow list and a budget onto the default company, both ran there,
+and the second overwrote the first — while every readback confirmed the settings, because the readback landed in
+the same place. Arm A's critic then proposed a new lens, which arm B inherited. A wrong answer, delivered as 200.
+
+That fallback is now a **400**. The test asserting it — *"unknown workspace id falls back to default (never a
+phantom company)"* — stated an intent worth keeping, and refusing satisfies it just as well: refusing creates
+nothing either. It simply does not also answer a question about a company nobody asked about. A control asserts a
+real workspace still resolves, so the guard is not refusing everything.
+
+_The three earlier rounds above ran under `hunt-coverage-1`, which also never existed. They were in `default` the
+whole time — which is why the audit rows say `ws: default`, and why "a fresh workspace" is the wrong name for what
+happened. The only workspaces that have ever existed here are `default`, `4water-scheduling-739c` and
+`hunt-funded-9e60`._
 
 ### The gate had been red for ten days and could not say why
 
@@ -1535,4 +1577,4 @@ Found in the same file while chasing it: `chk("the temp dir is removable after s
 compared an **absolute path** against readdir's **basenames**, so the needle could never be in the list and the check
 could never fail. It now asserts the directory is gone, with a precondition that it was there first.
 
-Cumulative paid spend across the session: **~$11.11** (the two hunting attempts above cost $0.36 and $1.22).
+Cumulative paid spend across the session: **~$12.51** (the hunting attempts above cost $0.36, $1.22 and $1.40).
