@@ -16,7 +16,7 @@ import {
   normalizeLens, lensParaphrase, addProposedLens, lensProposalObjective, sigWords, postReadGuidance,
   turnBudgetWarning,
   executorProbeMs,
-  repoPathSafe, readRepoFile, listRepoFiles, resolveRepoTarget, searchRepoFiles, repoOutline,
+  repoPathSafe, readRepoFile, listRepoFiles, resolveRepoTarget, searchRepoFiles, repoOutline, markOutlineVisibility, repoReadReply,
   looksLikeRegex, unsafeRegex, repoVocabulary, vocabularyText, collapseReads, repoDigest, digestText,
   normalizeQuestion, questionKey, recordQuestion, answerQuestion, systemPrompt, unqueuedAssumption, tierReason,
   blockerCandidates, falsifyBlocker, normalizeDeclinedCheck, recordDeclinedCheck, refuteMsgs,
@@ -1149,6 +1149,53 @@ console.log("# investigate — the BODY of a read is capped, the OUTLINE never i
     chk('  built from the WHOLE file, not from the capped body', s2.includes('readRepoFile(repo, target, 400000)'));
     chk('  and it states the asymmetry both ways', s2.includes('it really is not declared here') && s2.includes('it exists even though you cannot see its body'));
   }
+}
+console.log("# a truncated read says WHICH declarations lost their body, not just that the file was cut");
+{
+  // The 155 characters five hunting rounds could not have crossed. This project's planted defect sits at character
+  // 12,155 of a 12,263-character file against a 12,000-character cap: the outline named the function, the body
+  // stopped 155 characters short of its return, and nothing in the reply distinguished "you have read this" from
+  // "you have read its name". Reproduced in miniature so the assertion does not depend on a scratchpad clone.
+  const LF = String.fromCharCode(10);
+  const filler = (n) => new Array(n).fill('  // filler, and not a declaration').join(LF);
+  const full = [
+    'export function alpha(a) {', filler(20), '  return a;', '}', '',
+    'export function omega(b) {', filler(20), '  return { min: 0 };', '}', '',
+    'export function afterTheCut(c) {', '  return c;', '}',
+  ].join(LF);
+  // Cut where the real one cut: inside omega, just before the line that decides its value.
+  const shown = full.slice(0, full.indexOf('  return { min: 0 };'));
+  chk('  precondition: the cut really does hide the return', !shown.includes('min: 0') && full.includes('min: 0'));
+
+  const o = repoOutline(full);
+  const marked = markOutlineVisibility(o.symbols, shown, o.lines);
+  const seenOf = (n) => (marked.find((s) => s.text.includes(n)) || {}).seen;
+  eq('  a function whose body is wholly inside the shown part is seen', seenOf('alpha'), 'seen');
+  eq('  one whose RETURN falls past the cut is partial', seenOf('omega'), 'partial');
+  eq('  one declared past the cut is unseen', seenOf('afterTheCut'), 'unseen');
+
+  // The control. Without it a marker that fired on everything passes all three assertions above, and every
+  // complete read carries a warning that means nothing.
+  chk('  on a COMPLETE read nothing is flagged, including the last declaration',
+      markOutlineVisibility(o.symbols, full, o.lines).every((s) => s.seen === 'seen'));
+  chk('  and with no line count to compare against it does not guess',
+      markOutlineVisibility(o.symbols, shown, 0).every((s) => s.seen === 'seen'));
+
+  // Now the string the agent is actually handed. The helper above was correct and unreachable from any prompt for
+  // an hour, and a test grepping server.mjs for the wiring would have passed throughout.
+  const reply = repoReadReply({ name: 'src/roster.mjs', shown, full, bytes: full.length, truncated: true });
+  chk('  the reply marks the half-shown function', /omega[^\n]*body CUT OFF/.test(reply));
+  chk('  and the one it never reached', /afterTheCut[^\n]*NOT in the body above/.test(reply));
+  chk('  the function it did show carries no marker',
+      !/CUT OFF|NOT in the body/.test(reply.split(LF).find((l) => l.includes('alpha(')) || 'CUT OFF'));
+  chk('  it counts them, because the count is what makes it act', reply.includes('2 of those are wholly or partly outside'));
+  chk('  and points at a search rather than another read', /SEARCH it rather than re-reading/.test(reply));
+
+  // The negative control on the whole instrument: an untruncated read must say none of this.
+  const complete = repoReadReply({ name: 'src/roster.mjs', shown: full, full, bytes: full.length, truncated: false });
+  chk('  a complete read carries no cut-off language at all',
+      !/CUT OFF|NOT in the body above|wholly or partly outside/.test(complete));
+  chk('  but still hands over the source', complete.includes('min: 0') && complete.includes('REAL current source'));
 }
 console.log("# a search with a blank title must not become a directory listing");
 {

@@ -1314,4 +1314,79 @@ The experiment worth running next, and it is now about $0.40: a **small** reposi
 cap. That isolates whether five dry rounds are about scale — a 79KB file against a 12KB window — or about judgement.
 Until that runs, both explanations remain live and this record should not claim either.
 
+## The needle was 155 characters outside the window
+
+Building that small repository started with checking where the planted defect actually sits. It never needed
+building. **The defect is at character 12,155 of a 12,263-character file, and the paid read cap is 12,000.**
+
+Measured by calling the real function rather than by arithmetic over the file, because the cap is a `String.slice`
+in characters while the obvious way to compute it is `Buffer.byteLength` in bytes, and this codebase's prose is
+full of em-dashes:
+
+```
+readRepoFile(probe, "src/roster.mjs", 12000)
+  length     : 12263 chars   truncated: true
+  returned   : 12000 chars
+  defect ("min: 0") in what the agent gets?  NO
+  in the full file?                          YES
+  the read ends: "…both of which FAIL on -Infinity rather than passing. This closes th"
+```
+
+It stops mid-word, 155 characters short of the line that decides the return value. **No round could have found
+that defect by reading the file.** Only a search could — `read_repo` with a term in `command` greps the whole file
+— and the prompt says exactly that, in words, on every truncated read.
+
+**So the scale-versus-judgement fork was never a real fork.** Five rounds tested a hypothesis that could not be
+tested, and this record's "both explanations remain live" was itself too generous: a third explanation dominated
+both and nobody had measured it.
+
+### What the five rounds actually looked at
+
+From Bureau's own audit log rather than from memory — `action_type='read_repo'`, after the defect commit:
+
+| | |
+|---|---|
+| repo reads across the five rounds | **78** |
+| of those, touching `src/roster.mjs` | **0** |
+| searches issued | 50 |
+| searches against `src/server.mjs` | **41** |
+
+So both failures are real and they compound. Attention collapsed onto one file — 41 of 50 searches — and the one
+file holding the defect was never opened; and had it been opened, the defect was outside the window anyway.
+
+_Checked against a wrong answer first. A tally over the whole audit table said `roster.mjs ever read? YES`, which
+would have overturned the record. Dating it showed the read was 2026-08-10 against the **authorization** clone,
+a day before the `min: 0` commit existed. A count with no time filter answered a question about a different
+repository._
+
+### The fix: a truncated read now says which declarations lost their body
+
+The outline already listed every declaration in the whole file regardless of the cut — that is what makes
+"X is not in this file" answerable from a prefix, and it works. What it could not answer was **visibility**. An
+agent shown 12,000 of 12,263 characters was told the file was cut off and told that `workloadSpread` exists at
+line 195, and from those two facts cannot work out that the end of that function is in the 263 characters it did
+not get. *"Cut off after 12,000 of 12,263"* is a fact about the file; the agent reasons in declarations.
+
+`markOutlineVisibility` tags every symbol `seen` / `partial` / `unseen`, and the read reply renders it. On the
+real file, unchanged, with the real cap:
+
+```
+  116: export function rosterReview(db, seasonId) {
+  195: export function workloadSpread(db, seasonId) {   <-- body CUT OFF: you have NOT seen the end of this one
+
+1 of those is wholly or partly outside what you were shown, and the END of a function is where its return value
+is decided. If any of them matters to what you are looking for, SEARCH it rather than re-reading: …
+```
+
+One line in that outline carries a marker, and it is the one holding the defect.
+
+**`repoReadReply` was extracted from the turn loop so the test asserts on the string the agent is handed.** The
+marker was correct and unreachable from any prompt for about an hour while I wired it, and a test grepping
+`server.mjs` for the wiring would have passed the entire time — the same proxy-assertion failure this document
+records five other instances of. Controls in the suite: a **complete** read carries no cut-off language at all
+(otherwise the marker fires on everything and means nothing), the last declaration of a whole file is not
+mistakenly reported partial, and the function that *was* fully shown carries no marker.
+
+Suite: **832 assertions**, up from 819.
+
 Cumulative paid spend across the session: **~$9.11**.

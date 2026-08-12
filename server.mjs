@@ -2623,20 +2623,8 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
             // The outline is taken from the FULL file when we have it, so a collapsed read still answers "is X
             // declared here" even though its body is gone.
             history.push({ role: "user", _read: { file: r.name, content: (full && full.ok ? full.content : r.content), bytes: r.bytes },
-              content: `APPROVED and EXECUTED — ${r.name} from the repository under investigation${r.truncated ? ` (the FIRST ${r.content.length} of ${r.bytes} characters — you have NOT seen the rest)` : ""}:\n---\n${r.content}\n---\nThis is the REAL current source. Anything you claim about it must quote text that appears above.`
-              + (r.truncated
-                ? ` The file was CUT OFF after ${r.content.length} of ${r.bytes} characters, so the body above is partial.\n`
-                  + (() => {
-                      // The outline is COMPLETE even though the body is not, so "X is not in this file" is answerable
-                      // from it. Both false claims this session were absence claims made from a prefix.
-                      const o = repoOutline((full && full.ok ? full.content : r.content));
-                      return o.symbols.length
-                        ? `Every declaration in the WHOLE ${o.lines}-line file, complete regardless of the cut-off${o.truncated ? " (capped)" : ""} — if something is not in this list it really is not declared here, and if it IS in the list it exists even though you cannot see its body:\n`
-                          + o.symbols.map((sy) => `  ${sy.line}: ${sy.text}`).join("\n") + "\n"
-                        : "";
-                    })()
-                  + `Do not conclude anything is absent from the partial body alone. To see a specific part, search it: read_repo with title=${r.name} and the term in "command".`
-                : "")
+              content: repoReadReply({ name: r.name, shown: r.content, full: (full && full.ok ? full.content : r.content),
+                                       bytes: r.bytes, truncated: !!r.truncated })
               + postReadGuidance(run) });
           } else if (listInstead) {
             // List the requested subtree if it exists; otherwise the whole repository, because a wrong path is exactly
@@ -4177,6 +4165,64 @@ export function repoOutline(content, cap = 150) {
     if (OUTLINE_PATTERNS.some((re) => re.test(l))) symbols.push({ line: i + 1, text: l.trim().slice(0, 120) });
   }
   return { lines: lines.length, symbols, truncated: symbols.length >= cap };
+}
+
+// Which declarations in a truncated read did the agent actually get the BODY of?
+//
+// The outline is complete regardless of the cut-off, so "is X declared here" is answerable from it. Visibility is
+// not, and that gap is expensive. Measured on this project's own planted defect: it sits at character 12,155 of a
+// 12,263-character file against a 12,000-character cap — outside the window by 155 characters, inside a function
+// the outline dutifully listed as present. A round that read that file would have been handed 97.8% of it, told
+// the name of the function holding the defect, and given nothing to suggest that the missing 2.2% was where to
+// look. "Cut off after 12,000 of 12,263" is a fact about the FILE; what the agent needs is a fact about the
+// DECLARATION, because that is the unit it reasons in.
+//
+// Tags every symbol with how much of it the shown body contains:
+//   "seen"    — it and everything up to the next declaration are inside the body
+//   "partial" — its declaration line is inside, but its body runs to or past the cut
+//   "unseen"  — its declaration line is past the cut entirely
+export function markOutlineVisibility(symbols, shownContent, totalLines) {
+  const list = symbols || [];
+  const shown = String(shownContent == null ? "" : shownContent).split("\n").length;
+  // A complete read hides nothing. Without this the last symbol of every whole file reads as "partial" — which is
+  // exactly the false alarm this function exists to prevent, committed by the function itself.
+  if (!totalLines || shown >= totalLines) return list.map((sy) => ({ ...sy, seen: "seen" }));
+  return list.map((sy, i) => {
+    if (sy.line > shown) return { ...sy, seen: "unseen" };
+    // The last shown line is itself cut mid-text, so a body reaching it is partial rather than seen.
+    const endsAt = list[i + 1] ? list[i + 1].line - 1 : totalLines;
+    return { ...sy, seen: endsAt >= shown ? "partial" : "seen" };
+  });
+}
+
+// What the agent is actually told after a read. Extracted from the turn loop so a test can assert on the REAL
+// string rather than on the source that builds it: the marker below was correct as a helper for an hour while
+// being unreachable from any prompt, and a test that greps server.mjs for the wiring would have passed throughout.
+export function repoReadReply({ name, shown, full, bytes, truncated }) {
+  const head = `APPROVED and EXECUTED — ${name} from the repository under investigation`
+    + (truncated ? ` (the FIRST ${shown.length} of ${bytes} characters — you have NOT seen the rest)` : "")
+    + `:\n---\n${shown}\n---\nThis is the REAL current source. Anything you claim about it must quote text that appears above.`;
+  if (!truncated) return head;
+  // The outline is COMPLETE even though the body is not, so "X is not in this file" is answerable from it. Both
+  // false claims this session were absence claims made from a prefix.
+  const o = repoOutline(full || shown);
+  const marked = markOutlineVisibility(o.symbols, shown, o.lines);
+  const hidden = marked.filter((sy) => sy.seen !== "seen");
+  const outline = o.symbols.length
+    ? `Every declaration in the WHOLE ${o.lines}-line file, complete regardless of the cut-off${o.truncated ? " (capped)" : ""} — if something is not in this list it really is not declared here, and if it IS in the list it exists even though you cannot see its body:\n`
+      + marked.map((sy) => `  ${sy.line}: ${sy.text}`
+          + (sy.seen === "unseen" ? "   <-- NOT in the body above at all"
+           : sy.seen === "partial" ? "   <-- body CUT OFF: you have NOT seen the end of this one"
+           : "")).join("\n") + "\n"
+      // The count is what carries. A file-level "cut off after 12,000 of 12,263" leaves the agent to work out for
+      // itself which declaration lost its tail; naming them removes that step, and the tail is where a return is.
+      + (hidden.length
+          ? `${hidden.length} of those ${hidden.length === 1 ? "is" : "are"} wholly or partly outside what you were shown, and the END of a function is where its return value is decided. If any of them matters to what you are looking for, SEARCH it rather than re-reading: read_repo with title=${name} and a term from it in "command".\n`
+          : "")
+    : "";
+  return head + ` The file was CUT OFF after ${shown.length} of ${bytes} characters, so the body above is partial.\n`
+    + outline
+    + `Do not conclude anything is absent from the partial body alone. To see a specific part, search it: read_repo with title=${name} and the term in "command".`;
 }
 
 // Old read bodies collapse to their outline before the history is sent.
