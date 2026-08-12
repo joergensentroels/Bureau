@@ -18,7 +18,20 @@ jobs:
         with:
           node-version: "24"   # node:sqlite (DatabaseSync) + node --test
       - name: Run tests (pure + server, self-hosted)
-        run: node test/run-all.mjs --serve
+        # The failure is echoed into an ANNOTATION as well as the log, because reading the log needs a
+        # signed-in session with admin rights on the repo and reading an annotation does not. This workflow
+        # was red for ten days across four commits while the notification email said only "All jobs have
+        # failed" and the run page said "Sign in to view logs" — the gate fired correctly every time and
+        # reported nothing anyone could act on. A gate you cannot read is a gate people learn to ignore.
+        run: |
+          set +e
+          node test/run-all.mjs --serve 2>&1 | tee /tmp/test-output.txt
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            body=$(tail -80 /tmp/test-output.txt | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=Test suite failed (exit $code)::$body"
+          fi
+          exit $code
         env:
           OPERATOR_TOKEN: ci-operator-token   # shared by the self-hosted server + the test clients
       - name: Coverage audit (soft — reports untested exports/routes, never fails the build)
