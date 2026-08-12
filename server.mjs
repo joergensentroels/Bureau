@@ -2593,6 +2593,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
             if (s.ok) {
               didExecute = true;
               emitAct({ agent: who, depth, actionType: "read_repo", url: (target || "*") + ":" + term, ok: true, bytes: s.hits.length, error: "" });
+              if (target) noteRepoRead(run, target);
               emit(run, "repoRead", { by: who, depth, file: (target || "the whole repository") + " for " + JSON.stringify(term), bytes: s.hits.length, search: true });
               history.push({ role: "user", content: (askedForPath ? `NOTE: "${want}" did not match any path, so this searched the WHOLE repository rather than that one place.\n` : "")
                 + (s.mode === "regex" ? "(read as a regular expression)\n" : "(read as a LITERAL substring, not a pattern)\n")
@@ -2618,6 +2619,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
           if (r.ok) {
             didExecute = true;
             emitAct({ agent: who, depth, actionType: "read_repo", url: r.name, ok: true, bytes: r.bytes, error: "" });
+            noteRepoRead(run, r.name);
             emit(run, "repoRead", { by: who, depth, file: r.name, bytes: r.bytes, truncated: !!r.truncated });
             // `_read` is local bookkeeping for collapseReads — stripped before anything is sent to a provider.
             // The outline is taken from the FULL file when we have it, so a collapsed read still answers "is X
@@ -2856,7 +2858,7 @@ async function runHunt(run) {
     // Sending both would pay twice for the same information.
     const dg = await repoDigest(repo).catch(() => null);
     tokens = await investigate(run, worker, {
-      digest: digestText(dg),
+      digest: dg,
       lenses: activeLenses(reg), lensStats: reg.lenses || [],
       taxonomy: reg.taxonomy || {},
       maxRounds: Number(reg.guardrails?.investigateRounds) || undefined,
@@ -3471,7 +3473,7 @@ async function runGated(run, worker, persistExtra, perAgentTally, soloWorker = n
     const hunter = soloWorker || worker;
     const dg0 = await repoDigest(findingRepo(org0)).catch(() => null);
     tokens += await investigate(run, hunter, {
-      digest: digestText(dg0),
+      digest: dg0,
       lenses: activeLenses(reg), lensStats: reg.lenses || [],
       taxonomy: org0.taxonomy || {},
       maxRounds: Number(org0.guardrails?.investigateRounds) || undefined,
@@ -4063,8 +4065,10 @@ export function investigateObjective(run, lens, taxonomy = {}, digest = "") {
 
 // The loop. `worker` is the same one runGated uses, so tallies, budgets and steering all keep working.
 export async function investigate(run, worker, opts = {}) {
+  // `digest` is the digest OBJECT now, not its rendered text, because the map is re-rendered every round: what a
+  // round has already opened changes between rounds, and coverage-first ordering is worthless if computed once.
   const { taxonomy = {}, onRound = null, dryLimit = INVESTIGATE_DRY_ROUNDS, maxRounds = INVESTIGATE_MAX_ROUNDS,
-          lenses = LENSES, lensStats = null, digest = "" } = opts;
+          lenses = LENSES, lensStats = null, digest = null } = opts;
   run.rounds = run.rounds || []; run.findings = run.findings || []; run.rejectedFindings = run.rejectedFindings || [];
   run.dryRounds = 0;
   let tokens = 0;
@@ -4074,14 +4078,23 @@ export async function investigate(run, worker, opts = {}) {
     const before = run.findings.length;
     run.currentLens = lens;   // the read_repo result repeats it: by then it is behind a listing and 4000 characters of source
     emit(run, "lens", { lens: lens.id, round: roundNo });
-    const w = await worker(investigateObjective(run, lens, taxonomy, digest));
+    const w = await worker(investigateObjective(run, lens, taxonomy,
+      typeof digest === "string" ? digest : digestText(digest, 8000, run.filesSeen)));
     tokens += (w && w.tokens) || 0;
     const confirmed = run.findings.length - before;
     // Dry counts NEW CONFIRMED findings only. Counting claims would let a stream of refused guesses keep the loop
     // alive forever, which is precisely how an unbounded critic bills without producing anything.
     run.dryRounds = confirmed ? 0 : run.dryRounds + 1;
-    run.rounds.push({ lens: lens.id, at: Date.now(), confirmed, dryAfter: run.dryRounds });
-    emit(run, "round", { round: roundNo, lens: lens.id, confirmed, dryRounds: run.dryRounds });
+    // Coverage on the round record, beside the lens. A dry round that opened five of eighty-seven files and a dry
+    // round that opened all of them are the same entry without this, and they mean opposite things.
+    const cov = repoCoverage(typeof digest === "string" ? null : digest, run.filesSeen);
+    run.rounds.push({ lens: lens.id, at: Date.now(), confirmed, dryAfter: run.dryRounds,
+                      filesSeen: cov.seen, filesTotal: cov.total });
+    emit(run, "round", { round: roundNo, lens: lens.id, confirmed, dryRounds: run.dryRounds,
+                         filesSeen: cov.seen, filesTotal: cov.total });
+    // Named, not merely counted: a number is something a reader acknowledges, a list is something they act on.
+    if (cov.total) emit(run, "coverage", { round: roundNo, seen: cov.seen, total: cov.total,
+                                           unseen: cov.unseen.slice(0, 40), more: Math.max(0, cov.unseen.length - 40) });
     if (onRound) await onRound(run, run.rounds[run.rounds.length - 1]);
   }
   // One critic round, and only when the run actually produced evidence: the gate refuses any proposal that cannot
@@ -4312,6 +4325,29 @@ export const looksLikeRegex = (t) => /[|\\]|\.\*|\.\+|\[[^\]]+\]|\([^)]*\|/.test
 // timeout in Node, so a nested quantifier is refused rather than risked.
 export const unsafeRegex = (t) => String(t || "").length > 200 || /\([^)]*[+*][^)]*\)\s*[+*]/.test(String(t || ""));
 
+// Which files this run has actually opened, recorded where every read and search already passes through so it cannot
+// drift from what happened. A round's record was `{lens, at, confirmed, dryAfter}`: lens coverage tracked, file
+// coverage not tracked at all. So "no round ever opened src/roster.mjs" — the single most useful fact about five
+// dry rounds — was not on the run, was not in any event, and had to be recovered afterwards from the audit log.
+//
+// A LISTING and a whole-repository search are deliberately not coverage: neither says anything about a particular
+// file, and counting them would let a round call itself thorough for having typed `read_repo` with a blank title.
+export function noteRepoRead(run, file) {
+  if (!run || !file) return;
+  const f = String(file).trim().split("\\").join("/");
+  if (!f || f === "*" || f === "." || f.endsWith("/")) return;
+  (run.filesSeen = run.filesSeen || new Set()).add(f);
+}
+
+// What a round has NOT been near. Named rather than only counted, because a bare "77 of 87 unopened" is a number an
+// agent can acknowledge and ignore, while a list is something it can act on.
+export function repoCoverage(digest, seen) {
+  const all = (digest && digest.ok ? digest.entries : []).map((e) => e.file);
+  const looked = seen instanceof Set ? seen : new Set(seen || []);
+  const unseen = all.filter((f) => !looked.has(f));
+  return { total: all.length, seen: all.length - unseen.length, unseen };
+}
+
 // A MAP OF THE WHOLE REPOSITORY, given to a round before it starts groping.
 //
 // Four live rounds were spent file-by-file: list the repository, open the biggest file, discover it is truncated,
@@ -4349,16 +4385,33 @@ export async function repoDigest(repo, opts = {}) {
 
 // Rendered under a character budget. What does NOT fit is COUNTED and named as missing: a map that silently stops
 // is the same failure as a search that silently matches nothing, and this project has shipped that twice.
-export function digestText(d, cap = 8000) {
+export function digestText(d, cap = 8000, seen = null) {
   if (!d || !d.ok || !d.entries.length) return "";
+  // COVERAGE-FIRST ORDERING, for the same reason the lens register already orders lenses by it. Measured on this
+  // project: five rounds against one repository spent 41 of 50 searches inside src/server.mjs and never opened the
+  // file holding the planted defect. Nothing recorded which files had been opened, so nothing could say that —
+  // establishing it afterwards took a query against the audit log. Files nobody has opened sort first and files
+  // already read are marked, so "where has this round not been" is answerable from the map rather than from memory.
+  const looked = seen instanceof Set ? seen : new Set(seen || []);
+  const entries = looked.size
+    ? [...d.entries].sort((a, b) => (looked.has(a.file) ? 1 : 0) - (looked.has(b.file) ? 1 : 0))
+    : d.entries;
+  const unseen = d.entries.filter((e) => !looked.has(e.file)).length;
+  d = { ...d, entries };
   // TWO PARTS, and the split is the whole design. WHAT EXISTS is always complete: one line per file, every file,
   // because a partial inventory is exactly how an agent concludes something is absent when it simply was not shown.
   // The first version budgeted symbols first and rendered ten files of eighty-seven — a map that stopped at the
   // letter N while announcing itself as a map. Symbols are the OPTIONAL half and get whatever budget is left.
   const head = `A MAP OF THIS REPOSITORY, as it is right now. "(>read)" marks a file LARGER than one read returns —\n`
-    + `reading one of those gives you a PREFIX, so search it rather than concluding anything from what comes back.\n\n`
-    + `EVERY source file, with its size:\n`;
-  const index = d.entries.map((e) => `  ${e.file}  ${e.bytes.toLocaleString()}${e.big ? "  (>read)" : ""}`).join("\n") + "\n";
+    + `reading one of those gives you a PREFIX, so search it rather than concluding anything from what comes back.\n`
+    + (looked.size
+        ? `"(read)" marks a file this run has ALREADY opened; the ${unseen} without it are what nothing has looked at `
+          + `yet, and they are listed first. Reporting "nothing found" after opening ${looked.size} of `
+          + `${d.entries.length} files is a statement about ${looked.size} files.\n`
+        : "")
+    + `\nEVERY source file, with its size:\n`;
+  const index = d.entries.map((e) => `  ${e.file}  ${e.bytes.toLocaleString()}${e.big ? "  (>read)" : ""}`
+    + (looked.has(e.file) ? "  (read)" : "")).join("\n") + "\n";
   const out = [];
   let used = head.length + index.length, detailed = 0;
   for (const e of d.entries) {

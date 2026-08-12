@@ -1436,12 +1436,58 @@ Latch's 120-second timeout on the strength of one `ok=false`; raising `maxTokens
 original blanks were all exactly at the 4,000 cap. Both explanations were real, in different regimes, and the
 tell was a column I nearly did not print.
 
-### What this says to build next
+### The file-coverage ledger
 
-A round records `{ lens, at, confirmed, dryAfter }`. **Lens coverage is tracked; file coverage is not tracked at
-all** — nothing in Bureau knows that five rounds never opened `src/roster.mjs`, and the digest that lists all 87
-files has no idea which of them anyone has looked at. The lens register exists precisely because coverage beats
-exploitation when choosing what to try next; the same argument applies to files, and `emit(run, "repoRead", …)`
-is already the single choke point every read and search passes through.
+A round recorded `{ lens, at, confirmed, dryAfter }`. **Lens coverage was tracked; file coverage was not tracked at
+all** — so "no round ever opened `src/roster.mjs`", the single most useful fact about five dry rounds, was not on the
+run, not in any event, and had to be recovered from the audit log afterwards. The lens register already orders lenses
+by coverage because coverage beats exploitation; the same argument applies to files, and `emit(run, "repoRead", …)`
+was already the one choke point every read and search passes through.
+
+- **`noteRepoRead(run, file)`** records at that choke point. A directory listing, a whole-repository search and a
+  blank are deliberately *not* coverage — counting them would let a round call itself thorough for having typed
+  `read_repo` with an empty title, which is the move a dry round actually makes.
+- **The map is now rendered per round, not per run.** The repository is still *walked* once — that is the expensive
+  half — but what a round has opened changes between rounds, so a map rendered once cannot show it.
+- **Coverage-first ordering.** Unopened files sort above opened ones, opened ones are marked `(read)`, and the header
+  says the fraction: *"Reporting 'nothing found' after opening 5 of 87 files is a statement about 5 files."*
+- **The round record and a `coverage` event carry it**, and the event *names* what was never opened rather than only
+  counting it — a number is something a reader acknowledges, a list is something they act on.
+
+Two assertions had to change and the reason is worth keeping: `chk('runGated computes it once per run',
+src.includes('digest: digestText(dg0)'))` asserted the **rendering call verbatim**, so it failed on a change that left
+the property it names true. It now asserts the walk, with a control that there are exactly two `repoDigest(` calls in
+the file. Same proxy-assertion class this document records six other instances of.
+
+And the wiring is tested by driving the real loop, not by grepping for it: a worker opens one file in round one, and
+the test reads what round **two** is handed. `digestText` and `noteRepoRead` were both correct and unreachable from
+any prompt for the better part of an hour while being wired up, and a source grep would have passed throughout.
+
+Suite: **852 assertions**, 12 suites green.
+
+### The gate had been red for ten days and could not say why
+
+Four commits landed against a red CI while the notification said only *"All jobs have failed"*. Three separate
+instruments were blind at once:
+
+1. **`run-all.mjs` printed the last 25 lines of a failing suite.** The suites print one line per assertion — `units`
+   prints over eight hundred — so the tail is whatever ran last. A planted failure at line 83 of 1,999 was reported
+   as three consecutive ticks under the heading `SUITE(S) FAILED`. Now it filters for failure markers and falls back
+   to the tail only when none is found, which a crash or a syntax error needs.
+2. **The workflow forwarded those 25 lines**, so the annotation inherited the blindness.
+3. **The log needs a signed-in session with admin rights; an annotation does not.** Both repos now echo the failure
+   into an `::error::` annotation, which is how this was diagnosed at all.
+
+The failure itself: two assertions asserted **Windows path syntax as if it were universal**. On Linux `\` is an
+ordinary filename character and `C:` an ordinary directory name, so `src\..\..\..\secret` and `C:/Windows/win.ini`
+resolve to one strangely-named file *inside* the repo. They could not pass on the machine the gate runs on, and
+passed on the machine they were written on. Reproduced without a Linux box by running `repoPathSafe`'s own arithmetic
+against `path.posix`, which also settles the question that matters: **nothing escapes the repository on either
+platform.** This was a test asserting `path.sep`, not a security hole. The assertions now state the invariant and let
+the mechanism differ — refusal on win32, containment elsewhere.
+
+Found in the same file while chasing it: `chk("the temp dir is removable after stop()", !readdirSync(tmpdir()).includes(dir))`
+compared an **absolute path** against readdir's **basenames**, so the needle could never be in the list and the check
+could never fail. It now asserts the directory is gone, with a precondition that it was there first.
 
 Cumulative paid spend across the session: **~$9.32**.

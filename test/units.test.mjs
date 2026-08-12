@@ -17,7 +17,7 @@ import {
   turnBudgetWarning,
   executorProbeMs,
   repoPathSafe, readRepoFile, listRepoFiles, resolveRepoTarget, searchRepoFiles, repoOutline, markOutlineVisibility, repoReadReply,
-  looksLikeRegex, unsafeRegex, repoVocabulary, vocabularyText, collapseReads, repoDigest, digestText,
+  looksLikeRegex, unsafeRegex, repoVocabulary, vocabularyText, collapseReads, repoDigest, digestText, noteRepoRead, repoCoverage,
   normalizeQuestion, questionKey, recordQuestion, answerQuestion, systemPrompt, unqueuedAssumption, tierReason,
   blockerCandidates, falsifyBlocker, normalizeDeclinedCheck, recordDeclinedCheck, refuteMsgs,
   buildUndecidedMsgs, normalizeUndecided, unaddressedUndecided, runInvestigateFlag,
@@ -748,6 +748,34 @@ console.log("# investigate — the loop stops on EXHAUSTION, not on satisfaction
     eq("  while the barren ones record zero", [run.rounds[0].confirmed, run.rounds[2].confirmed], [0, 0]);
   }
   {
+    // THE WIRING, not the pieces. digestText and noteRepoRead are unit-tested elsewhere and were both correct while
+    // unreachable from any prompt for the better part of an hour; a source grep for the wiring would have passed the
+    // whole time. So this drives the real loop with a worker that opens one file, and reads what round TWO is handed.
+    const run = mkRun();
+    const mk = (f, b) => ({ file: f, bytes: b, symbols: [], more: false, big: false });
+    const digest = { ok: true, readCap: 12000, total: 3, shown: 3,
+                     entries: [mk("src/a.mjs", 10), mk("src/b.mjs", 20), mk("src/c.mjs", 30)] };
+    const objectives = [];
+    await investigate(run, async (obj) => {
+      objectives.push(obj);
+      if (objectives.length === 1) noteRepoRead(run, "src/a.mjs");   // round one opens exactly one file
+      return { tokens: 1 };
+    }, { dryLimit: 2, digest });
+
+    chk("  round one is handed a map with nothing marked as read", !objectives[0].includes("(read)"));
+    chk("  round two is handed a map that knows what round one opened", /src\/a\.mjs[^\n]*\(read\)/.test(objectives[1]));
+    chk("  and it orders the untouched files above the opened one",
+        objectives[1].indexOf("src/c.mjs") < objectives[1].indexOf("src/a.mjs"));
+    chk("  the round record carries coverage beside the lens",
+        run.rounds[1].filesSeen === 1 && run.rounds[1].filesTotal === 3);
+    chk("  and a coverage event NAMES what was never opened", run.events.some((e) => e.type === "coverage"
+        && e.data.seen === 1 && e.data.total === 3 && e.data.unseen.join(",") === "src/b.mjs,src/c.mjs"));
+    // The control: with no map there is nothing to be uncovered, and the loop must not invent a coverage claim.
+    const bare = mkRun();
+    await investigate(bare, async () => ({ tokens: 1 }), { dryLimit: 2 });
+    chk("  a run with no repository map reports no coverage at all", !bare.events.some((e) => e.type === "coverage"));
+  }
+  {
     // A stream of REFUSED claims must not keep the loop alive: only confirmed findings reset the counter, or an
     // over-confident critic bills forever while producing nothing.
     const run = mkRun();
@@ -1090,8 +1118,14 @@ console.log("# a round starts from the codebase's own names, not from convention
     // and route registrations. repoVocabulary/vocabularyText stay exported and tested above — still the right shape
     // for a names-only summary — but sending both would pay twice for the same information every turn.
     chk('  the round prompt carries the digest', src.includes('taxonomy = {}, digest = '));
-    chk('  runGated computes it once per run', src.includes('digest: digestText(dg0)'));
-    chk('  and so does hunt mode', src.includes('digest: digestText(dg)'));
+    // The property is that the repository is WALKED once per run — that is the expensive half, reading every file.
+    // RENDERING moved into the round loop when the map gained coverage-first ordering, because what a round has
+    // already opened changes between rounds and a map rendered once cannot show it. These two assertions named the
+    // rendering call verbatim, so they failed on that change while the property they describe stayed true. They now
+    // assert the walk, with a control that it does not happen per round; the ordering itself is covered for real below.
+    chk('  runGated walks the repository once per run', /const dg0 = await repoDigest\(/.test(src));
+    chk('  and so does hunt mode', /const dg = await repoDigest\(/.test(src));
+    chk('  and the walk is not repeated inside the round loop', (src.match(/await repoDigest\(/g) || []).length === 2);
     chk('  and the round no longer sends the vocabulary block as well',
         !src.includes('vocabulary: vocabularyText('));
     // The read cap was a mitigation for a 4,096-token LOCAL window; on a paid turn it cost ten searches
@@ -1154,6 +1188,42 @@ console.log("# investigate — the BODY of a read is capped, the OUTLINE never i
     chk('  built from the WHOLE file, not from the capped body', s2.includes('readRepoFile(repo, target, 400000)'));
     chk('  and it states the asymmetry both ways', s2.includes('it really is not declared here') && s2.includes('it exists even though you cannot see its body'));
   }
+}
+console.log("# the map puts what nobody has opened first, and says how much of the repo a round has not been near");
+{
+  // Five rounds against one repository spent 41 of 50 searches inside src/server.mjs and never opened the file
+  // holding the planted defect. A round's record was {lens, at, confirmed, dryAfter} — lens coverage tracked, file
+  // coverage not tracked at all — so that fact was not on the run, not in any event, and had to be recovered from
+  // the audit log afterwards. This is the missing half: record what was opened, order the map by it, say the number.
+  const mk = (f, bytes) => ({ file: f, bytes, symbols: [], more: false, big: false });
+  const d = { ok: true, readCap: 12000, total: 3, shown: 3, entries: [mk('src/a.mjs', 100), mk('src/b.mjs', 200), mk('src/c.mjs', 300)] };
+
+  const cold = digestText(d);
+  chk('  with nothing opened the map keeps its natural order', cold.indexOf('src/a.mjs') < cold.indexOf('src/c.mjs'));
+  chk('  and says nothing about coverage, because there is nothing to say', !cold.includes('(read)'));
+
+  const run = {};
+  noteRepoRead(run, 'src/a.mjs');
+  const warm = digestText(d, 8000, run.filesSeen);
+  chk('  an opened file is marked as opened', /src\/a\.mjs[^\n]*\(read\)/.test(warm));
+  chk('  and sinks BELOW the files nobody has opened', warm.indexOf('src/a.mjs') > warm.indexOf('src/c.mjs'));
+  chk('  the header states the coverage as a fraction', warm.includes('opening 1 of 3 files'));
+  chk('  and the unopened ones carry no marker', !/src\/b\.mjs[^\n]*\(read\)/.test(warm));
+  // The control that the ordering is doing something rather than the list happening to be in that order already.
+  chk('  every file is still listed — ordering, not filtering',
+      ['src/a.mjs', 'src/b.mjs', 'src/c.mjs'].every((f) => warm.includes(f)));
+
+  eq('  coverage counts what is left', repoCoverage(d, run.filesSeen).unseen, ['src/b.mjs', 'src/c.mjs']);
+  eq('  and with nothing opened, everything is left', repoCoverage(d, null).seen, 0);
+  eq('  with everything opened, nothing is', repoCoverage(d, new Set(['src/a.mjs', 'src/b.mjs', 'src/c.mjs'])).unseen, []);
+
+  // A LISTING and a whole-repository search are not coverage. Counting them would let a round call itself thorough
+  // for having typed read_repo with a blank title, which is exactly the move a dry round makes.
+  const r2 = {};
+  for (const junk of ['src/', '*', '.', '', null, undefined]) noteRepoRead(r2, junk);
+  eq('  a listing, a wildcard and a blank are not files opened', (r2.filesSeen ? r2.filesSeen.size : 0), 0);
+  noteRepoRead(r2, 'src' + String.fromCharCode(92) + 'w.mjs');
+  chk('  and a windows-shaped path is recorded under its posix name', r2.filesSeen.has('src/w.mjs'));
 }
 console.log("# a truncated read says WHICH declarations lost their body, not just that the file was cut");
 {
