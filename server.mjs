@@ -11,7 +11,7 @@
 // No dependencies. Node built-ins only.
 
 import { readFile, writeFile, mkdir, readdir, stat, rm, rename, realpath } from "node:fs/promises";
-import { openSync, closeSync, writeSync, existsSync, statSync, renameSync } from "node:fs";
+import { openSync, closeSync, writeSync, existsSync, statSync, renameSync, symlinkSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { createServer } from "node:http";
 import http from "node:http";
@@ -4584,6 +4584,25 @@ export async function withFindingIo(repo, fn) {
   const wt = path.join(base, "wt");
   const added = await run1("git", ["-C", repo, "worktree", "add", "-q", "--detach", wt, "HEAD"]);
   if (!added.ok) { await rm(base, { recursive: true, force: true }); return { ok: false, reason: `could not make a worktree of ${repo}: ${added.out.slice(0, 200)}` }; }
+
+  // A worktree has no node_modules, and for a project with devDependencies that makes the whole suite red for a
+  // reason that has nothing to do with the finding. Measured against 4water: a fresh worktree at HEAD fails
+  // test/a11y.test.mjs and test/css-audit.test.mjs outright, because jsdom and axe-core are not there.
+  //
+  // The damage is not that good findings get refused — it is worse and quieter. verifyFinding reads
+  // `obs.suiteBefore` and only applies the "this fix breaks the project's existing suite" guard when the suite was
+  // GREEN to begin with. A red-before suite therefore SKIPS that guard, and a fix that breaks the project sails
+  // through. The gate keeps reporting confirmations while its safety net is switched off.
+  //
+  // Linked, not copied — it is large and only read. Same fix, and the same reasoning, as the 4water repo's own
+  // tools/proseproof.mjs, which runs that suite in a worktree for a different purpose and hit this first. A
+  // FAILURE here is not fatal the way it is there: a project with no node_modules at all is the normal case for
+  // this gate, and the link simply has nothing to point at.
+  const modules = path.join(repo, "node_modules");
+  if (existsSync(modules)) {
+    try { symlinkSync(modules, path.join(wt, "node_modules"), process.platform === "win32" ? "junction" : "dir"); }
+    catch { /* best effort: a project whose suite needs them will fail loudly and legibly on the first check */ }
+  }
   const io2 = {
     // The check has already been shape-checked against FINDING_CHECK_ALLOW, so this splits on spaces safely: no
     // shell is involved, execFile takes an argv, and a chained command would have been refused before reaching here.

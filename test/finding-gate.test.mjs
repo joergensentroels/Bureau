@@ -38,6 +38,53 @@ function makeRepo() {
 const repo = makeRepo();
 const CHECK = "node --test test/v.test.mjs";
 try {
+  console.log("# a worktree carries the repo's node_modules, or every devDependency reads as a defect");
+  {
+    // A worktree has no node_modules. For a project with devDependencies that turns the WHOLE suite red for a
+    // reason unrelated to the finding — measured against 4water, whose a11y and css-audit tests cannot load jsdom
+    // or axe-core in a bare worktree.
+    //
+    // The damage is the quiet kind. verifyFinding applies its "this fix breaks the project's existing suite" guard
+    // only when `obs.suiteBefore` was TRUE, so a suite that was already red SKIPS that guard entirely: the gate goes
+    // on issuing confirmations with its safety net switched off. That is worse than refusing every finding, which
+    // is what it looks like from outside.
+    const dep = mkdtempSync(join(tmpdir(), "bureau-gate-dep-"));
+    mkdirSync(join(dep, "test"));
+    mkdirSync(join(dep, "node_modules"));
+    // A "dependency" the suite imports. If the link is missing, the import throws and the suite is red.
+    const LF = String.fromCharCode(10);
+    writeFileSync(join(dep, "node_modules", "dep.mjs"), "export const answer = 42;" + LF);
+    writeFileSync(join(dep, "test", "d.test.mjs"),
+      'import { answer } from "../node_modules/dep.mjs";' + LF
+      + "if (answer !== 42) process.exit(1);" + LF);
+    writeFileSync(join(dep, "package.json"),
+      JSON.stringify({ name: "dep-fixture", private: true, type: "module", scripts: { test: "node --test test/d.test.mjs" } }, null, 2) + LF);
+    // Ignored, exactly as a real project does. Without this, `git add -A` COMMITS node_modules, the worktree gets
+    // it from git rather than from the link, and the assertion below passes whether or not the fix exists. The
+    // precondition caught precisely that on the first run.
+    writeFileSync(join(dep, ".gitignore"), "node_modules/" + LF);
+    git(dep, "init", "-q");
+    git(dep, "config", "user.email", "gate@example.invalid");
+    git(dep, "config", "user.name", "gate");
+    git(dep, "add", "-A");
+    git(dep, "commit", "-q", "-m", "fixture whose suite needs a dependency");
+    // node_modules is NOT committed — that is the whole point, and it is why a worktree at HEAD lacks it.
+    chk("  precondition: the dependency is untracked, so a worktree at HEAD cannot have it",
+        git(dep, "ls-files").indexOf("node_modules") === -1);
+
+    const out = await withFindingIo(dep, async (io) => (await io.suite()).ok);
+    chk("  the suite passes in the worktree, because node_modules was linked in", out.ok && out.result === true);
+    rmSync(dep, { recursive: true, force: true });
+  }
+
+  console.log("# a repo with no node_modules at all is still fine — the link is best-effort");
+  {
+    // The control. If the link were required rather than best-effort, every dependency-free project (this one
+    // included) would stop being verifiable, and the fix would have traded one broken case for a broader one.
+    const out = await withFindingIo(repo, async (io) => (await io.sh("node --test test/v.test.mjs")).ok);
+    chk("  a repo without node_modules still runs its checks", out.ok && out.result === false);
+  }
+
   console.log("# the courtroom exists — a worktree is made, used, and removed");
   {
     let sawWorktree = false;
