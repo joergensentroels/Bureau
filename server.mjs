@@ -251,6 +251,40 @@ const tierOf = (a) => PAID_TIERS[a?.modelTier] || PAID_TIERS[DEFAULT_TIER];
 const priceForModel = (model, fallbackTier) =>
   (Object.values(PAID_TIERS).find((t) => t.model === model) || fallbackTier).pricePer1K;
 
+// Published per-1,000,000-token rates, split the way providers actually bill: cache-miss input, cached input and
+// output are three different prices, and the ratios between them differ by two orders of magnitude across
+// providers. A flat blended rate cannot express that, and the error is not small.
+//
+// Measured on one identical hunt round. Kimi spent 3,920 output tokens against DeepSeek Flash's 1,897, and cached
+// 68% of its prompt against DeepSeek's 91% — and output is the expensive half everywhere:
+//
+//                       real cost    Bureau's flat rate     error
+//   kimi-k2.6           $0.019442    $0.025978              1.3x
+//   deepseek-v4-flash   $0.000670    $0.022834             34.1x
+//
+// The flat rate therefore reported DeepSeek as 1.14x cheaper than Kimi when the invoice says 29x. That number is
+// not only shown to the operator: canUsePaid() gates on it, so an agent given budgetUsd $3 on DeepSeek was cut off
+// after about $0.09 of real spend, having been told it had spent $3.
+//
+// Rates verified August 2026. A model absent here keeps the old flat behaviour rather than an invented rate.
+const MODEL_RATES = {
+  "kimi-k2.6":         { miss: 0.95,  cached: 0.16,     out: 4.00 },
+  "kimi-k2.7-code":    { miss: 0.95,  cached: 0.16,     out: 4.00 },
+  "deepseek-v4-flash": { miss: 0.14,  cached: 0.0028,   out: 0.28 },
+  "deepseek-v4-pro":   { miss: 0.435, cached: 0.003625, out: 0.87 },
+};
+
+// What one call cost. Falls back to the flat blended rate whenever the split is unusable — an unlisted model, or a
+// provider that reported no usage breakdown — because being approximately right beats charging nothing.
+export function callCostUsd(split, model, fallbackTier) {
+  const r = MODEL_RATES[model];
+  const flat = ((split?.total || 0) / 1000) * priceForModel(model, fallbackTier);
+  if (!r || !split || split.input == null || split.output == null) return flat;
+  const cached = split.cached || 0;
+  const miss = Math.max(0, split.input - cached);   // `input` counts ALL prompt tokens, `cached` is a subset of it
+  return (miss * r.miss + cached * r.cached + split.output * r.out) / 1e6;
+}
+
 // ---- Autonomy tiers (per-agent) ----
 // How much an agent may do WITHOUT the CEO approving each action. Everything is clamped by the
 // HARD FLOOR below, which no tier can cross.
@@ -2148,10 +2182,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
       const split = usageSplit(meta.usage, callTokens);
       const paidTokens = split.total;
       paidTokensThisRun += paidTokens;
-      paidThisRun += (paidTokens / 1000) * priceForModel(meta.model, paidTier);
-      // Recorded but NOT yet priced by. PAID_TIERS still charges one flat rate for input and output, so changing
-      // the money here would be a silent repricing of every run; this only makes the mix visible, which is what a
-      // provider comparison needs and what a total cannot give.
+      paidThisRun += callCostUsd(split, meta.model, paidTier);
       run.paidUsage = addUsage(run.paidUsage, split);
       run.ranPaid = true;
     }

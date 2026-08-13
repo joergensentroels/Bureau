@@ -11,7 +11,7 @@ import {
   objectiveSignature, dedupeMemories, deliverableEmbedText, deliverableTitle,
   chunkDocument, deliverableChunks, modelUnreachable, trimVersions, clientKey, isLoopback,
   startLogTee, webhookBody,
-  normalizeFinding, verifyFinding, findingCheckAllowed, npmArgv, agentMayRun, usageSplit, addUsage, tierModelToSend,
+  normalizeFinding, verifyFinding, findingCheckAllowed, npmArgv, agentMayRun, usageSplit, addUsage, tierModelToSend, callCostUsd,
   LENSES, pickLens, investigateObjective, investigate, seedLenses, activeLenses, bookLensRound,
   normalizeLens, lensParaphrase, addProposedLens, lensProposalObjective, sigWords, postReadGuidance,
   turnBudgetWarning,
@@ -1260,6 +1260,33 @@ console.log("# a tier's model is an override, and only when the provider actuall
   eq('  no tier model means no model, not undefined', tierModelToSend("", "deepseek-v4-flash"), "");
   chk('  and the empty result is falsy, which is what the send site spreads on',
       !tierModelToSend("kimi-k2.6", "deepseek-v4-flash"));
+}
+console.log("# a paid call is priced by its token split, not by one blended rate");
+{
+  // Both rows are the SAME hunt round on the same tiny repository, measured through Bureau's own usage split.
+  const kimi = { total: 12989, input: 9069, cached: 6144, output: 3920, reasoning: 3546, estimated: false };
+  const deep = { total: 11417, input: 9520, cached: 8704, output: 1897, reasoning: 1507, estimated: false };
+  const tier = { model: "kimi-k2.6", pricePer1K: 0.002 };
+  const near = (a, b) => Math.abs(a - b) < 5e-7;
+
+  const k = callCostUsd(kimi, "kimi-k2.6", tier);
+  const d = callCostUsd(deep, "deepseek-v4-flash", tier);
+  chk('  kimi round costs $0.019442 (2925 miss + 6144 cached + 3920 out)', near(k, 0.019442));
+  chk('  deepseek round costs $0.000670', near(d, 0.00066977));
+
+  // The whole point: the flat rate said 1.14x and the invoice says 29x. If pricing ever regresses to flat, this
+  // ratio collapses and the assertion fails — which is the only reason the two numbers above are worth having.
+  chk('  and deepseek comes out ~29x cheaper, not ~1.1x', k / d > 25 && k / d < 33);
+  const flatK = (kimi.total / 1000) * 0.002, flatD = (deep.total / 1000) * 0.002;
+  chk('  the control: the flat rate really would have said ~1.1x', flatK / flatD > 1.1 && flatK / flatD < 1.2);
+
+  // Fallbacks. Neither invents a rate.
+  eq('  an unlisted model keeps the old flat behaviour',
+     callCostUsd({ total: 10000, input: 8000, cached: 0, output: 2000 }, "kimi-k3", { model: "kimi-k3", pricePer1K: 0.006 }), 0.06);
+  eq('  a provider that reported no split is charged flat on the estimate',
+     callCostUsd({ total: 10000, input: null, output: null, estimated: true }, "deepseek-v4-flash", tier), 0.02);
+  chk('  cached tokens exceeding input never produce a negative charge',
+      callCostUsd({ total: 100, input: 10, cached: 999, output: 0 }, "deepseek-v4-flash", tier) >= 0);
 }
 console.log("# a hunt refuses at the START if its agent cannot read the repository");
 {
