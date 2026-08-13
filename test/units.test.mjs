@@ -11,7 +11,7 @@ import {
   objectiveSignature, dedupeMemories, deliverableEmbedText, deliverableTitle,
   chunkDocument, deliverableChunks, modelUnreachable, trimVersions, clientKey, isLoopback,
   startLogTee, webhookBody,
-  normalizeFinding, verifyFinding, findingCheckAllowed, npmArgv, agentMayRun,
+  normalizeFinding, verifyFinding, findingCheckAllowed, npmArgv, agentMayRun, usageSplit, addUsage,
   LENSES, pickLens, investigateObjective, investigate, seedLenses, activeLenses, bookLensRound,
   normalizeLens, lensParaphrase, addProposedLens, lensProposalObjective, sigWords, postReadGuidance,
   turnBudgetWarning,
@@ -1204,6 +1204,44 @@ console.log("# investigate — the BODY of a read is capped, the OUTLINE never i
     chk('  built from the WHOLE file, not from the capped body', s2.includes('readRepoFile(repo, target, 400000)'));
     chk('  and it states the asymmetry both ways', s2.includes('it really is not declared here') && s2.includes('it exists even though you cannot see its body'));
   }
+}
+console.log("# the token SPLIT is recorded, and an unreported field is not zero");
+{
+  // Only total_tokens was kept, which was fine while PAID_TIERS charged one flat rate for input and output. It
+  // stops being fine against a provider that prices them differently -- Kimi K2.6 is $0.95/M in against $4.00/M
+  // out, DeepSeek V4-Flash $0.14 against $0.28 -- because a total cannot be turned into money without the mix.
+  //
+  // This is the exact shape Moonshot returns, copied from a live call rather than imagined.
+  const REAL = { prompt_tokens: 14, completion_tokens: 16, total_tokens: 30, cached_tokens: 14,
+                 completion_tokens_details: { reasoning_tokens: 15 },
+                 prompt_tokens_details: { cached_tokens: 14 } };
+  const s1 = usageSplit(REAL);
+  eq('  input, output and total come straight through', [s1.input, s1.output, s1.total], [14, 16, 30]);
+  eq('  cached comes from the NESTED field, which is the one actually sent', s1.cached, 14);
+  eq('  reasoning tokens are billed as output and are invisible in the reply text', s1.reasoning, 15);
+  chk('  and it is not marked estimated', s1.estimated === false);
+
+  // UNKNOWN IS NOT ZERO. A provider that reports nothing must not read as a run that used no input.
+  const s2 = usageSplit(null, 4321);
+  eq('  with no usage at all the total falls back to the estimate', s2.total, 4321);
+  eq('  and every unreported field is null, not 0', [s2.input, s2.output, s2.cached, s2.reasoning], [null, null, null, null]);
+  chk('  and the call is flagged as estimated', s2.estimated === true);
+  // A provider that reports the total but no breakdown: the total is real, the split is still unknown.
+  const s3 = usageSplit({ total_tokens: 100 });
+  eq('  a total without a breakdown keeps the total and admits the rest', [s3.total, s3.input, s3.output], [100, null, null]);
+
+  // Accumulating must COUNT what it examined, or a partial sum reads as a whole-run measurement.
+  let acc = null;
+  acc = addUsage(acc, usageSplit(REAL));
+  acc = addUsage(acc, usageSplit(null, 1000));           // this call reported nothing
+  acc = addUsage(acc, usageSplit({ total_tokens: 50, prompt_tokens: 40 }));
+  eq('  totals add up across calls', [acc.calls, acc.total], [3, 1080]);
+  eq('  input sums only the calls that reported it, and says how many', [acc.input, acc.inputCalls], [54, 2]);
+  eq('  output likewise', [acc.output, acc.outputCalls], [16, 1]);
+  chk('  and the estimated calls are counted separately', acc.estimatedCalls === 1);
+  // The control: without the per-field counts, 54 input tokens over 3 calls would read as the whole run's input.
+  chk('  the counts make a partial measurement legible rather than confident',
+      acc.inputCalls < acc.calls && acc.outputCalls < acc.calls);
 }
 console.log("# a hunt refuses at the START if its agent cannot read the repository");
 {

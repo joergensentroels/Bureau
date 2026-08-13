@@ -1240,6 +1240,51 @@ export function safeParse(text) {
 }
 const estTokens = (msgs) => Math.ceil(msgs.reduce((n, m) => n + String(m.content || "").length, 0) / 4);
 
+// The token SPLIT, not just the total.
+//
+// Only `total_tokens` was kept, which was harmless while every token cost the same: PAID_TIERS prices input and
+// output at one flat rate. It stops being harmless the moment a provider prices them differently — Kimi K2.6 is
+// $0.95/M in against $4.00/M out, DeepSeek V4-Flash $0.14 against $0.28 — because a total cannot be turned into
+// money without knowing the mix. Comparing two providers on a total compares nothing.
+//
+// Cached input matters as much. Moonshot already serves repeats from cache at roughly a sixth of the miss price,
+// and this system re-sends its history every turn, so the cached share is a large part of the real bill. Reasoning
+// tokens are billed as output and are invisible in the reply text: one call in the judgement A/B spent 4,000 of
+// them and returned an empty string.
+//
+// UNKNOWN IS NOT ZERO. A provider that omits a field gets `null`, never 0, and addUsage records how many calls
+// actually reported each one. Summing nulls as zeros yields a confident understatement — the exact shape of
+// readout this project has already been caught by twice.
+export function usageSplit(usage, fallbackTotal = 0) {
+  const n = (v) => (Number.isFinite(v) ? v : null);
+  if (!usage) return { total: fallbackTotal, input: null, output: null, cached: null, reasoning: null, estimated: true };
+  const total = n(usage.total_tokens);
+  return {
+    total: total ?? fallbackTotal,
+    input: n(usage.prompt_tokens),
+    output: n(usage.completion_tokens),
+    // Both spellings occur; the nested one is what Moonshot actually sends.
+    cached: n(usage.prompt_tokens_details?.cached_tokens) ?? n(usage.cached_tokens),
+    reasoning: n(usage.completion_tokens_details?.reasoning_tokens),
+    estimated: total == null,
+  };
+}
+
+// Accumulate a split across a run, tracking HOW MANY calls reported each field. Without those counts, a sum over
+// partially-reported fields reads as a complete measurement of the whole run.
+export function addUsage(acc, split) {
+  const a = acc || {};
+  a.calls = (a.calls || 0) + 1;
+  a.total = (a.total || 0) + (split.total || 0);
+  if (split.estimated) a.estimatedCalls = (a.estimatedCalls || 0) + 1;
+  for (const k of ["input", "output", "cached", "reasoning"]) {
+    if (split[k] == null) continue;
+    a[k] = (a[k] || 0) + split[k];
+    a[`${k}Calls`] = (a[`${k}Calls`] || 0) + 1;
+  }
+  return a;
+}
+
 // The local model is unreliable at picking the right action/field: it confuses query-vs-URL,
 // over-uses "other"/"note", and puts the document/URL/query in the wrong place. This heuristic
 // "do what they meant" layer corrects the common mistakes before dispatch — no extra model call.
@@ -2095,9 +2140,14 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
     if (meta.paid) {
       // Latch really served this turn from the paid provider. Prefer the provider's reported total
       // usage (real money) over our estimate; price by the model that actually served it.
-      const paidTokens = meta.usage?.total_tokens || callTokens;
+      const split = usageSplit(meta.usage, callTokens);
+      const paidTokens = split.total;
       paidTokensThisRun += paidTokens;
       paidThisRun += (paidTokens / 1000) * priceForModel(meta.model, paidTier);
+      // Recorded but NOT yet priced by. PAID_TIERS still charges one flat rate for input and output, so changing
+      // the money here would be a silent repricing of every run; this only makes the mix visible, which is what a
+      // provider comparison needs and what a total cannot give.
+      run.paidUsage = addUsage(run.paidUsage, split);
       run.ranPaid = true;
     }
 
@@ -2899,7 +2949,7 @@ async function runHunt(run) {
     { agent: agent.name, hush: run.hush, hunt: true, verdict, findings: (run.findings || []).length, refused: (run.rejectedFindings || []).length, rounds: (run.rounds || []).length },
     tally, run.memoryEntries, run.paidTally);
   const paidSpentUsd = Math.round(Object.values(run.paidTally || {}).reduce((s, v) => s + v, 0) * 1e6) / 1e6;
-  emit(run, "budget", { runTokens: tokens, totalTokens: b.tokens, ranPaid: !!run.ranPaid, paidTokens: run.paidTokens || 0, orchPaidTokens: run.orchPaidTokens || 0, paidSpentUsd });
+  emit(run, "budget", { runTokens: tokens, totalTokens: b.tokens, ranPaid: !!run.ranPaid, paidTokens: run.paidTokens || 0, orchPaidTokens: run.orchPaidTokens || 0, paidSpentUsd, usage: run.paidUsage || null });
   logAudit({ kind: "run", runId: run.id, agent: agent.name, objective: run.objective || `hunt: ${repo}`,
     tokens, costUsd: paidSpentUsd || 0, verdict, met: (run.findings || []).length, unmet: 0, total: (run.rounds || []).length,
     decision: run.autoApprove ? "auto" : "you" });
@@ -3514,7 +3564,7 @@ async function runGated(run, worker, persistExtra, perAgentTally, soloWorker = n
   }
   const b = await persistRun(run.objective, tokens, { ...persistExtra, criteria: run.criteria, unmet: unmet.length, verdict }, perAgentTally, run.memoryEntries, run.paidTally);
   const paidSpentUsd = Math.round(Object.values(run.paidTally || {}).reduce((s, v) => s + v, 0) * 1e6) / 1e6;
-  emit(run, "budget", { runTokens: tokens, totalTokens: b.tokens, ranPaid: !!run.ranPaid, paidTokens: run.paidTokens || 0, orchPaidTokens: run.orchPaidTokens || 0, paidSpentUsd });
+  emit(run, "budget", { runTokens: tokens, totalTokens: b.tokens, ranPaid: !!run.ranPaid, paidTokens: run.paidTokens || 0, orchPaidTokens: run.orchPaidTokens || 0, paidSpentUsd, usage: run.paidUsage || null });
   logAudit({ kind: "run", runId: run.id, agent: persistExtra.agent || "", objective: run.objective,
     tokens, costUsd: paidSpentUsd || 0, verdict, met, unmet: unmet.length, total: run.criteria.length,
     decision: run.autoApprove ? "auto" : "you" });
