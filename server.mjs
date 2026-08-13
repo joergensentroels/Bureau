@@ -2069,6 +2069,8 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
   const budgetUsd = Number(agent.budgetUsd) || 0;
   const startPaidSpent = Number(agent.paidSpentUsd) || 0;
   const paidTier = tierOf(agent);   // which paid model this agent uses (its "seniority") + its price — NOT the autonomy `tier` used further down
+  // What will ACTUALLY be sent, resolved here so the tier line below announces it rather than the catalogue name.
+  const sendModel = tierModelToSend(paidTier.model, run.paidModel);
   let paidThisRun = 0, paidTokensThisRun = 0;
     {
       // Said once per agent task, before any model call, so an unexpected tier is visible rather than deduced.
@@ -2077,7 +2079,10 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
       // "Cannot access 'paidTier' before initialization" on EVERY agent turn. The test that covered this asserted
       // the line's text was present, which it always was.
       const t = tierReason({ paidAvailable: run.paidAvailable, hush: run.hush, budgetUsd, paidSpent: startPaidSpent + paidThisRun, phase: run.phase });
-      emit(run, "tier", { agent: who, depth, tier: t.tier, reason: t.reason, model: t.tier === "paid" ? (paidTier.model || "") : "" });
+      emit(run, "tier", { agent: who, depth, tier: t.tier, reason: t.reason,
+        model: t.tier === "paid" ? (sendModel || run.paidModel || paidTier.model || "") : "",
+        // True when the operator's provider does not serve this tier's model, so the tier is a price label only.
+        tierModelOverridden: t.tier === "paid" && !!paidTier.model && !sendModel });
     }
   const canUsePaid = () => run.paidAvailable && !run.hush && budgetUsd > 0 && (startPaidSpent + paidThisRun) < budgetUsd
     && (!run.maxPaidUsd || runPaidTotal(run) < run.maxPaidUsd);   // server-side per-run paid ceiling (guardrails.maxPaidUsdPerRun)
@@ -2121,7 +2126,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
     // Collapsed ONCE per turn and used for both the call and the cost estimate, so the estimate reflects what was
     // actually sent rather than what the history holds.
     const sendable = collapseReads(history);
-    const ask = (maxTokens) => askLlm(sendable, { maxTokens, routingPreference: usePaid ? "external" : "local", ...(usePaid && paidTier.model ? { model: paidTier.model } : {}), meta });
+    const ask = (maxTokens) => askLlm(sendable, { maxTokens, routingPreference: usePaid ? "external" : "local", ...(usePaid && sendModel ? { model: sendModel } : {}), meta });
     try {
       raw = await ask(1000);
       // A reasoning model can spend the whole output budget thinking and return nothing at all — measured at 699/700
@@ -2879,6 +2884,24 @@ export async function paidProviderAvailable() {
   try { const h = await latchHealth(); return !!(h.ok && h.paid); } catch { return false; }
 }
 
+// Which model name to actually SEND, given a tier's choice and what the operator has configured.
+//
+// PAID_TIERS is a Kimi catalogue, and sending one of its names to a provider that does not serve it is a hard
+// error rather than a graceful fallback. Measured the first time a non-Kimi provider was configured: Latch
+// reported the fallback as deepseek-v4-flash, Bureau announced "TIER: paid · kimi-k2.6", sent that name, and
+// DeepSeek answered "The supported API model names are deepseek-v4-pro or deepseek-v4-flash, but you passed
+// kimi-k2.6". The turn died, the run spent $0, and the tier event had already claimed it was running paid.
+//
+// So a tier's model is an OVERRIDE, valid only when the configured provider really serves it. Otherwise send
+// nothing and let Latch use the model the operator chose — which is the one that will work.
+export const tierModelToSend = (tierModel, configuredModel) =>
+  (tierModel && configuredModel && tierModel !== configuredModel) ? "" : (tierModel || "");
+
+// What the configured paid provider actually serves, or "" if Latch reports none.
+export async function configuredPaidModel() {
+  try { const h = await latchHealth(); return (h.ok && h.paid && h.paid.model) || ""; } catch { return ""; }
+}
+
 // mode "hunt": the investigate phase on its own. No criteria, no construction, no deliverable — one agent, the
 // company's lens register, and the repository the operator configured. Nothing here can be reached without that repo:
 // with no repo a claim cannot be verified, and an unverifiable hunting round is only a way to spend money on guesses.
@@ -2902,7 +2925,7 @@ async function runHunt(run) {
       + `— a hunt without repository access cannot produce a verifiable finding.`, { agent: agent.name });
   }
   emit(run, "start", { agent: agent.name, role: agent.role, objective: run.objective || `hunt for defects in ${repo}`, hush: run.hush });
-  run.memoryEntries = []; run.producedFiles = []; run.paidAvailable = await paidProviderAvailable();
+  run.memoryEntries = []; run.producedFiles = []; run.paidAvailable = await paidProviderAvailable(); run.paidModel = await configuredPaidModel();
   run.maxPaidUsd = Number(org.guardrails?.maxPaidUsdPerRun) || 0;
   org._mcpTools = await loadMcpTools();
   run.orch = { payerId: agent.id, budgetUsd: Number(agent.budgetUsd) || 0, startPaidSpent: Number(agent.paidSpentUsd) || 0 };
@@ -2962,7 +2985,7 @@ async function runSingle(run) {
   const agent = org.agents.find((a) => a.id === run.agentId);
   if (!agent) return failRun(run, `no agent with id "${run.agentId}" — it may have been deleted since this run was scheduled`);
   emit(run, "start", { agent: agent.name, role: agent.role, objective: run.objective, hush: run.hush });
-  run.memoryEntries = []; run.producedFiles = []; run.paidAvailable = await paidProviderAvailable();
+  run.memoryEntries = []; run.producedFiles = []; run.paidAvailable = await paidProviderAvailable(); run.paidModel = await configuredPaidModel();
   run.maxPaidUsd = Number(org.guardrails?.maxPaidUsdPerRun) || 0;   // server-side per-run paid ceiling (0 = unlimited)
   org._mcpTools = await loadMcpTools();   // external MCP tools the agent may call this run (empty if unconfigured)
   // The single agent funds the JSON-critical orchestration calls (deriveCriteria/verifyRun) for its run.
@@ -3595,7 +3618,7 @@ async function runDelegation(run) {
   const topReports = roots.length ? roots : org.agents;
   const tally = {};
   run.perAgentTally = tally;   // visible on the run so failRun can still book what was consumed
-  run.memoryEntries = []; run.producedFiles = []; run.paidAvailable = await paidProviderAvailable();
+  run.memoryEntries = []; run.producedFiles = []; run.paidAvailable = await paidProviderAvailable(); run.paidModel = await configuredPaidModel();
   run.maxPaidUsd = Number(org.guardrails?.maxPaidUsdPerRun) || 0;   // server-side per-run paid ceiling (0 = unlimited)
   org._mcpTools = await loadMcpTools();   // external MCP tools agents may call this run (empty if unconfigured)
   // The CEO (first root agent) funds the JSON-critical orchestration for the whole delegation tree —

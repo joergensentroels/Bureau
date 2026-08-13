@@ -11,7 +11,7 @@ import {
   objectiveSignature, dedupeMemories, deliverableEmbedText, deliverableTitle,
   chunkDocument, deliverableChunks, modelUnreachable, trimVersions, clientKey, isLoopback,
   startLogTee, webhookBody,
-  normalizeFinding, verifyFinding, findingCheckAllowed, npmArgv, agentMayRun, usageSplit, addUsage,
+  normalizeFinding, verifyFinding, findingCheckAllowed, npmArgv, agentMayRun, usageSplit, addUsage, tierModelToSend,
   LENSES, pickLens, investigateObjective, investigate, seedLenses, activeLenses, bookLensRound,
   normalizeLens, lensParaphrase, addProposedLens, lensProposalObjective, sigWords, postReadGuidance,
   turnBudgetWarning,
@@ -1242,6 +1242,24 @@ console.log("# the token SPLIT is recorded, and an unreported field is not zero"
   // The control: without the per-field counts, 54 input tokens over 3 calls would read as the whole run's input.
   chk('  the counts make a partial measurement legible rather than confident',
       acc.inputCalls < acc.calls && acc.outputCalls < acc.calls);
+}
+console.log("# a tier's model is an override, and only when the provider actually serves it");
+{
+  // Measured the first time a non-Kimi provider was configured. Latch's fallback was deepseek-v4-flash; Bureau
+  // announced "TIER: paid · kimi-k2.6", sent that name, and DeepSeek answered "The supported API model names are
+  // deepseek-v4-pro or deepseek-v4-flash, but you passed kimi-k2.6". Every turn died, the run finished with $0
+  // spent and no findings, and the tier event had already said "paid" — so the failure looked like "paid was
+  // never available" rather than "Bureau overrode the operator's model with one that does not exist here".
+  eq('  a model the provider does not serve is not sent at all',
+     tierModelToSend("kimi-k2.6", "deepseek-v4-flash"), "");
+  eq('  a model the provider does serve is sent, so tiers still work on Kimi',
+     tierModelToSend("kimi-k2.6", "kimi-k2.6"), "kimi-k2.6");
+  // The control. If it returned "" whenever the names differ INCLUDING when nothing is configured, the tier
+  // catalogue would be silently dead for every operator whose Latch build predates the model field.
+  eq('  an unknown configured model leaves the tier choice alone', tierModelToSend("kimi-k2.6", ""), "kimi-k2.6");
+  eq('  no tier model means no model, not undefined', tierModelToSend("", "deepseek-v4-flash"), "");
+  chk('  and the empty result is falsy, which is what the send site spreads on',
+      !tierModelToSend("kimi-k2.6", "deepseek-v4-flash"));
 }
 console.log("# a hunt refuses at the START if its agent cannot read the repository");
 {
