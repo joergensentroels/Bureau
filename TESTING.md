@@ -1552,6 +1552,39 @@ whole time — which is why the audit rows say `ws: default`, and why "a fresh w
 happened. The only workspaces that have ever existed here are `default`, `4water-scheduling-739c` and
 `hunt-funded-9e60`._
 
+### The comparison, finally valid — and the marking shows no effect
+
+Third attempt. The first two died on setup rather than on the question, so this one proves its preconditions before
+spending, and every proof can fail: workspaces **created** and their server-assigned ids captured; an unknown
+workspace still answering **400**; a **canary** written to one arm and read back absent from the other; the arms
+asserted to still differ *after both setups* — the check attempt two lacked; one lens of eight enabled, read back
+through `off` rather than `enabled`, which returns 200 and does nothing; and `read_repo` confirmed in the allow list.
+The harness also declares its own verdict void if the lens varies, instead of leaving that to a reader.
+
+`VALID — one lens throughout both arms.`
+
+| | round 1 | round 2 | covered by the end |
+|---|---|---|---|
+| **A — marking ON** | 16 actions, 6 targets, **63%** on `src/server.mjs` | 14 actions, 5 targets, **29%** | 6 → **9** of 87 |
+| **B — marking OFF** | 19 actions, 6 targets, **68%** on `src/server.mjs` | 16 actions, 8 targets, **50%** | 5 → **11** of 87 |
+
+Round one is the internal check: neither arm has any marking yet, and they behave alike (63% vs 68%). That is what
+makes the arms comparable, and it is the claim the previous two attempts could not make.
+
+**The marking shows no measurable effect, and the two signals point opposite ways.** Round two is less concentrated
+on `src/server.mjs` with the marking on (29% vs 50%) — and the *control* covered more of the repository (11 files
+vs 9) and reached more new targets (6 vs 4). One run per arm cannot separate either difference from run-to-run
+variance. **Neither arm found the planted defect, and neither opened `src/roster.mjs`.**
+
+So the ledger is verified as an instrument — it records accurately, the map re-renders per round, the switch works
+in both directions — and **unproven as an intervention**. Settling it needs repetition, roughly five runs per arm at
+about $1.15 each, and that is a spending decision rather than a technical one. Recorded as unproven rather than
+quietly dropped, because a mechanism that is built, tested and ineffective is the easiest kind to keep believing in.
+
+_Cost of the three attempts: $0.36 (agent could not read the repo), $1.40 (both arms were the same company), $2.28
+(valid). The first two bought defects rather than an answer — the read_repo pre-flight and the workspace 400 — which
+is a fair trade, but they were not what the money was for._
+
 ### The gate had been red for ten days and could not say why
 
 Four commits landed against a red CI while the notification said only *"All jobs have failed"*. Three separate
@@ -1577,4 +1610,4 @@ Found in the same file while chasing it: `chk("the temp dir is removable after s
 compared an **absolute path** against readdir's **basenames**, so the needle could never be in the list and the check
 could never fail. It now asserts the directory is gone, with a precondition that it was there first.
 
-Cumulative paid spend across the session: **~$12.51** (the hunting attempts above cost $0.36, $1.22 and $1.40).
+Cumulative paid spend across the session: **~$14.79** (the hunting attempts cost $0.36, $1.22, $1.40 and $2.28).
