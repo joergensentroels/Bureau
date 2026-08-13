@@ -34,6 +34,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const b = (await api("POST", "/api/workspaces", { name: "Test Beta" })).j;
   ok(a.id && b.id && a.id !== b.id, "two workspaces created with distinct ids");
 
+  // A LAST-RESORT sweep. The deletes further down are assertions ABOUT the delete endpoint and stay where they
+  // are; this is the net for everything above them throwing first. It has fired for real: a change made an
+  // assertion near the top throw, the run died before reaching those deletes, and two companies sat in the
+  // registry afterwards with nothing in the output to say so. Same lesson as the proseproof worktree leak in
+  // tools/proseproof.mjs — cleanup that has never been watched is not cleanup.
+  const sweep = async () => {
+    for (const w of [a, b]) {
+      if (!w || !w.id) continue;
+      try { await api("DELETE", "/api/workspaces/" + w.id); } catch { /* already gone, or the server is down */ }
+    }
+  };
+  try {
+
   ok((await orgOf(a.id)).agents.length === 0, "new workspace A starts empty");
   ok((await orgOf(b.id)).agents.length === 0, "new workspace B starts empty");
 
@@ -149,14 +162,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await api("DELETE", "/api/workspaces/" + b.id);
   const list = (await api("GET", "/api/workspaces")).j.workspaces.map((w) => w.id);
   ok(!list.includes(a.id) && !list.includes(b.id), "both throwaway workspaces removed from the registry");
-  // Can't be asserted by querying the deleted id — that falls back to `default` (see the assertion
-  // above), so it would read the default workspace's rows. The delete reports its own sweep instead.
+  // Can't be asserted by querying the deleted id — that is a 400 now, because the id names a workspace that no
+  // longer exists; before the guard it fell back to `default` and would have read the default company's rows.
+  // Either way the deleted id cannot answer for itself, so the delete reports its own sweep instead.
   ok(delA.j.removed && typeof delA.j.removed.embeddingRows === "number", "delete reports embedding rows swept (this table was silently exempt before)");
   ok(delA.j.removed && typeof delA.j.removed.auditRows === "number", "delete reports audit rows swept");
   ok((await api("DELETE", "/api/workspaces/default")).status === 400, "the default workspace cannot be deleted");
 
   const end = await orgOf("default");
   ok(end.agents.length === dAgents && (end.policies || []).length === dPolicies, "default fully intact at the end");
+
+  // The sweep must run whether the body above passed, failed an assertion, or threw. It is idempotent: the
+  // deletes above have usually already removed both, and a second DELETE of a gone id is a 404, not an error.
+  } finally { await sweep(); }
 
   console.log(`\n${fail.length ? "FAILURES ✗" : "ALL PASS ✓"} — ${pass.length} passed, ${fail.length} failed`);
   pass.forEach((m) => console.log("  ✓ " + m));
