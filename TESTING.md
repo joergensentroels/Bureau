@@ -784,7 +784,12 @@ Recorded on the company at `GET /api/declined-checks`, because a skipped check m
 gone by the next commit — which is exactly how this one survived.
 
 **No UI panel in that commit, on purpose.** The lesson that produced this register was shipping UI unlooked-at, so
-the panel belongs in a commit that also runs `node test/run-all.mjs --ui` and looks at it.
+the panel belonged in a commit that also ran `node test/run-all.mjs --ui` and looked at it.
+
+**That commit has now landed.** The register renders as the **Not checked** panel, between Open questions and
+Deliverables — each card showing what was not checked, the reason given, what would unblock it, and the refuter's
+counter-argument where there is one. It was looked at in a browser, which is how the one defect no assertion would
+have caught was found: the "Drop it" button wrapped mid-phrase, fixed with `white-space:nowrap`.
 
 ## The refuter, and the two jobs it was given
 

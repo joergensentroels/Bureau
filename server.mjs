@@ -6631,8 +6631,8 @@ const server = createServer(async (req, res) => {
     }
 
     // ----- the declined-check register: what was NOT verified, and the reason given -----
-    // No UI panel in this commit ON PURPOSE: the lesson that produced this register was shipping UI unlooked-at, and
-    // the panel should arrive in a commit that also runs `node test/run-all.mjs --ui` and looks at it.
+    // The UI panel was deferred until a commit that also ran `node test/run-all.mjs --ui` and looked at it. That
+    // commit landed: this renders as the "Not checked" panel, beside Open questions.
     if (p === "/api/declined-checks" && req.method === "GET") {
       const list = (await readOrg()).declinedChecks || [];
       return send(res, 200, { declinedChecks: list, total: list.length });

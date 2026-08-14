@@ -96,7 +96,7 @@ async function bootServer() {
     console.log("  open:  http://127.0.0.1:" + PORT + "/");
     console.log("  token: " + (process.env.OPERATOR_TOKEN || "(unset)"));
     console.log("  (disposable, generated for this run, and it dies with this process)");
-    console.log("  look for: Lenses renders its 8 entries; Open questions shows its empty state; no console errors after unlock.");
+    console.log("  look for: Lenses renders its 8 entries; Open questions and Not checked show their empty states; no console errors after unlock.");
     console.log("  Ctrl-C when done.");
     await new Promise(() => {});   // hold until interrupted
   }

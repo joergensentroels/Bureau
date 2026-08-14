@@ -193,5 +193,142 @@ ok("the sign-in control is shared, not duplicated per call site", (HTML.match(/f
     unpolicyable.length === 0, unpolicyable.join(", "));
 }
 
+// ---- THE INSTRUMENT: an emitted event that renders nowhere is a run the operator cannot see -------------
+//
+// Two lists in two files ~1,500 lines apart, kept in step by hand. This pair has already drifted three times —
+// scopeRefused, retry and unparsed each shipped with ONE half present — and each was caught by a person reading
+// a diff. The blocks above pin those three BY NAME, which is the shape that cannot generalise: naming the three
+// that broke says nothing about the fourth. Ten more had accumulated behind them by the time anyone looked.
+//
+// So: derive BOTH sides from source, and assert BEHAVIOUR rather than text. handleEvent and histEventLine are
+// lifted out of the page and actually CALLED, once per emitted type, against stubs that count every side effect.
+// A branch that is present but cannot run — `ev.type==="x" && false`, the trap that keeps a source-grep check
+// green while the call is disabled — produces no side effect and fails here. A history entry that is present but
+// evaluates to nothing fails too, because the assertion reads the rendered line's INNER text, not its wrapper.
+//
+// The probe's own negative control is permanent and re-runs on every invocation: a type that does not exist must
+// produce ZERO side effects and an EMPTY history line. If that ever starts passing, the harness has stopped
+// discriminating — a catch-all renderer, a stub that fires unconditionally — and every green above it is void.
+{
+  const SERVER = readFileSync(join(ROOT, "server.mjs"), "utf8");
+
+  // Both `emit(run, "` spellings agree at 78 call sites, so the plain split is not hiding a variant.
+  const emitted = [...new Set(SERVER.split("emit(run, " + Q).slice(1).map((s) => s.split(Q)[0]))].filter(Boolean).sort();
+  ok("parsed the event types the server emits", emitted.length >= 40, `${emitted.length} parsed`);
+
+  // Lift a top-level function out of the page. Every one of these closes with a brace in column 0; every brace
+  // INSIDE them is indented, so the first "\n}\n" is the end. A truncated slice cannot go unnoticed: it would
+  // fail to compile below, and the length floor catches an empty one.
+  const fnSrc = (header) => {
+    const i = HTML.indexOf(header);
+    if (i < 0) return "";
+    const end = HTML.indexOf("\n}\n", i);
+    return end < 0 ? "" : HTML.slice(i, end + 3);
+  };
+  const handleSrc = fnSrc("function handleEvent(ev){");
+  const histSrc = fnSrc("function histEventLine(ev){");
+  const critSrc = fnSrc("function critList(items, showStatus){");
+  ok("lifted handleEvent out of the page", handleSrc.length > 4000, `${handleSrc.length} chars`);
+  ok("lifted histEventLine out of the page", histSrc.length > 800, `${histSrc.length} chars`);
+  ok("lifted critList out of the page", critSrc.length > 100, `${critSrc.length} chars`);
+
+  // Every property of the event payload answers as a ONE-ELEMENT array, which is the single value that survives
+  // all the shapes these branches reach for — .map, .length, .join, .filter, .slice, .indexOf and .toLocaleString
+  // all exist on it — AND stringifies to something non-empty, so a bare `${d.x}` cannot render blank on its own.
+  // No per-type fixture table, so a new event type needs no entry here to be checked.
+  //
+  // agent and manager are forced EMPTY on purpose. histEventLine prefixes its line with `d.agent||d.manager` and
+  // that prefix is not the map entry's work: with a truthy agent, an entry set to "" still produced "Ada · " and
+  // read as rendered. The first draft of this file did exactly that, and its negative control caught it. Forcing
+  // the prefix empty makes the assertion measure the ENTRY, which is the thing that drifts.
+  const anyData = () => new Proxy({ agent: "", manager: "" },
+    { get: (t, k) => (typeof k === "symbol" ? undefined : (k in t ? t[k] : ["x"])) });
+
+  let hits = 0;
+  const bump = (v) => { hits++; return v; };
+  const fakeEl = () => ({ textContent: "", value: "", disabled: false, innerHTML: "", style: {},
+                          querySelector: () => fakeEl(), querySelectorAll: () => [], appendChild: () => {}, remove: () => {} });
+  const thenable = { then() { return this; }, catch() { return this; } };
+
+  let harness;
+  try {
+    harness = new Function("__s", `
+      "use strict";
+      const { addEv, $, esc, api, resetRun, loadQuestions, loadDeclinedChecks, loadDeliverables, loadPurchases,
+              loadDashboard, loadGoals, loadPlan, refreshInbox, fmtUsdFine, render, streamRun, el } = __s;
+      let ES = __s.ES, RUN_PAUSED = false, CUR_RUN = "r1", ORG = {}, HEALTH = null;
+      ${critSrc}
+      ${histSrc}
+      ${handleSrc}
+      return { handleEvent, histEventLine };
+    `)({ addEv: () => bump(fakeEl()), $: () => bump(fakeEl()), esc: (s) => String(s == null ? "" : s),
+         api: () => bump(thenable), resetRun: () => bump(), loadQuestions: () => bump(), loadDeclinedChecks: () => bump(),
+         loadDeliverables: () => bump(), loadPurchases: () => bump(), loadDashboard: () => bump(), loadGoals: () => bump(),
+         loadPlan: () => bump(), refreshInbox: () => bump(), fmtUsdFine: () => "$0", render: () => bump(),
+         streamRun: () => bump(), el: () => fakeEl(), ES: { close: () => bump() } });
+    ok("the lifted renderers compile and are callable", typeof harness.handleEvent === "function" && typeof harness.histEventLine === "function");
+  } catch (e) {
+    ok("the lifted renderers compile and are callable", false, String(e && e.message).slice(0, 200));
+    harness = null;
+  }
+
+  if (harness) {
+    // Did any branch run? Nothing in handleEvent touches a stub before the type chain, so a non-zero count means
+    // some branch was entered and did something. A type with no branch falls off the end and scores zero.
+    const renders = (type) => { hits = 0; try { harness.handleEvent({ type, data: anyData() }); } catch (e) { return "threw: " + String(e && e.message).slice(0, 90); } return hits > 0 ? "" : "no branch ran"; };
+    // The wrapper is fixed, so the INNER text is what an entry actually contributes. An entry present but empty
+    // still returns a wrapper, and would otherwise read as rendered.
+    const OPEN = '<div class="dl">', CLOSE = "</div>";
+    const histLine = (type) => {
+      let out; try { out = harness.histEventLine({ type, data: anyData() }); } catch (e) { return "threw: " + String(e && e.message).slice(0, 90); }
+      if (typeof out !== "string" || !out) return "no entry";
+      const inner = out.startsWith(OPEN) && out.endsWith(CLOSE) ? out.slice(OPEN.length, -CLOSE.length).trim() : out.trim();
+      return inner.length ? "" : "entry renders empty";
+    };
+
+    // ---- the permanent negative control -------------------------------------------------------------------
+    // Run FIRST and asserted BEFORE the real types, so a harness that cannot say "no" is reported as broken
+    // rather than as forty green ticks. This is the assertion that makes the rest of the block mean anything.
+    ok("CONTROL: a type nothing emits renders nothing in the feed", renders("zzzNotAnEventType") === "no branch ran");
+    ok("CONTROL: a type nothing emits has no compact-history entry", histLine("zzzNotAnEventType") === "no entry");
+
+    const noFeed = emitted.filter((t) => renders(t) !== "");
+    const noHist = emitted.filter((t) => histLine(t) !== "");
+    ok(`every event the server emits renders in the live feed (${emitted.length} types exercised)`,
+      noFeed.length === 0, noFeed.map((t) => `${t} (${renders(t)})`).join(", "));
+    ok(`every event the server emits has a compact-history entry (${emitted.length} types exercised)`,
+      noHist.length === 0, noHist.map((t) => `${t} (${histLine(t)})`).join(", "));
+  }
+
+  // The three the brief called load-bearing, pinned on the property that makes each one worth rendering at all.
+  // These are about CONTENT, which the behavioural pass above cannot judge — it only knows a branch ran.
+  ok("coverage NAMES the unopened files rather than counting them", near("ev.type===" + Q + "coverage", "d.unseen", 400));
+  ok("and says what an unopened file means for the findings", HTML.includes("Never opened by any lens"));
+  ok("gateAccept says nobody approved the shortfall", near("ev.type===" + Q + "gateAccept", "no one signed this off", 900));
+  ok("and names the criteria it wrote off", near("ev.type===" + Q + "gateAccept", "d.items", 900));
+  ok("a refutation shows what the refuter actually said", near("ev.type===" + Q + "refuted", "d.says", 700));
+}
+
+// ---- the declined-check register has a panel, and it reads the shape the endpoint returns ----------------
+// The register shipped with two endpoints and no UI. The failure mode to guard is not "no panel" but a panel
+// reading the WRONG KEY: /api/deliverables returns .files, and a loader reaching for .deliverables would show
+// an empty list forever while every test stayed green. So the key is checked against the server's response.
+{
+  const SERVER = readFileSync(join(ROOT, "server.mjs"), "utf8");
+  ok("the server still answers GET /api/declined-checks", SERVER.includes('p === "/api/declined-checks" && req.method === "GET"'));
+  ok("and DELETE on one of them", SERVER.includes('p.startsWith("/api/declined-checks/") && req.method === "DELETE"'));
+  // The response key, taken from the send() call rather than from memory.
+  ok("the endpoint answers with a declinedChecks key", SERVER.includes("send(res, 200, { declinedChecks: list"));
+  ok("the panel exists", HTML.includes('dcBox.id="declinedChecks"') && HTML.includes("async function loadDeclinedChecks()"));
+  ok("and reads THAT key, not a guessed one", HTML.includes("data.declinedChecks"));
+  ok("the panel is loaded on first render, not only after an event", HTML.includes("loadLenses(); loadDeclinedChecks();"));
+  ok("it can drop an entry through the endpoint that exists", HTML.includes('api("DELETE","/api/declined-checks/"'));
+  // The reason is the whole point of the register: a gap with no testable reason is the claim nobody examines.
+  ok("each card shows the reason given", HTML.includes("Because: <b>${esc(d.because)}"));
+  ok("and what would unblock it", HTML.includes("Unblocked by:"));
+  ok("and the refuter's counter-argument where there is one", HTML.includes("d.refutation?"));
+  ok("the empty state says what the register is for", HTML.includes("Nothing declined."));
+}
+
 console.log(fail ? `\nFAILURES — ${pass} passed, ${fail} failed` : `\nALL PASS ✓ — ${pass} passed, 0 failed`);
 process.exitCode = fail ? 1 : 0;
