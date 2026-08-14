@@ -806,6 +806,11 @@ export async function askLlm(messages, opts = {}) {
   const { json } = await latch("POST", "/api/llm/chat", {
     messages, routingPreference: opts.routingPreference || "local", temperature: opts.temperature ?? 0.3, maxTokens: opts.maxTokens || 700,
     ...(opts.model ? { model: opts.model } : {}),   // per-call model override (paid tiers) — Latch passes it to the external provider
+    // Reasoning controls. Latch forwards these two on a narrow allowlist and drops anything else, so this is the
+    // whole surface: how much the model may think before it answers. Sent only when a caller asks — omitted, the
+    // provider's default applies and nothing changes.
+    ...(opts.reasoningEffort ? { reasoningEffort: opts.reasoningEffort } : {}),
+    ...(opts.thinking ? { thinking: opts.thinking } : {}),
   });
   if (json && json.ok && typeof json.text === "string") {
     // Let a caller learn whether Latch actually served this from the PAID provider (routing.mode
@@ -2160,16 +2165,28 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
     // Collapsed ONCE per turn and used for both the call and the cost estimate, so the estimate reflects what was
     // actually sent rather than what the history holds.
     const sendable = collapseReads(history);
-    const ask = (maxTokens) => askLlm(sendable, { maxTokens, routingPreference: usePaid ? "external" : "local", ...(usePaid && sendModel ? { model: sendModel } : {}), meta });
+    const ask = (maxTokens, extra = {}) => askLlm(sendable, { maxTokens, routingPreference: usePaid ? "external" : "local", ...(usePaid && sendModel ? { model: sendModel } : {}), ...extra, meta });
     try {
       raw = await ask(1000);
-      // A reasoning model can spend the whole output budget thinking and return nothing at all — measured at 699/700
-      // and 3999/4000 reasoning tokens with empty text. Untreated that is an empty turn, and it looks like a flaky
-      // model rather than a budget that was too small. One retry, bounded: 2600 is what criteria derivation already
-      // uses, and it stays inside Latch's 120s ceiling.
+      // A reasoning model can spend the whole output budget thinking and return nothing at all. The first fix here
+      // raised the budget from 1000 to 2600, on the theory that the budget was too small. Measured since, on a
+      // scoped round that had everything else right: 29,125 of 29,246 output tokens went to reasoning, eleven
+      // consecutive turns came back empty, and the run finished "clean" with no findings. More budget buys more
+      // reasoning. Cap the thinking instead — that is what consumed it.
       if (!String(raw || "").replace(/<think>[\s\S]*?<\/think>/gi, "").trim()) {
-        emit(run, "retry", { agent: who, depth, why: "the model returned nothing — retrying with a larger output budget" });
-        raw = await ask(2600);
+        const split = usageSplit(meta.usage, 0);
+        emit(run, "retry", { agent: who, depth, why: blankReplyReason(split),
+                             outputTokens: split.output, reasoningTokens: split.reasoning });
+        try {
+          raw = await ask(2600, NO_THINKING);
+        } catch (e) {
+          // The provider does not accept a thinking cap. Fall back to what this always did rather than turning a
+          // blank turn into a failed one — and SAY so, because "retried" and "retried differently" are not the
+          // same event and a run reading its own log should not have to guess which happened.
+          emit(run, "retry", { agent: who, depth, capRefused: true,
+                               why: "the provider refused a thinking cap (" + String(e.message || e).slice(0, 90) + ") — retrying on budget alone" });
+          raw = await ask(2600);
+        }
       }
       noteLlm(run, true);
     }
@@ -4480,6 +4497,33 @@ export function repoReadCap(paid, scope) {
   if (!paid) return 4000;
   const n = Array.isArray(scope) ? scope.length : 0;
   return n > 0 && n <= SCOPED_WHOLE_FILE_LIMIT ? 60000 : 12000;
+}
+
+// Sent on the retry after an empty reply. Latch forwards both on its allowlist; a provider that does not know
+// them ignores or rejects them, and the caller falls back rather than failing the turn.
+export const NO_THINKING = { reasoningEffort: "minimal", thinking: { type: "disabled" } };
+
+// Why a reply came back empty, said in terms of what was measured rather than what was assumed.
+//
+// The old line was "the model returned nothing — retrying with a larger output budget". Both halves were wrong.
+// The model returned plenty: on the round that made this necessary it produced 29,246 output tokens of which
+// 29,125 were reasoning, leaving 121 tokens of content across twelve calls — ten per call. And a larger budget is
+// the wrong lever: it buys more reasoning, so the round retried eleven times, each with more room, and finished
+// "clean" having found nothing. An instrument that names the wrong cause sends the fix in the wrong direction.
+export function blankReplyReason(split) {
+  const out = Number(split?.output), rea = Number(split?.reasoning);
+  if (!Number.isFinite(out) || !Number.isFinite(rea) || out <= 0) {
+    return "the model returned no content, and reported no token split to say why — retrying with thinking capped";
+  }
+  const pct = Math.round((100 * rea) / out);
+  // "en-US", not the machine's locale. On a Danish machine toLocaleString() rendered 29,125 as "29.125", which
+  // reads as a decimal in a line whose whole content is the numbers — and made the same log say different things
+  // on different machines.
+  const n = (v) => v.toLocaleString("en-US");
+  return `the model returned no content: ${n(rea)} of ${n(out)} output tokens (${pct}%) `
+    + `went to reasoning, leaving ${n(out - rea)} for the answer`
+    + (pct >= 90 ? " — a larger budget would only buy more reasoning, so retrying with thinking capped instead"
+                 : " — retrying with thinking capped");
 }
 
 // Which of the three things a read_repo turn does, in one place so a test can assert the decision the runner

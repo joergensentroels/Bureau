@@ -129,6 +129,16 @@ ok("the sign-in control is shared, not duplicated per call site", (HTML.match(/f
   ok("the live feed renders a scope refusal", HTML.includes('ev.type==="scopeRefused"'));
   ok("and the compact history does too", HTML.includes("scopeRefused:" + BT));
 }
+{
+  // An empty reply used to be invisible: the event existed and nothing rendered it, so a round that burned eleven
+  // turns on pure reasoning looked in the UI like a round that simply did nothing. The measured case spent 29,125
+  // of 29,246 output tokens thinking, and reasoning tokens are billed as output — so an empty turn is not a free
+  // one, and the operator has no way to know that from a feed that shows nothing at all.
+  ok("the live feed renders an empty-reply retry", HTML.includes('ev.type==="retry"'));
+  ok("and the compact history does too", HTML.includes("retry:" + BT));
+  ok("the reason travels with it rather than a generic label", HTML.includes("d.why"));
+  ok("and it says the empty turn still cost money", HTML.includes("not a free one"));
+}
 
 console.log(fail ? `\nFAILURES — ${pass} passed, ${fail} failed` : `\nALL PASS ✓ — ${pass} passed, 0 failed`);
 process.exitCode = fail ? 1 : 0;

@@ -11,7 +11,7 @@ import {
   objectiveSignature, dedupeMemories, deliverableEmbedText, deliverableTitle,
   chunkDocument, deliverableChunks, modelUnreachable, trimVersions, clientKey, isLoopback,
   startLogTee, webhookBody,
-  normalizeFinding, verifyFinding, findingCheckAllowed, npmArgv, agentMayRun, usageSplit, addUsage, tierModelToSend, callCostUsd, repoReadCap,
+  normalizeFinding, verifyFinding, findingCheckAllowed, npmArgv, agentMayRun, usageSplit, addUsage, tierModelToSend, callCostUsd, repoReadCap, blankReplyReason, NO_THINKING,
   LENSES, pickLens, investigateObjective, investigate, seedLenses, activeLenses, bookLensRound,
   normalizeLens, lensParaphrase, addProposedLens, lensProposalObjective, sigWords, postReadGuidance,
   turnBudgetWarning,
@@ -1238,6 +1238,47 @@ console.log("# the token SPLIT is recorded, and an unreported field is not zero"
   // The control: without the per-field counts, 54 input tokens over 3 calls would read as the whole run's input.
   chk('  the counts make a partial measurement legible rather than confident',
       acc.inputCalls < acc.calls && acc.outputCalls < acc.calls);
+}
+console.log("# an empty reply reports what was actually spent, and the retry pulls the right lever");
+{
+  const src = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
+  // The measured round. Everything else about it was right — one file in scope, the defective file opened FIRST,
+  // read whole — and it produced nothing because the entire output budget went to thinking.
+  const why = blankReplyReason({ output: 29246, reasoning: 29125 });
+  chk('  it names the split instead of saying "returned nothing"', /29,125 of 29,246/.test(why));
+  chk('  and the share it took', /\(100%\)/.test(why));
+  chk('  and what was left for the answer', /leaving 121/.test(why));
+  // A bigger budget was the old response, and saying so is the point: an instrument that names the wrong cause
+  // sends the next fix in the wrong direction, and this one did that eleven times in a row.
+  chk('  it says a larger budget would not help', /larger budget would only buy more reasoning/.test(why));
+  // On a Danish machine toLocaleString() rendered 29,125 as "29.125" — a decimal, in a line that is nothing but
+  // numbers, and reading differently on different machines for the same run.
+  chk('  the numbers group unambiguously whatever the machine locale', !/29\.125|29\.246/.test(why));
+
+  const mild = blankReplyReason({ output: 2000, reasoning: 500 });
+  chk('  a mild split still reports itself', /500 of 2,000/.test(mild) && /\(25%\)/.test(mild));
+  chk('  but does not blame the budget, which at 25% is not established', !/larger budget/.test(mild));
+  chk('  no usage at all says so rather than inventing a cause', /reported no token split/.test(blankReplyReason(null)));
+  chk('  and a zero-output split does not divide by zero', typeof blankReplyReason({ output: 0, reasoning: 0 }) === "string");
+
+  eq('  the cap sent on the retry is minimal effort AND thinking off',
+     NO_THINKING, { reasoningEffort: "minimal", thinking: { type: "disabled" } });
+
+  // Wiring. The old string must be GONE, not merely joined by a new one — a log still saying "retrying with a
+  // larger output budget" while actually capping the thinking is a worse instrument than either behaviour alone.
+  chk('  the turn loop retries with the cap', /ask\(2600, NO_THINKING\)/.test(src));
+  // Against the CODE, not the whole file. The first version searched the source and failed on the COMMENT that
+  // quotes the old line in order to explain why it was wrong — an assertion satisfiable by deleting the
+  // explanation. Strip comment lines and ask what the runner actually emits.
+  const code = src.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+  chk('  and no longer claims a larger budget is the first move',
+      !/retrying with a larger output budget/.test(code));
+  chk('  CONTROL: stripping comments did not just empty the haystack', code.includes("ask(2600, NO_THINKING)"));
+  chk('  a provider that refuses the cap falls back rather than failing the turn',
+      /capRefused: true/.test(src) && /raw = await ask\(2600\);/.test(src));
+  // askLlm has to actually forward them, or every line above describes a request that was never sent.
+  chk('  and askLlm forwards both fields to Latch',
+      /reasoningEffort: opts\.reasoningEffort/.test(src) && /thinking: opts\.thinking/.test(src));
 }
 console.log("# a tier's model is an override, and only when the provider actually serves it");
 {
