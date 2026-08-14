@@ -80,7 +80,7 @@ try {
   process.env.LATCH_URL = `http://127.0.0.1:${latchPort}`;
   process.env.LATCH_TOKEN = agentToken;
   process.env.OPERATOR_TOKEN = agentToken;
-  const { askLlm, NO_THINKING, initLatchAuth } = await import("../server.mjs");
+  const { askLlm, NO_THINKING, JSON_REPLY, initLatchAuth } = await import("../server.mjs");
   // TOKEN is populated by the server bootstrap, which does NOT run on a plain import — without this every call
   // goes out as "Bearer undefined" and Latch answers 401. The empty `seen` array said only "no request arrived".
   await initLatchAuth();
@@ -118,7 +118,7 @@ try {
 
   const at = seen.length;
   let capErr = null;
-  await askLlm([{ role: "user", content: "hi" }], { ...opts, ...NO_THINKING }).catch((e) => { capErr = e; });
+  await askLlm([{ role: "user", content: "hi" }], { ...opts, ...NO_THINKING, ...JSON_REPLY }).catch((e) => { capErr = e; });
   if (capErr) console.log("    (capped call error: " + capErr.message.slice(0, 160) + ")");
   const capped = seen[at];
   chk("  the capped call reached the provider", !!capped);
@@ -128,6 +128,10 @@ try {
     chk("  reasoning_effort arrived, snake_cased by Latch", capped.reasoning_effort === "minimal");
     chk("  and the thinking block arrived intact",
         capped.thinking && capped.thinking.type === "disabled");
+    // The same call carries JSON mode — this is the constrained-decoding switch that removes the truncated-JSON
+    // class (fourteen of fourteen unparsed replies across ten rounds), and it crosses the same three links.
+    chk("  and JSON mode arrived, rebuilt to exactly its allowlisted shape",
+        JSON.stringify(capped.response_format) === JSON.stringify({ type: "json_object" }));
     chk("  while the rest of the request is unchanged",
         capped.model === "mock-model" && Array.isArray(capped.messages) && capped.messages.length > 0);
   }

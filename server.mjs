@@ -811,6 +811,7 @@ export async function askLlm(messages, opts = {}) {
     // provider's default applies and nothing changes.
     ...(opts.reasoningEffort ? { reasoningEffort: opts.reasoningEffort } : {}),
     ...(opts.thinking ? { thinking: opts.thinking } : {}),
+    ...(opts.responseFormat ? { responseFormat: opts.responseFormat } : {}),
   });
   if (json && json.ok && typeof json.text === "string") {
     // Let a caller learn whether Latch actually served this from the PAID provider (routing.mode
@@ -2222,15 +2223,17 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
     // actually sent rather than what the history holds.
     const sendable = collapseReads(history);
     const ask = (maxTokens, extra = {}) => askLlm(sendable, { maxTokens, routingPreference: usePaid ? "external" : "local", ...(usePaid && sendModel ? { model: sendModel } : {}), ...extra, meta });
-    // Capped unless this provider has already refused it in THIS run. One refusal is enough to learn from: retrying
-    // a rejected field every turn would cost an extra round trip per turn for the whole run.
+    // Capped AND constrained unless this provider has already refused the options in THIS run. One refusal is
+    // enough to learn from: retrying rejected fields every turn would cost an extra round trip per turn for the
+    // whole run. One flag for both extras, deliberately — a provider that rejects unknown fields rejects the
+    // request, not a field at a time, so there is no signal to distinguish which one offended.
     const askCapped = async (maxTokens) => {
       if (!usePaid || run.capUnsupported) return ask(maxTokens);
-      try { return await ask(maxTokens, NO_THINKING); }
+      try { return await ask(maxTokens, { ...NO_THINKING, ...JSON_REPLY }); }
       catch (e) {
         run.capUnsupported = true;
         emit(run, "retry", { agent: who, depth, capRefused: true,
-                             why: "the provider refused a thinking cap (" + String(e.message || e).slice(0, 90) + ") — this run will stop sending it" });
+                             why: "the provider refused the thinking cap / JSON mode (" + String(e.message || e).slice(0, 90) + ") — this run will stop sending them" });
         return ask(maxTokens);
       }
     };
@@ -2922,9 +2925,9 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
               + (suff ? "\n\nA reviewer was asked what could satisfy your check while the defect remains, and said: " + suff + "\nIf that lands, a narrower check would make the finding stronger — but the finding stands either way." : "") });
           } else {
             (run.rejectedFindings || (run.rejectedFindings = [])).push({ ...rec, reason: v.reason });
-            emit(run, "findingRejected", { by: who, depth, claim: rec.claim, reason: v.reason });
+            emit(run, "findingRejected", { by: who, depth, claim: rec.claim, reason: v.reason, checkOut: v.checkOut || "" });
             emitAct({ agent: who, depth, actionType: "register_finding", url: rec.where, ok: false, bytes: 0, error: String(v.reason).slice(0, 80) });
-            history.push({ role: "user", content: "That finding was REFUSED: " + v.reason + ". This is not a formatting problem — the evidence did not hold. Do not restate the claim as if it were confirmed. Either produce a check that genuinely fails on the current code, or drop it and look somewhere else." });
+            history.push({ role: "user", content: refusalMessage(v.reason, v.checkOut) });
           }
         }
       } else {
@@ -4578,6 +4581,15 @@ export function repoReadCap(paid, scope) {
 // carried forward — only tokens burned and a round trip wasted per turn.
 export const NO_THINKING = { reasoningEffort: "minimal", thinking: { type: "disabled" } };
 
+// Constrained decoding: the provider guarantees syntactically valid JSON instead of being asked nicely for it.
+// Measured need: ten scoped rounds produced fourteen unparsed replies and every one was TRUNCATED mid-object —
+// and raising the output budget did not move it (8 before, 6 after, hit rate identical). Parse-and-pray plus
+// budget tuning is the approach the structured-output literature exists to replace. Latch forwards exactly this
+// shape on its allowlist and drops everything else; the system prompt already says "STRICT JSON", which DeepSeek's
+// json_object mode requires to be present in the prompt. Known provider caveat: occasional EMPTY content, which
+// lands in the empty-reply retry path that already exists.
+export const JSON_REPLY = { responseFormat: { type: "json_object" } };
+
 // How much room a turn gets to answer in.
 //
 // Was 1,000. Measured over five scoped rounds once the thinking cap landed: EVERY one of the eight replies that
@@ -5115,6 +5127,37 @@ export function normalizeFinding(body) {
   return { ok: true, finding: f };
 }
 
+// The last lines of a check's output, for handing back to the agent whose finding was refused.
+//
+// The refusal used to carry only its one-line reason — "the fix does not make the check pass" — and the check's
+// stdout was discarded at the source: `obs.after = (await io.sh(f.check)).ok` kept the boolean and dropped the
+// output that said WHY. Measured effect: a round named the planted defect correctly three times and got the same
+// contentless refusal three times, retrying blind each time. Execution feedback is the single best-supported
+// lever in the bug-reproduction literature (LIBRO's post-processing, SWT-bench's iteration results), and Bureau
+// had the text in hand and threw it away.
+//
+// The TAIL, because node --test puts the assertion message at the end — the front is banner. Undefined-safe so
+// older io doubles that return only { ok } keep working.
+export const checkOutTail = (out, cap = 700) => {
+  const s = String(out == null ? "" : out).trim();
+  return s.length > cap ? "…" + s.slice(-cap) : s;
+};
+
+// What a refused finding tells the agent. A FUNCTION, not an inline template, for an instrument reason: the first
+// control for "the agent is not shown the output" mutated the inline guard to `false ?` and the suite stayed green,
+// because the assertion checked the message text was PRESENT IN THE SOURCE — which it still was, unreachably. A
+// builder is testable by calling it, and the wiring is one greppable line.
+//
+// The output matters more than the verdict: without it the agent retries blind — measured, the same correct claim
+// refused three times in one round, each attempt uninformed by what the runner actually saw.
+export function refusalMessage(reason, checkOut) {
+  return "That finding was REFUSED: " + reason + ". This is not a formatting problem — the evidence did not hold. "
+    + "Do not restate the claim as if it were confirmed. Either produce a check that genuinely fails on the current "
+    + "code, or drop it and look somewhere else."
+    + (checkOut ? "\n\nWhat your check actually printed (last lines):\n" + checkOut
+      + "\n\nRead the assertion message above — it says what was really observed, and your next attempt has to account for it, not restate the claim." : "");
+}
+
 // The gate. `io` is injected so this is unit-testable without a worktree, in the same style as fetchImpl/env elsewhere:
 //   io.sh(cmd)      -> { ok }        run the check, ok = exit 0
 //   io.apply(fix)   -> boolean       apply the edit; false when the anchor was not found
@@ -5134,8 +5177,9 @@ export async function verifyFinding(finding, io) {
       const w = await io.writeProbe(f.probe.file, f.probe.content);
       if (!w.ok) return { ok: false, reason: w.reason, obs };
     }
-    obs.before = (await io.sh(f.check)).ok;
-    if (obs.before) return { ok: false, reason: "the check passes already, so it does not see the defect described", obs };
+    const beforeRun = await io.sh(f.check);
+    obs.before = beforeRun.ok;
+    if (obs.before) return { ok: false, reason: "the check passes already, so it does not see the defect described", obs, checkOut: checkOutTail(beforeRun.out) };
     if (!(await io.apply(f.fix))) {
       // Name the failure. "not found" and "matches in several places" call for different corrections, and an agent
       // told only "did not apply" retries with the same shape. Optional so older io doubles keep working.
@@ -5148,8 +5192,9 @@ export async function verifyFinding(finding, io) {
       }
       return { ok: false, reason: "the fix did not apply — " + why, obs };
     }
-    obs.after = (await io.sh(f.check)).ok;
-    if (!obs.after) return { ok: false, reason: "the fix does not make the check pass", obs };
+    const afterRun = await io.sh(f.check);
+    obs.after = afterRun.ok;
+    if (!obs.after) return { ok: false, reason: "the fix does not make the check pass", obs, checkOut: checkOutTail(afterRun.out) };
     // A fix that repairs the named defect and breaks something else is not a fix. Only asserted when the suite was
     // passing to begin with — otherwise a red repository could never produce a finding at all.
     if (f.probe && io.suite) {

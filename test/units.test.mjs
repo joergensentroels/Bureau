@@ -11,7 +11,7 @@ import {
   objectiveSignature, dedupeMemories, deliverableEmbedText, deliverableTitle,
   chunkDocument, deliverableChunks, modelUnreachable, trimVersions, clientKey, isLoopback,
   startLogTee, webhookBody,
-  normalizeFinding, verifyFinding, findingCheckAllowed, npmArgv, agentMayRun, usageSplit, addUsage, tierModelToSend, callCostUsd, repoReadCap, blankReplyReason, NO_THINKING, TURN_TOKENS, TURN_TOKENS_RETRY, usagesForTurn, jsonFailure,
+  normalizeFinding, verifyFinding, findingCheckAllowed, npmArgv, agentMayRun, usageSplit, addUsage, tierModelToSend, callCostUsd, repoReadCap, blankReplyReason, NO_THINKING, TURN_TOKENS, TURN_TOKENS_RETRY, usagesForTurn, jsonFailure, JSON_REPLY, checkOutTail, refusalMessage,
   LENSES, pickLens, investigateObjective, investigate, seedLenses, activeLenses, bookLensRound,
   normalizeLens, lensParaphrase, addProposedLens, lensProposalObjective, sigWords, postReadGuidance,
   turnBudgetWarning,
@@ -1355,6 +1355,64 @@ console.log("# an empty reply reports what was actually spent, and the retry pul
   // askLlm has to actually forward them, or every line above describes a request that was never sent.
   chk('  and askLlm forwards both fields to Latch',
       /reasoningEffort: opts\.reasoningEffort/.test(src) && /thinking: opts\.thinking/.test(src));
+}
+console.log("# JSON mode: the provider is constrained to valid JSON, not asked nicely for it");
+{
+  const src = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
+  // Ten rounds, fourteen unparsed replies, every one truncated mid-object — and raising the budget moved nothing
+  // (8 -> 6 on n=5, hit rate identical). Constrained decoding removes the class instead of shrinking it.
+  eq('  the shape is exactly what Latch allowlists', JSON_REPLY, { responseFormat: { type: "json_object" } });
+  chk('  askLlm forwards it', /responseFormat: opts\.responseFormat/.test(src));
+  chk('  the turn loop sends BOTH extras on capped calls', /\{ \.\.\.NO_THINKING, \.\.\.JSON_REPLY \}/.test(src));
+  // The prompt must contain the word "json" or DeepSeek's json_object mode errors — the system prompt already
+  // demands STRICT JSON, which is the same fact stated for the model rather than the provider.
+  chk('  and the system prompt contains the word JSON, which json_object mode requires',
+      /STRICT JSON/.test(src));
+}
+console.log("# a refusal carries what the check actually printed");
+{
+  // The refusal used to be one contentless line, and the check's stdout was discarded at the source — the agent
+  // named the planted defect correctly three times in one round and retried blind three times.
+  const io = (afterOut) => ({
+    sh: async (cmd) => stepIo(cmd, afterOut),
+    apply: async () => true, revert: async () => {},
+  });
+  // First call fails (the check sees the defect), second call fails TOO (the fix did not help) — the refusal path.
+  let calls = 0;
+  const stepIo = (_cmd, afterOut) => (++calls === 1 ? { ok: false, out: "1 failing" } : { ok: false, out: afterOut });
+  const v = await verifyFinding(
+    { claim: "c", where: "src/a.mjs:1", check: "npm test", fix: { file: "f", find: "a", replace: "b" } },
+    io("AssertionError: min was 0 but the smallest count is 24\n    at test/x.mjs:9"));
+  chk('  the refusal reason is unchanged', v.ok === false && /does not make the check pass/.test(v.reason));
+  chk('  and it now carries the check output', /min was 0 but the smallest count is 24/.test(v.checkOut || ""));
+
+  // The vacuous case carries output too — "your check printed `1 passing` against the real code" is the evidence.
+  calls = 0;
+  const passIo = { sh: async () => ({ ok: true, out: "2 passing" }), apply: async () => true, revert: async () => {} };
+  const v2 = await verifyFinding(
+    { claim: "c", where: "w", check: "npm test", fix: { file: "f", find: "a", replace: "b" } }, passIo);
+  chk('  a vacuous check is refused WITH its output', /passes already/.test(v2.reason) && v2.checkOut === "2 passing");
+
+  // Older io doubles return only { ok } — the tail must not crash on undefined, and the turn loop only appends
+  // when there is something to say.
+  calls = 0;
+  const bareIo = { sh: async () => ({ ok: false }), apply: async () => true, revert: async () => {} };
+  const v3 = await verifyFinding(
+    { claim: "c", where: "w", check: "npm test", fix: { file: "f", find: "a", replace: "b" } }, bareIo);
+  chk('  an io double with no output still works, and says nothing rather than "undefined"', v3.checkOut === "");
+
+  eq('  the tail keeps the END, where node --test puts the assertion',
+     checkOutTail("A".repeat(900) + " THE MESSAGE", 20), "…" + ("A".repeat(900) + " THE MESSAGE").slice(-20));
+
+  // Behavioural, after a control exposed the source-scrape version as blind: mutating the inline guard to
+  // `false ?` left the message text present-but-unreachable and the suite stayed green. Call the builder instead.
+  chk('  the refusal message contains the output when there is one',
+      /AssertionError: boom/.test(refusalMessage("r", "AssertionError: boom")));
+  chk('  and no dangling header when there is not', !/printed/.test(refusalMessage("r", "")));
+  const src = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
+  chk('  the turn loop hands the agent the builder output, output included',
+      /refusalMessage\(v\.reason, v\.checkOut\)/.test(src));
+  chk('  and the event carries it for the UI', /checkOut: v\.checkOut \|\| ""/.test(src));
 }
 console.log("# a tier's model is an override, and only when the provider actually serves it");
 {
