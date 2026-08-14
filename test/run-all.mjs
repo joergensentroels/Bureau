@@ -16,7 +16,7 @@ const wantE2E = process.argv.includes("--e2e");
 const wantServe = process.argv.includes("--serve") || process.argv.includes("--ui");
 const wantUI = process.argv.includes("--ui");
 
-const PURE = ["decision.test.mjs", "units.test.mjs", "finding-gate.test.mjs", "net.test.mjs", "heartbeat.test.mjs", "readme-demo.test.mjs", "ui.test.mjs"];
+const PURE = ["decision.test.mjs", "units.test.mjs", "scope.test.mjs", "finding-gate.test.mjs", "net.test.mjs", "heartbeat.test.mjs", "readme-demo.test.mjs", "ui.test.mjs"];
 const SERVER = ["api.test.mjs", "workspaces.test.mjs", "endpoints.test.mjs", "robustness.test.mjs", "mcp-floor.test.mjs"];
 const LIVE = ["e2e-autonomy.mjs"];
 

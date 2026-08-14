@@ -1721,7 +1721,14 @@ console.log("# investigate — the hunting rounds are executed, not decomposed")
   chk("  it accepts a solo worker", src.slice(iGated, iGated + 200).includes("soloWorker"));
   const iHunter = src.indexOf("const hunter = soloWorker || worker");
   chk("  the investigate call uses it in preference to the delegating one", iHunter > iGated);
-  chk("  and passes THAT to investigate", src.slice(iHunter, iHunter + 200).includes("investigate(run, hunter,"));
+  // Stated as an invariant, not a byte distance. This was slice(iHunter, iHunter + 200), and adding ONE longer line
+  // between the two pushed the call past the window: the assertion failed while the property it names stayed true.
+  // What matters is that the next investigate call after the hunter is built is the one that receives it, with no
+  // other investigate call slipping in between.
+  const iInv = src.indexOf("investigate(run, hunter,", iHunter);
+  chk("  and passes THAT to investigate", iInv > iHunter);
+  chk("  with nothing else calling investigate in between",
+      !/\binvestigate\(run,\s*(?!hunter\b)/.test(src.slice(iHunter, iInv)));
   const iDel = src.indexOf("async function runDelegation");
   const del = src.slice(iDel, src.indexOf("async function runGated", iDel));
   chk("  company mode was located and builds one", iDel > 0 && del.includes("const soloWorker = principal ?"));

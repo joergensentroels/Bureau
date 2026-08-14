@@ -449,7 +449,7 @@ export function ensureBudget(org) {
   // investigate: hunt for defects the acceptance criteria never described, after a run PASSES. Default ON, because
   // that phase is the point — but it is an operator switch and not a constant, because it costs rounds of real model
   // time on work that already met its definition of done. investigateRounds caps how many, 0 = the built-in default.
-  org.guardrails = { autoApproveUnderUsd: 0, maxActionsPerRun: 0, maxPaidUsdPerRun: 0, investigate: true, investigateRounds: 0, findingRepo: "", refute: true, coverageMap: true, ...(org.guardrails || {}) };
+  org.guardrails = { autoApproveUnderUsd: 0, maxActionsPerRun: 0, maxPaidUsdPerRun: 0, investigate: true, investigateRounds: 0, findingRepo: "", refute: true, coverageMap: true, scopeFiles: [], ...(org.guardrails || {}) };
   if (!Array.isArray(org.agents)) org.agents = [];                      // self-sufficient even on a bare {}
   org.agents.forEach((a) => {
     if (!a) return;
@@ -1165,7 +1165,7 @@ export function systemPrompt(org, agent, opts = {}) {
     "- github_pr: open a pull request containing the document(s) you already SAVED this run — title=the PR title, command=the PR description, details=why. You do NOT list files: it includes what you saved with file_write, so save the finished work first. The CEO approves every one (never auto).",
     "- plan_add: record a follow-up task you notice but shouldn't do right now into the company's persistent plan — title=the task, details=why/context. It is saved for a future run so nothing is lost. Runs instantly (no approval). Do NOT use it to defer the CURRENT objective.",
     "- register_finding: claim a DEFECT and prove it. title=the one-sentence claim, url=file:line, details=the defect class, command=the check that detects it (one of the project's own: npm test | npm run <script> | node --test [file] | node tools/<x>.mjs), fix={file,find,replace}=the change that makes the check pass. The runner verifies it ITSELF in a throwaway copy and requires three things: your check FAILS on the current code, PASSES with your fix, and FAILS AGAIN once the fix is reverted. A claim without that evidence is refused and you are told why, so do not register a hunch — register something you can make fail. IF NOTHING IN THE PROJECT ALREADY FAILS because of the defect — which is the usual case for a real one — omit \"command\" and supply probe={file,content} instead: a NEW test, file named test/<name>.test.mjs, content = a test that FAILS on the code as it stands and passes once your fix is applied. The runner writes it, runs all four observations including that the project's existing suite still passes with your fix, and throws it away. The probe must exercise BEHAVIOUR — import the module and call it, or drive the app's own entry point. A probe that reads the source file and asserts on its text is refused, because it would pass whatever the code does.",
-    findingRepo(org) ? "- read_repo: read the source of the repository under investigation. title=the PATH, relative to the repo root, and nothing else — \"src/db.mjs\", not a description of what you are doing. Leave title blank (or name a directory) to LIST what is in the repository; a path that does not exist also returns the listing, so start there and read exact paths from it rather than guessing. Put a TERM in \"command\" to search instead of read — a literal substring, or a regular expression if you write one (alternation, .* and character classes are recognised; the reply tells you which way it was read): it greps the whole file (or the whole repository if you give no path) and returns every matching line with its number — use that whenever you want to claim something is MISSING, because a read can be cut off and a search cannot. Read-only and confined to that one repository. Use it before claiming anything about the code: a check command and a fix must quote text that is really in the file." : "",
+    findingRepo(org) ? "- read_repo: read the source of the repository under investigation. title=the PATH, relative to the repo root, and nothing else — \"src/db.mjs\", not a description of what you are doing. Leave title blank (or name a directory) to LIST what is in the repository; a path that does not exist also returns the listing, so start there and read exact paths from it rather than guessing. Put a TERM in \"command\" to search instead of read — a literal substring, or a regular expression if you write one (alternation, .* and character classes are recognised; the reply tells you which way it was read): it greps the whole file (or the whole repository if you give no path) and returns every matching line with its number — use that whenever you want to claim something is MISSING, because a read can be cut off and a search cannot. Read-only and confined to that one repository. Use it before claiming anything about the code: a check command and a fix must quote text that is really in the file." + scopeLine(org) : "",
     "- declined_check: record a check you could NOT perform — title=what you did not verify, command=why you could not, details=what would have to be true for it to become possible. All three are required: a reason nobody can test is the one claim that never gets examined, and it then licenses every later skip without being restated. The runner searches the repository for whatever your reason names and, if it finds it, hands the evidence back once — because an excuse is a claim and it gets a control like any other.",
     "- note: record what you checked and what you concluded, when there is nothing to run — title=the heading, details=what you looked at and what you found or ruled out. It runs instantly and changes nothing. Use it instead of inventing an action when the honest answer is that you looked and found nothing.",
     "- ask_stakeholder: record a question only the CEO can settle — scope, a policy choice, a name, a number nobody wrote down — WITHOUT stopping. title=the question, command=the assumption you are proceeding under meanwhile, url=where that assumption is written down (file, field, document). It does not wait for an answer and it must not: you keep working, the question is queued for the CEO to answer alongside others, and the answer reaches a later run. A question with no assumption is REFUSED, because that is just asking to stop. Use this instead of escalate whenever the work can continue on a stated guess.",
@@ -2649,6 +2649,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
         // One action rather than two, because a model given read_repo and list_repo picks the wrong one and burns a
         // turn on the correction. A blank path, or one that turns out to be a directory, lists instead of reading.
         const repo = findingRepo(org);
+        const scope = normScopeFiles(org?.guardrails?.scopeFiles);
         // NOT `next.command` in this fallback. It was, and that silently turned every search with a blank title into a
         // directory listing: want became the search term, so `term !== want` was false and the search never ran.
         // A command that names a real file is still treated as a path — resolveRepoTarget does that below.
@@ -2659,7 +2660,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
         } else {
           // Resolve against the repository's own paths first: the agent writes a label ("Read PLAN.md") because that
           // is what title means everywhere else, and arguing with that in the doc line does not work.
-          const all = await listRepoFiles(repo);
+          const all = await listRepoFiles(repo, "", 400, scope);
           const termRaw = String(next.command || "").trim();
           // Either field may hold the path; the model is not consistent about which.
           const target = (want ? resolveRepoTarget(all.files || [], want) : null)
@@ -2675,7 +2676,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
             // If a path was asked for and did not resolve, say so instead of quietly searching everything: a scope
             // that changes without being mentioned turns "not found here" into "not found anywhere".
             const askedForPath = want && !target;
-            const s = await searchRepoFiles(repo, term, target || "");
+            const s = await searchRepoFiles(repo, term, target || "", 60, scope);
             if (s.ok) {
               didExecute = true;
               emitAct({ agent: who, depth, actionType: "read_repo", url: (target || "*") + ":" + term, ok: true, bytes: s.hits.length, error: "" });
@@ -2698,9 +2699,11 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
           // The 4,000-character cap is a mitigation for a 4,096-token LOCAL window. On a paid turn it costs more than
           // it saves: a 4,785-byte file cost ten follow-up searches reconstructing what one read should have given.
           const readCap = canUsePaid() ? 12000 : 4000;   // 24000 doubled a run's cost and overran the ceiling: the per-run cap is checked BETWEEN turns, so dearer turns overshoot it
-          const r = target ? await readRepoFile(repo, target, readCap)
-                  : want ? await readRepoFile(repo, want)
-                  : { ok: false, error: "that is a directory — list it instead of reading it" };
+          const plan = repoReadPlan(target, want, scope);
+          const r = plan.kind === "refuse" ? { ok: false, error: "outside this round's scope", outOfScope: true }
+                  : plan.kind === "list"   ? { ok: false, error: "that is a directory — list it instead of reading it" }
+                  : target ? await readRepoFile(repo, target, readCap)
+                           : await readRepoFile(repo, want);
           const listInstead = !r.ok && !/not inside the configured repository|leaves the repository/.test(r.error);
           if (r.ok) {
             didExecute = true;
@@ -2714,11 +2717,18 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
               content: repoReadReply({ name: r.name, shown: r.content, full: (full && full.ok ? full.content : r.content),
                                        bytes: r.bytes, truncated: !!r.truncated })
               + postReadGuidance(run) });
+          } else if (r.outOfScope) {
+            // Placed BEFORE listInstead, which would otherwise swallow it: listInstead only excludes the two
+            // confinement errors by name, so a new refusal reason silently degrades into a directory listing and
+            // the boundary stops being visible as a boundary.
+            emitAct({ agent: who, depth, actionType: "read_repo", url: want, ok: false, bytes: 0, error: "out of scope" });
+            emit(run, "scopeRefused", { by: who, depth, file: want, scopeSize: scope.length });
+            history.push({ role: "user", content: scopeRefusal(want, scope) });
           } else if (listInstead) {
             // List the requested subtree if it exists; otherwise the whole repository, because a wrong path is exactly
             // when the agent most needs to see the real one.
-            const sub = await listRepoFiles(repo, want);
-            const l = sub.ok && sub.files.length ? sub : await listRepoFiles(repo);
+            const sub = await listRepoFiles(repo, want, 400, scope);
+            const l = sub.ok && sub.files.length ? sub : await listRepoFiles(repo, "", 400, scope);
             if (l.ok) {
               didExecute = true;
               emitAct({ agent: who, depth, actionType: "read_repo", url: (want || ".") + "/", ok: true, bytes: l.files.length, error: "" });
@@ -2973,7 +2983,7 @@ async function runHunt(run) {
   try {
     // The digest supersedes the old vocabulary block: same names, plus line numbers, sizes and route registrations.
     // Sending both would pay twice for the same information.
-    const dg = await repoDigest(repo).catch(() => null);
+    const dg = await repoDigest(repo, { scope: normScopeFiles(reg.guardrails?.scopeFiles) }).catch(() => null);
     tokens = await investigate(run, worker, {
       digest: dg,
       coverageMap: reg.guardrails?.coverageMap !== false,
@@ -3589,7 +3599,7 @@ async function runGated(run, worker, persistExtra, perAgentTally, soloWorker = n
     const reg = await updateOrg((o) => { seedLenses(o); }).then(() => readOrg()).catch(() => org0);
     // Verbatim, on one agent. A lens that reaches the agent as a manager's paraphrase is not that lens.
     const hunter = soloWorker || worker;
-    const dg0 = await repoDigest(findingRepo(org0)).catch(() => null);
+    const dg0 = await repoDigest(findingRepo(org0), { scope: normScopeFiles(org0.guardrails?.scopeFiles) }).catch(() => null);
     tokens += await investigate(run, hunter, {
       digest: dg0,
       coverageMap: org0.guardrails?.coverageMap !== false,
@@ -4393,6 +4403,79 @@ export function collapseReads(history, keep = 2, minBytes = 1500) {
   });
 }
 
+// A MECHANICAL SCOPE: the set of repository paths a run may open at all.
+//
+// The reason this is mechanical and not a sentence in the prompt: telling the model where to look does not work.
+// Measured across two providers on the same planted defect, with the objective naming the 23 changed files and
+// forbidding the rest of the repository — Kimi put 7 of 16 repo actions inside the named window, DeepSeek 6 of 9
+// (Fisher exact p = 0.41, so not even a real difference), and NEITHER opened the one file holding the defect.
+// Five earlier whole-repo rounds spent 41 of 50 searches inside a single file and never opened it either. An
+// instruction to stay in scope is a request; a file list the reader cannot get past is a boundary.
+//
+// Empty scope means the whole repository, exactly as before — this is opt-in and inert until set.
+export function normScopeFiles(v) {
+  const raw = Array.isArray(v) ? v : String(v == null ? "" : v).split(/[\n,]+/);
+  const seen = new Set();
+  const out = [];
+  for (const s of raw) {
+    // Normalised the same way listRepoFiles emits paths, or a Windows-style entry silently matches nothing and the
+    // scope reads as "deny everything" — a guardrail that fails closed for the wrong reason is still broken.
+    const t = String(s == null ? "" : s).trim().replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "").replace(/\/+$/, "");
+    if (!t || t === "." || t.split("/").includes("..")) continue;
+    if (seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+    if (out.length >= 500) break;
+  }
+  return out;
+}
+
+// A path is in scope if it IS a listed entry, or sits under a listed directory. Prefix matching is on path
+// segments, not characters: "src" must not admit "srcache/x.mjs".
+export function inScope(file, scope) {
+  if (!Array.isArray(scope) || !scope.length) return true;
+  const f = String(file == null ? "" : file).trim().replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "");
+  if (!f) return false;
+  return scope.some((s) => s === f || f.startsWith(s + "/"));
+}
+
+// Appended to the read_repo doc line when a scope is set. Says it is ENFORCED, because the measured failure was not
+// that the model disagreed with the instruction — it was that it drifted out of a window it had already been given
+// in plain words. A boundary the reader believes is advisory gets treated as advice.
+export function scopeLine(org, list = null) {
+  const scope = list || normScopeFiles(org?.guardrails?.scopeFiles);
+  if (!scope.length) return "";
+  const shown = scope.slice(0, 40);
+  return `\n  THIS ROUND IS SCOPED. read_repo can open ONLY these ${scope.length} path(s), and the map lists only`
+    + ` these. Any other path is refused by the runner rather than by your judgement, so there is nothing to be`
+    + ` gained by trying one:\n` + shown.map((x) => "    " + x).join("\n")
+    + (scope.length > shown.length ? `\n    …and ${scope.length - shown.length} more` : "");
+}
+
+// Which of the three things a read_repo turn does, in one place so a test can assert the decision the runner
+// really makes rather than a restatement of it.
+//
+// `target` came out of resolveRepoTarget over an already-scoped listing, so it is in scope by construction. The
+// case this exists for is the other one: `want` is an unresolved string handed straight to the filesystem, and a
+// real file the scope excludes would otherwise be read by name. Filtering the listing does not close that — the
+// agent never has to use a path the listing gave it.
+export function repoReadPlan(target, want, scope) {
+  if (target) return { kind: "read", path: target };
+  if (!want) return { kind: "list", path: "" };
+  return inScope(want, scope) ? { kind: "read", path: want } : { kind: "refuse", path: want };
+}
+
+// What the agent is told when it reaches outside. Names the whole scope when it is short enough to act on, because
+// a refusal that does not say where to go instead just costs a turn.
+export function scopeRefusal(want, scope) {
+  const shown = scope.slice(0, 40);
+  return `OUT OF SCOPE: "${want}" is not one of the ${scope.length} path(s) this round may open, so it was not read.`
+    + ` This is enforced, not advisory — asking again will fail again.\nThe scope is:\n`
+    + shown.map((s) => "  " + s).join("\n")
+    + (scope.length > shown.length ? `\n  …and ${scope.length - shown.length} more` : "")
+    + `\nRead one of those, or say what you concluded from what you have already seen.`;
+}
+
 export async function readRepoFile(repo, rel, cap = 4000) {
   const abs = repoPathSafe(repo, rel);
   if (!abs) return { ok: false, error: "that path is not inside the configured repository" };
@@ -4481,14 +4564,14 @@ export function repoCoverage(digest, seen) {
 // claim this project has produced came from reasoning about a prefix as though it were the file. Saying so up front
 // is cheaper than the agent discovering it per file, which is what the wasted rounds were.
 export async function repoDigest(repo, opts = {}) {
-  const { maxFiles = 400, perFile = 12, readCap = 12000 } = opts;
+  const { maxFiles = 400, perFile = 12, readCap = 12000, scope = null } = opts;
   // listRepoFiles answers {ok:true, files:[]} for a path that does not exist, so "the operator mistyped
   // guardrails.findingRepo" and "this repository contains no source" arrive identically — and the first would render
   // as a silently empty map. Same species as a search reporting zero hits for a pattern it never compiled.
   if (!repo || !(await stat(repo).then((s) => s.isDirectory()).catch(() => false))) {
     return { ok: false, error: `no repository at ${repo || "(unset)"} — check guardrails.findingRepo` };
   }
-  const l = await listRepoFiles(repo);
+  const l = await listRepoFiles(repo, "", 400, scope);
   if (!l.ok) return { ok: false, error: l.error };
   const src = (l.files || []).filter((f) => /\.(mjs|js|ts|jsx|tsx|py|go|rb|rs|java)$/.test(f));
   const entries = [];
@@ -4583,16 +4666,19 @@ export function vocabularyText(vocab) {
     + vocab.entries.map((e) => "  " + e.file + ": " + e.names.join(", ")).join("\n");
 }
 
-export async function searchRepoFiles(repo, needle, rel = "", cap = 60) {
+export async function searchRepoFiles(repo, needle, rel = "", cap = 60, scope = null) {
   const term = String(needle == null ? "" : needle).trim();
   if (!term) return { ok: false, error: "no search term" };
   let files;
   if (rel) {
     const abs = repoPathSafe(repo, rel);
     if (!abs) return { ok: false, error: "that path is not inside the configured repository" };
+    // Checked here as well as at the call site. Search reads whole files and reports their contents, so an
+    // unscoped search is a read of everything by another name — the exact hole a read-only check would leave open.
+    if (!inScope(rel, scope)) return { ok: false, error: "that path is outside this round's scope", outOfScope: true };
     files = [rel];
   } else {
-    const l = await listRepoFiles(repo);
+    const l = await listRepoFiles(repo, "", 400, scope);
     if (!l.ok) return l;
     files = l.files;
   }
@@ -4625,7 +4711,11 @@ export async function searchRepoFiles(repo, needle, rel = "", cap = 60) {
   return { ok: true, term, mode, hits, scanned, truncated: hits.length >= cap };
 }
 
-export async function listRepoFiles(repo, sub = "", cap = 400) {
+// `scope` filters the result. Filtering HERE and not only at the read site is deliberate: this list is what the
+// agent is shown, what resolveRepoTarget resolves against, and what a whole-repository search walks. Showing a
+// path that cannot then be opened is the same defect as advertising read_repo to an agent whose allow list omits
+// it — the round spends its turns reaching for something that was never available.
+export async function listRepoFiles(repo, sub = "", cap = 400, scope = null) {
   const base = sub ? repoPathSafe(repo, sub) : path.resolve(String(repo || ""));
   if (!base || (!sub && !String(repo || "").trim())) return { ok: false, error: "no repository is configured" };
   const root = path.resolve(String(repo));
@@ -4639,11 +4729,16 @@ export async function listRepoFiles(repo, sub = "", cap = 400) {
       if (REPO_SKIP.has(e.name) || e.name.startsWith(".")) continue;
       const abs = path.join(dir, e.name);
       if (e.isDirectory()) await walk(abs, depth + 1);
-      else if (e.isFile()) out.push(path.relative(root, abs).split(path.sep).join("/"));
+      else if (e.isFile()) {
+        const rel = path.relative(root, abs).split(path.sep).join("/");
+        if (inScope(rel, scope)) out.push(rel);
+      }
     }
   };
   await walk(base, 0);
-  return { ok: true, files: out.sort(), truncated: out.length >= cap };
+  // `truncated` must not fire merely because the scope filtered things out — it means "the cap cut the list short",
+  // and a false truncation warning reads as "there is more you cannot see" when the scope is the whole story.
+  return { ok: true, files: out.sort(), truncated: out.length >= cap, scoped: Array.isArray(scope) && scope.length > 0 };
 }
 
 // npm cannot be spawned directly on Windows: execFile refuses a .cmd (Node's CVE-2024-27980 fix) and throws
@@ -5399,6 +5494,9 @@ const server = createServer(async (req, res) => {
         if (body.maxActionsPerRun !== undefined) o.guardrails.maxActionsPerRun = Math.max(0, Math.min(100, Math.round(Number(body.maxActionsPerRun) || 0)));
         if (body.refute !== undefined) o.guardrails.refute = !(body.refute === false || body.refute === "false");
         if (body.findingRepo !== undefined) o.guardrails.findingRepo = String(body.findingRepo || "").slice(0, 300);
+        // Accepts an array or a newline/comma-separated string, because the UI textarea and the API disagree about
+        // which one a "list of files" is. Normalised on the way IN so what is stored is what inScope compares.
+        if (body.scopeFiles !== undefined) o.guardrails.scopeFiles = normScopeFiles(body.scopeFiles);
         if (body.maxPaidUsdPerRun !== undefined) o.guardrails.maxPaidUsdPerRun = Math.max(0, Math.round((parseFloat(body.maxPaidUsdPerRun) || 0) * 100) / 100);
         if (body.investigate !== undefined) o.guardrails.investigate = !(body.investigate === false || body.investigate === "false" || body.investigate === 0 || body.investigate === "0");
         // The coverage marking, as a switch, so its EFFECT can be measured against a control arm rather than

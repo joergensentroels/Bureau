@@ -116,6 +116,19 @@ ok("the sign-in control is shared, not duplicated per call site", (HTML.match(/f
   // The empty case has to be explained where it is set, not only in a commit message.
   ok("an empty repository field says what that means", HTML.includes("CANNOT be verified"));
 }
+{
+  // The scope. A guardrail with no way to set it is a guardrail nobody uses, and one whose refusal renders as
+  // nothing looks identical to a round that simply never tried to leave.
+  ok("the guardrails form has the scope box", HTML.includes('id="gScope"'));
+  ok("and it is actually saved", HTML.includes("scopeFiles:wrap.querySelector(" + Q + "#gScope" + Q + ").value"));
+  ok("the empty case is explained where it is set", HTML.includes("blank = the whole repository"));
+  ok("and it says who enforces it — the entire difference from writing the same thing in the objective",
+     HTML.includes("Enforced by the runner"));
+  // BOTH halves. These live ~1,400 lines apart and the live one went in first; a replayed run would then have
+  // shown nothing for a refusal, which is the same picture as a round that stayed in scope by itself.
+  ok("the live feed renders a scope refusal", HTML.includes('ev.type==="scopeRefused"'));
+  ok("and the compact history does too", HTML.includes("scopeRefused:" + BT));
+}
 
 console.log(fail ? `\nFAILURES — ${pass} passed, ${fail} failed` : `\nALL PASS ✓ — ${pass} passed, 0 failed`);
 process.exitCode = fail ? 1 : 0;
