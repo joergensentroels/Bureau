@@ -11,7 +11,7 @@ import {
   objectiveSignature, dedupeMemories, deliverableEmbedText, deliverableTitle,
   chunkDocument, deliverableChunks, modelUnreachable, trimVersions, clientKey, isLoopback,
   startLogTee, webhookBody,
-  normalizeFinding, verifyFinding, findingCheckAllowed, npmArgv, agentMayRun, usageSplit, addUsage, tierModelToSend, callCostUsd, repoReadCap, blankReplyReason, NO_THINKING, usagesForTurn, jsonFailure,
+  normalizeFinding, verifyFinding, findingCheckAllowed, npmArgv, agentMayRun, usageSplit, addUsage, tierModelToSend, callCostUsd, repoReadCap, blankReplyReason, NO_THINKING, TURN_TOKENS, TURN_TOKENS_RETRY, usagesForTurn, jsonFailure,
   LENSES, pickLens, investigateObjective, investigate, seedLenses, activeLenses, bookLensRound,
   normalizeLens, lensParaphrase, addProposedLens, lensProposalObjective, sigWords, postReadGuidance,
   turnBudgetWarning,
@@ -1332,16 +1332,21 @@ console.log("# an empty reply reports what was actually spent, and the retry pul
   // capping only the retry left an uncapped call at the head of every turn, and that call returned "1,000 of
   // 1,000 output tokens (100%) went to reasoning" on eleven of twelve turns — a wasted round trip per turn, for
   // thinking that was then discarded rather than carried forward.
-  chk('  the FIRST call of a turn is capped', /raw = await askCapped\(1000\)/.test(src));
-  chk('  and the retry raises the budget, the only lever left once thinking is capped',
-      /raw = await askCapped\(2600\)/.test(src));
+  chk('  the FIRST call of a turn is capped', /raw = await askCapped\(TURN_TOKENS\)/.test(src));
+  chk('  and the retry gets MORE room, the only lever left once thinking is capped',
+      /raw = await askCapped\(TURN_TOKENS_RETRY\)/.test(src));
+  // The budget is a measured number now, not a guess. Five rounds produced eight unparsed replies and every one
+  // was TRUNCATED at the old 1,000 — a register_finding action carries a claim, a url, details and a check
+  // command, and one round lost all four of its turns to replies cut off mid-object.
+  chk('  the first-call budget is big enough for a whole register_finding action', TURN_TOKENS >= 2600);
+  chk('  and the retry gets strictly more than the first call', TURN_TOKENS_RETRY > TURN_TOKENS);
   // Against the CODE, not the whole file. The first version searched the source and failed on the COMMENT that
   // quotes the old line in order to explain why it was wrong — an assertion satisfiable by deleting the
   // explanation. Strip comment lines and ask what the runner actually emits.
   const code = src.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
   chk('  and no longer claims a larger budget is the first move',
       !/retrying with a larger output budget/.test(code));
-  chk('  CONTROL: stripping comments did not just empty the haystack', code.includes("askCapped(2600)"));
+  chk('  CONTROL: stripping comments did not just empty the haystack', code.includes("askCapped(TURN_TOKENS)"));
   chk('  a provider that refuses the cap falls back rather than failing the turn', /capRefused: true/.test(src));
   // One refusal per RUN, not per turn: re-sending a field the provider has already rejected would cost an extra
   // round trip on every remaining turn.

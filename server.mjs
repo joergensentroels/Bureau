@@ -2235,7 +2235,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
       }
     };
     try {
-      raw = await askCapped(1000);
+      raw = await askCapped(TURN_TOKENS);
       // A reasoning model can spend the whole output budget thinking and return nothing at all. The first fix here
       // raised the budget from 1000 to 2600, on the theory that the budget was too small; measured, that was the
       // wrong lever — 29,125 of 29,246 output tokens went to reasoning and eleven consecutive turns came back
@@ -2247,7 +2247,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
         const split = usageSplit(meta.usage, 0);
         emit(run, "retry", { agent: who, depth, capped, why: blankReplyReason(split, capped),
                              outputTokens: split.output, reasoningTokens: split.reasoning });
-        raw = await askCapped(2600);
+        raw = await askCapped(TURN_TOKENS_RETRY);
       }
       noteLlm(run, true);
     }
@@ -4577,6 +4577,23 @@ export function repoReadCap(paid, scope) {
 // of twelve turns. There was no judgement being preserved by leaving it off — the thinking was discarded, not
 // carried forward — only tokens burned and a round trip wasted per turn.
 export const NO_THINKING = { reasoningEffort: "minimal", thinking: { type: "disabled" } };
+
+// How much room a turn gets to answer in.
+//
+// Was 1,000. Measured over five scoped rounds once the thinking cap landed: EVERY one of the eight replies that
+// failed to parse was TRUNCATED — cut off mid-object, one cause rather than several — and one of the five rounds
+// lost all four of its turns that way and made no claim at all. A register_finding action carries a claim, a url,
+// a details field and a check command, and 1,000 tokens is not room for it. The guidance told the model to say
+// less when the honest answer was to give it more space.
+//
+// The old budget was sized when the whole output could vanish into reasoning, so more room bought more thinking
+// and nothing else. Thinking is capped from the first call now and output is $0.28/M, which makes room cheap and
+// truncation expensive: a truncated turn costs its own tokens AND buys nothing.
+//
+// 2,600 is what criteria derivation already uses and stays inside Latch's 120s ceiling. The retry gets more still,
+// because an empty reply when thinking is ALREADY capped is not a thinking problem.
+export const TURN_TOKENS = 2600;
+export const TURN_TOKENS_RETRY = 4000;
 
 // Every call of a turn, priced separately. `meta.usage` is overwritten per call and the turn books once, so a
 // turn that retried charged only for the survivor. The fallback estimate describes the text the turn ended up
