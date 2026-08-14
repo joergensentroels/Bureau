@@ -391,6 +391,23 @@ export const POLICY_ACTIONS = [
   "declined_check", "propose_lens", "github_file", "github_repo", "read_issues", "github_issue",
   "github_comment", "github_pr",
 ];
+// Action types the model can still reach that this server deliberately does NOT execute, each mapped to where
+// it is answered. The value is prose for a human; the KEY is what the instrument reads.
+//
+// This exists because "advertised to the model, no executor" has now shipped three times, and every time the gap
+// was invisible for the same reason: the enum, the prompt catalogue, the synonym table and the dispatcher are four
+// lists in one file that nothing compared. `other` was enumerated and undispatched and burned nine silent turns in
+// one round. `note` was documented as the RIGHT answer for an empty-handed review round, put in three action sets,
+// and asserted by a test to be "IS implemented" — while two rewrite layers made sure it never reached a dispatcher
+// that had no branch for it anyway. `email_draft` was hard-floored and filed to Latch as a real external_contact
+// approval, so it cost a human decision before falling to the catch-all.
+//
+// So the fix is not another correct list, it is that the lists must agree mechanically. test/action-surface.test.mjs
+// derives the reachable set and the dispatched set from this file and fails unless every difference is named here.
+// Adding a name here is a deliberate, reviewable act; forgetting one is now impossible rather than merely unlikely.
+export const UNEXECUTED_ACTIONS = {
+  other: "refused by name before dispatch with a reason, and three in a row end the round (the empty-action guard)",
+};
 // The actionType the caller asked for that this server cannot dispatch, or "" when the clause is fine.
 // Split out from cleanPolicyWhen rather than folded into it: the sanitizer is exported and total by
 // contract (garbage in, clause out, never throws), and only the write endpoints know the difference
@@ -1215,7 +1232,19 @@ export function systemPrompt(org, agent, opts = {}) {
     "Respond with STRICT JSON only (no prose, no code fences):",
     '{ "thought":"one sentence", "speak":"what you tell the CEO, in your voice (1-3 sentences)",',
     '  "next": { "type":"propose_action"|"escalate"|"finish",',
-    '     "actionType":"web_search"|"web_research"|"file_write"|"read_file"|"purchase"|"api_call"|"shell"|"github_file"|"read_issues"|"github_issue"|"github_comment"|"github_pr"|"plan_add"|"ask_peer"|"ask_stakeholder"|"mcp_call"|"register_finding"|"email_draft"|"note",',
+    // Every name in this enum must have an executor. `email_draft` did not, and was the costliest possible
+    // version of that: hard-floored, so it could never auto-approve, and mapped to an `external_contact`
+    // approval in Latch — a real card, a real interruption, a real human decision — after which the dispatcher
+    // fell to its catch-all and told the agent Bureau cannot do that yet. It spent the operator's attention to
+    // buy nothing. It also had no doc line up in the catalogue, so this enum was the whole of its existence.
+    //
+    // Removed rather than built, because Bureau has no mail transport and adding one is not a bug fix: it is a
+    // new outbound channel in the repository whose entire argument is that reach belongs behind a credential
+    // boundary. An absent capability is honest; an advertised one that burns a human approval and does nothing
+    // is not. It stays on the hard floor in requiresCeoAlways and in the floor demo — the floor's job is to be
+    // closed BEFORE something needs it, including for approvals filed by older builds, and a floor that only
+    // covers what the current enum happens to offer is one release behind its own threat model.
+    '     "actionType":"web_search"|"web_research"|"file_write"|"read_file"|"purchase"|"api_call"|"shell"|"github_file"|"read_issues"|"github_issue"|"github_comment"|"github_pr"|"plan_add"|"ask_peer"|"ask_stakeholder"|"mcp_call"|"register_finding"|"note",',
     '     "title":"short title (or filename for file_write)", "details":"what and why", "command":"query for web_search; exact URL for web_research; full document for file_write; exact text otherwise",',
     '     "question":"when type=escalate: the specific thing you need the CEO to decide or provide",',
     '     "summary":"only when finishing" } }',
@@ -1407,8 +1436,21 @@ export function addUsage(acc, split) {
 }
 
 // The local model is unreliable at picking the right action/field: it confuses query-vs-URL,
-// over-uses "other"/"note", and puts the document/URL/query in the wrong place. This heuristic
+// over-uses "other", and puts the document/URL/query in the wrong place. This heuristic
 // "do what they meant" layer corrects the common mistakes before dispatch — no extra model call.
+//
+// "note" was in that catch-all too, from the initial commit, back when it was model noise and not an action. Four
+// commits after 8f77c4d documented it to the agent as the right answer for "I looked and found nothing", it still
+// was — so a note was rewritten into something else before it could ever be recorded. Measured over five notes
+// written exactly the way the doc line asks for them, FOUR came out as a different action: two file_write, one
+// web_research, one web_search. The word "note" is itself in `wantsWrite` below, so a note headed "Note on X"
+// with a real paragraph under it turned into a disk write; a note that quoted the URL it had checked turned into
+// a live fetch. Only a short note with no document-ish word survived, and the finish coercion in the turn loop
+// then swallowed that one, which is why `note` has never once reached the dispatcher.
+//
+// The rule this encodes: the layer may sharpen a VAGUE choice ("other", or nothing at all), never overrule a
+// documented one. An action the prompt describes has an executor, and rewriting it silently escalates a
+// side-effect-free action into one with real-world reach.
 const URL_RE = /https?:\/\/[^\s"'<>)\]]+/i;
 export function normalizeAction(next, objective) {
   const n = { ...next };
@@ -1444,7 +1486,7 @@ export function normalizeAction(next, objective) {
   else if (["register_finding", "finding", "report_finding", "defect", "report_defect", "bug", "log_finding"].includes(at)) at = "register_finding";   // claim a defect AND supply the control that proves it
   if (at === "web_research" && !urlIn) at = "web_search";                 // wants to research but only has a query
   else if (at === "web_search" && urlIn) { at = "web_research"; n.command = urlIn; } // "search" but gave a URL
-  else if (!at || at === "other" || at === "note") {                      // vague/catch-all -> infer intent
+  else if (!at || at === "other") {                                       // vague/catch-all -> infer intent
     if (urlIn) { at = "web_research"; n.command = urlIn; }
     else if (wantsWrite && (cmd.length > 120 || det.length > 120)) at = "file_write";
     else if (wantsSearch) at = "web_search";
@@ -2318,7 +2360,13 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
     // Observed seven times in a row in one hunting round: the model wrapped its finish in propose_action, so it never
     // matched the finish branch, fell through the action dispatch, and burned a turn each time saying the same thing.
     // Treat it as the finish it plainly is.
-    if (next.type !== "finish" && /^(finish|done|complete|completed|end|stop|none|no_action|nothing|note)$/.test(String(next.actionType || "").toLowerCase())) {
+    //
+    // `note` is deliberately NOT in this list, and was until this commit. Every other word here means "I am done";
+    // note means "here is what I checked", which is the OPPOSITE — the agent has more to do. Coercing it ended the
+    // task and recorded nothing, so the one action the prompt offers for an honest empty-handed round was also the
+    // one that stopped the round. It has an executor below now, and this list is the second of the two layers that
+    // kept it from ever reaching it.
+    if (next.type !== "finish" && /^(finish|done|complete|completed|end|stop|none|no_action|nothing)$/.test(String(next.actionType || "").toLowerCase())) {
       next.type = "finish";
       next.summary = next.summary || next.title || next.details || String(parsed.speak || "Done.");
     }
@@ -2463,6 +2511,36 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
         history.push({ role: "user", content: `Recorded in the company plan: "${title}". It persists for a future run — you don't need to do it now. Continue toward THIS objective or finish.` });
       } else {
         history.push({ role: "user", content: `plan_add needs the task in "title". Try again or finish.` });
+      }
+      continue;
+    }
+    // ---- note: what this agent checked and what it concluded, when there is nothing to run.
+    //
+    // Filed HERE, beside plan_add and above the approval seam, rather than down in the approved-action chain with
+    // declined_check. The doc line promises "it runs instantly and changes nothing", and the default tier is
+    // supervised: routed through fileApproval, a note would sit in Latch for up to ten minutes waiting for a human
+    // to click approve on something that does nothing. That is the same cost that got email_draft removed from the
+    // action enum in this commit — spending the one genuinely scarce resource here, the operator's attention, on a
+    // no-op — and it would have been a second instance of it rather than a fix.
+    //
+    // Policy still governs it (evaluatePolicy ran above, so `block note` works) and it still counts against the
+    // run's action cap, so "no approval" does not mean "ungoverned".
+    if (actType === "note") {
+      const shape = normalizeNote({ heading: next.title, found: next.details, command: next.command });
+      if (!shape.ok) {
+        emitAct({ agent: who, depth, actionType: "note", url: "", ok: false, bytes: 0, error: "shape" });
+        history.push({ role: "user", content: "That note was not recorded: " + shape.reason + "." });
+      } else {
+        (run.notes || (run.notes = [])).push({ ...shape.note, by: who, at: Date.now() });
+        // Set for the same reason declined_check and ask_stakeholder set it: this IS the work product of a round
+        // that found nothing, and the finish guard would otherwise answer an honest note with "NOTHING has actually
+        // run yet" — the nag that makes an agent invent an action, which is what the note exists to replace.
+        didExecute = true;
+        // emitResult logs it to the company audit as kind "action", so the note outlives the run without a new
+        // collection to store or a new panel to render it. Nothing leaves the machine and no org state changes.
+        emitAct({ agent: who, depth, actionType: "note", url: shape.note.heading.slice(0, 60), ok: true, bytes: shape.note.found.length, error: "" });
+        emit(run, "note", { by: who, depth, heading: shape.note.heading, found: shape.note.found });
+        history.push({ role: "user", content: `Noted on the record: "${shape.note.heading}". Nothing was run and nothing changed — that is what this action is for, so it does NOT need doing again. Carry on with the objective, or finish if the work is done.` });
       }
       continue;
     }
@@ -3982,6 +4060,27 @@ export function recordDeclinedCheck(org, rec, now = 0) {
               by: rec.by || "", runId: rec.runId || "", at: now, seen: 1, contradicted: rec.contradicted || [] };
   org.declinedChecks = [d, ...org.declinedChecks].slice(0, 100);
   return { added: true, declined: d };
+}
+
+// ---- the note: a check that RAN and showed nothing -------------------------------------------------------------
+//
+// declined_check's counterpart. That one records a check that could not be run; this one records one that ran and
+// came back empty, which is the answer most review rounds should give and the one an agent will invent an action
+// rather than give. Both are refused when they carry no substance, for the same reason.
+//
+// Both fields are required, and the second is the point of the action. "I looked and found nothing" that does not
+// say WHERE it looked is a shrug, and a shrug is indistinguishable from a round that never looked — which is the
+// exact confusion this repo keeps having to undo. The heading alone would let the register fill with them.
+export function normalizeNote(body) {
+  const t = (v, n) => String(v == null ? "" : v).trim().slice(0, n);
+  const heading = t(body?.heading ?? body?.title, 200);
+  const found = t(body?.found ?? body?.details ?? body?.command, 2000);
+  if (!heading) return { ok: false, reason: "give it a heading, or nobody will find it again" };
+  if (!found) {
+    return { ok: false, reason: "say what you looked at and what you found or ruled out — a note with only a "
+      + "heading cannot be told apart from a round that never looked" };
+  }
+  return { ok: true, note: { heading, found } };
 }
 
 // ---- the stakeholder question queue: an open question must not stop the work -----------------------------------

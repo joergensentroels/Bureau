@@ -20,6 +20,7 @@ import {
   looksLikeRegex, unsafeRegex, repoVocabulary, vocabularyText, collapseReads, repoDigest, digestText, noteRepoRead, repoCoverage,
   normalizeQuestion, questionKey, recordQuestion, answerQuestion, systemPrompt, unqueuedAssumption, tierReason,
   blockerCandidates, falsifyBlocker, normalizeDeclinedCheck, recordDeclinedCheck, refuteMsgs,
+  normalizeNote, UNEXECUTED_ACTIONS,
   buildUndecidedMsgs, normalizeUndecided, unaddressedUndecided, runInvestigateFlag,
 } from "../server.mjs";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
@@ -1002,6 +1003,15 @@ console.log("# an excuse is a claim: the declined-check register");
   chk('  a complete declaration is accepted', normalizeDeclinedCheck(good).ok === true);
   chk('  and it reads the action field names too', normalizeDeclinedCheck({ title: 'x', command: 'y', details: 'z' }).ok === true);
 
+  // Its counterpart: the check that RAN and showed nothing. Same gate, same reason — a note that does not say
+  // where it looked is a shrug, and a shrug and a round that never looked leave identical marks on the record.
+  chk('  a note needs a heading', normalizeNote({ details: 'looked everywhere' }).ok === false);
+  chk('  and what was actually looked at', normalizeNote({ heading: 'Auth paths' }).ok === false);
+  chk('  saying so in the reason', normalizeNote({ heading: 'Auth paths' }).reason.includes('never looked'));
+  chk('  a complete note is accepted', normalizeNote({ heading: 'Auth paths', found: 'checked all six, all gated' }).ok === true);
+  chk('  and it reads the action field names too', normalizeNote({ title: 'x', details: 'y' }).ok === true);
+  chk('  falling back to command when details is empty', normalizeNote({ title: 'x', command: 'y' }).ok === true);
+
   // The falsifier. An excuse says "the operator token", not OPERATOR_TOKEN, so noun phrases become identifier
   // spellings — that translation is the whole trick.
   const c = blockerCandidates(good.because);
@@ -1134,7 +1144,17 @@ console.log("# a turn that proposes nothing must not pass in silence");
   chk('  the round records that it gave up, rather than reading as a clean dry round', src.includes('gaveUp: true'));
   // The root cause, and the control on it: the prompt must not offer an action nothing implements.
   chk('  "other" is no longer advertised in the actionType enum', !src.includes('|"note"|"other"'));
-  chk('  while note — which IS implemented — still is', src.includes('|"email_draft"|"note"'));
+  // What stood here read: chk('while note — which IS implemented — still is', src.includes('|"email_draft"|"note"')).
+  // It was false for as long as it was green. `note` was enumerated, documented to the agent as the right answer for
+  // an empty-handed review round, and listed in three action sets — with no dispatch branch anywhere. The assertion
+  // confirmed the ENUM's spelling and then said something about the DISPATCHER that nothing had checked, which is
+  // how a green suite came to certify the opposite of the truth. A probe that reads the source and asserts on its
+  // text passes whatever the code does; it is the shape the finding gate refuses when an agent submits one.
+  //
+  // The property moved to test/action-surface.test.mjs, where both sides are derived from source and the reachable
+  // one is canonicalised by CALLING normalizeAction rather than by reading it. What belongs here is the narrow fact
+  // this block is about: "other" has no executor on purpose, and that is now written down instead of assumed.
+  chk('  and "other" has no executor BY REGISTRATION, not by oversight', "other" in UNEXECUTED_ACTIONS);
 }
 console.log("# a round starts from the codebase's own names, not from conventions it may not use");
 {
