@@ -821,6 +821,9 @@ export async function askLlm(messages, opts = {}) {
       const r = json.routing || null;
       opts.meta.routing = r;
       opts.meta.usage = json.usage || null;
+      // …and keep EVERY call's usage, because `meta.usage` is overwritten and a turn can make more than one call.
+      // Booking only the survivor is how eleven failed calls came to cost nothing.
+      (opts.meta.usages || (opts.meta.usages = [])).push(json.usage || null);
       opts.meta.provider = json.provider || "";
       opts.meta.model = json.model || "";
       opts.meta.paid = !!(r && (r.mode === "external" || r.usedFallback));
@@ -1257,25 +1260,78 @@ async function writeBioFile(agent) {
   } catch { /* the org record stays authoritative; the file is a convenience mirror */ }
 }
 
-export function safeParse(text) {
-  if (!text) return null;
-  let s = text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+// Strip the wrapping a model puts around JSON: a <think> block, a ``` fence, surrounding whitespace.
+export const jsonBody = (text) =>
+  String(text == null ? "" : text).replace(/<think>[\s\S]*?<\/think>/gi, "").trim()
+    .replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+
+// Where the first JSON object starts and ends, ignoring braces inside strings, and whether it ever CLOSED.
+// Shared by safeParse and jsonFailure so the parser and the diagnosis of its failure cannot drift apart — a
+// diagnosis derived from a second, similar-looking walk is a guess about what the real one did.
+export function jsonSpan(s) {
   const start = s.indexOf("{");
-  if (start < 0) return null;
-  // Brace-match from the first "{" (ignoring braces inside strings) so a stray trailing brace or
-  // junk after the object — a very common small-model mistake — doesn't break the parse.
-  let depth = 0, inStr = false, esc = false, end = -1;
+  if (start < 0) return { start: -1, end: -1, closed: false, rawNewlineInString: false };
+  let depth = 0, inStr = false, esc = false, end = -1, rawNewlineInString = false;
   for (let i = start; i < s.length; i++) {
     const c = s[i];
-    if (inStr) { if (esc) esc = false; else if (c === "\\") esc = true; else if (c === '"') inStr = false; continue; }
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+      else if (c === "\n" || c === "\r") rawNewlineInString = true;   // the single most common way this JSON breaks
+      continue;
+    }
     if (c === '"') { inStr = true; continue; }
     if (c === "{") depth++;
     else if (c === "}") { depth--; if (depth === 0) { end = i; break; } }
   }
+  return { start, end, closed: end >= 0, rawNewlineInString };
+}
+
+export function safeParse(text) {
+  if (!text) return null;
+  const s = jsonBody(text);
+  const { start, end } = jsonSpan(s);
+  if (start < 0) return null;
   if (end >= 0) { try { return JSON.parse(s.slice(start, end + 1)); } catch {} }
   const b = s.lastIndexOf("}");                       // fallback: naive slice
   if (b > start) { try { return JSON.parse(s.slice(start, b + 1)); } catch {} }
   return null;
+}
+
+// WHY a reply did not parse, and what to say back about it.
+//
+// Bureau used to answer every unparseable reply with "That was not valid JSON. Reply again with STRICT JSON only."
+// — no reason, no example, and NO EVENT, so the failure was invisible from outside. Measured: a round read the
+// right file, found a candidate defect, said "I've been unable to format the probe JSON correctly", fell back to
+// trying an action it was not allowed, and finished having registered nothing. From the outside that run looked
+// like a round that simply found nothing, and the operator had no way to tell the difference.
+const SHAPE = '{"speak":"one short sentence","next":{"actionType":"register_finding",'
+  + '"title":"the one-sentence claim","url":"src/file.mjs:123","details":"the defect class",'
+  + '"command":"node --test test/thing.test.mjs"}}';
+export function jsonFailure(raw, attempt = 1) {
+  const s = jsonBody(raw);
+  const say = (reason, detail, advice) => ({
+    reason, detail: detail || "",
+    guidance: `That reply did not parse as JSON: ${advice}\n\nReply with ONE JSON object and nothing else — no prose `
+      + `before or after, no code fence, and NO raw line breaks inside a string (write \\n if you truly need one). `
+      + `This shape:\n${SHAPE}`
+      + (attempt >= 2 ? `\n\nThis is attempt ${attempt}. Drop every optional field and send the shortest object that `
+          + `still says what you mean; a long "details" is the usual reason a reply gets cut off mid-string.` : ""),
+  });
+  if (!s) return say("empty", "", "it was empty.");
+  const span = jsonSpan(s);
+  if (span.start < 0) return say("prose", s.slice(0, 120), "there was no JSON object in it at all — it was prose.");
+  if (!span.closed) {
+    return say("truncated", s.slice(-120),
+      "the object was never closed, which means the reply was CUT OFF before it finished. Say less.");
+  }
+  if (span.rawNewlineInString) {
+    return say("raw-newline", "", "a string value contained a real line break. JSON strings cannot span lines.");
+  }
+  try { JSON.parse(s.slice(span.start, span.end + 1)); }
+  catch (e) { return say("syntax", String(e.message || "").slice(0, 160), String(e.message || "a syntax error") + "."); }
+  return say("unknown", "", "it could not be read, though the reason is not obvious.");
 }
 const estTokens = (msgs) => Math.ceil(msgs.reduce((n, m) => n + String(m.content || "").length, 0) / 4);
 
@@ -2126,7 +2182,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
   const canUsePaid = () => run.paidAvailable && !run.hush && budgetUsd > 0 && (startPaidSpent + paidThisRun) < budgetUsd
     && (!run.maxPaidUsd || runPaidTotal(run) < run.maxPaidUsd);   // server-side per-run paid ceiling (guardrails.maxPaidUsdPerRun)
   // reliability guards: the weak local model tends to "finish" claiming it did work it never did.
-  let didExecute = false, finishRejections = 0;
+  let didExecute = false, finishRejections = 0, unparsed = 0;
   let emptyActions = 0;   // consecutive turns that proposed nothing usable; three ends the round
   // Who approved the current action (auto vs a named approver), for the audit trail. Kept function-LOCAL
   // (not on `run`) so concurrent agents under parallel delegation can't clobber each other's attribution.
@@ -2166,27 +2222,32 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
     // actually sent rather than what the history holds.
     const sendable = collapseReads(history);
     const ask = (maxTokens, extra = {}) => askLlm(sendable, { maxTokens, routingPreference: usePaid ? "external" : "local", ...(usePaid && sendModel ? { model: sendModel } : {}), ...extra, meta });
+    // Capped unless this provider has already refused it in THIS run. One refusal is enough to learn from: retrying
+    // a rejected field every turn would cost an extra round trip per turn for the whole run.
+    const askCapped = async (maxTokens) => {
+      if (!usePaid || run.capUnsupported) return ask(maxTokens);
+      try { return await ask(maxTokens, NO_THINKING); }
+      catch (e) {
+        run.capUnsupported = true;
+        emit(run, "retry", { agent: who, depth, capRefused: true,
+                             why: "the provider refused a thinking cap (" + String(e.message || e).slice(0, 90) + ") — this run will stop sending it" });
+        return ask(maxTokens);
+      }
+    };
     try {
-      raw = await ask(1000);
+      raw = await askCapped(1000);
       // A reasoning model can spend the whole output budget thinking and return nothing at all. The first fix here
-      // raised the budget from 1000 to 2600, on the theory that the budget was too small. Measured since, on a
-      // scoped round that had everything else right: 29,125 of 29,246 output tokens went to reasoning, eleven
-      // consecutive turns came back empty, and the run finished "clean" with no findings. More budget buys more
-      // reasoning. Cap the thinking instead — that is what consumed it.
+      // raised the budget from 1000 to 2600, on the theory that the budget was too small; measured, that was the
+      // wrong lever — 29,125 of 29,246 output tokens went to reasoning and eleven consecutive turns came back
+      // empty. The second fix capped the thinking on the RETRY, which worked (100% reasoning became 3%, and ten
+      // content tokens per call became 559) but still spent an uncapped call first, every turn. So the cap now
+      // applies from the start, and a budget increase is what is left to try when an ALREADY-CAPPED call is empty.
       if (!String(raw || "").replace(/<think>[\s\S]*?<\/think>/gi, "").trim()) {
+        const capped = usePaid && !run.capUnsupported;
         const split = usageSplit(meta.usage, 0);
-        emit(run, "retry", { agent: who, depth, why: blankReplyReason(split),
+        emit(run, "retry", { agent: who, depth, capped, why: blankReplyReason(split, capped),
                              outputTokens: split.output, reasoningTokens: split.reasoning });
-        try {
-          raw = await ask(2600, NO_THINKING);
-        } catch (e) {
-          // The provider does not accept a thinking cap. Fall back to what this always did rather than turning a
-          // blank turn into a failed one — and SAY so, because "retried" and "retried differently" are not the
-          // same event and a run reading its own log should not have to guess which happened.
-          emit(run, "retry", { agent: who, depth, capRefused: true,
-                               why: "the provider refused a thinking cap (" + String(e.message || e).slice(0, 90) + ") — retrying on budget alone" });
-          raw = await ask(2600);
-        }
+        raw = await askCapped(2600);
       }
       noteLlm(run, true);
     }
@@ -2194,20 +2255,29 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
     const callTokens = estTokens(sendable) + Math.ceil((raw.length) / 4);
     tokens += callTokens;
     if (meta.paid) {
-      // Latch really served this turn from the paid provider. Prefer the provider's reported total
-      // usage (real money) over our estimate; price by the model that actually served it.
-      const split = usageSplit(meta.usage, callTokens);
-      const paidTokens = split.total;
-      paidTokensThisRun += paidTokens;
-      paidThisRun += callCostUsd(split, meta.model, paidTier);
-      run.paidUsage = addUsage(run.paidUsage, split);
+      // Latch really served this turn from the paid provider. Prefer the provider's reported usage (real money)
+      // over our estimate; price by the model that actually served it.
+      //
+      // EVERY call of the turn, not just the last. A turn can make two — the empty-reply retry does — and
+      // meta.usage is overwritten each time, so booking it once charged only the retry and made the failed call
+      // free. Measured: a round reported $0.003336 while the eleven uncounted first calls had really cost
+      // $0.004372, so the true spend was 2.3x the figure the budget cap was being enforced against.
+      for (const split of usagesForTurn(meta, callTokens)) {
+        paidTokensThisRun += split.total;
+        paidThisRun += callCostUsd(split, meta.model, paidTier);
+        run.paidUsage = addUsage(run.paidUsage, split);
+      }
       run.ranPaid = true;
     }
 
     const parsed = safeParse(raw);
     if (!parsed) {
+      // Emitted, because this used to be silent. A round that spent every turn failing to format its action was
+      // indistinguishable from a round that found nothing — same feed, same "clean" verdict, no trace of the cause.
+      const f = jsonFailure(raw, ++unparsed);
+      emit(run, "unparsed", { agent: who, depth, attempt: unparsed, reason: f.reason, detail: f.detail });
       history.push({ role: "assistant", content: raw });
-      history.push({ role: "user", content: "That was not valid JSON. Reply again with STRICT JSON only." });
+      history.push({ role: "user", content: f.guidance });
       continue;
     }
     history.push({ role: "assistant", content: JSON.stringify(parsed) });
@@ -4499,9 +4569,23 @@ export function repoReadCap(paid, scope) {
   return n > 0 && n <= SCOPED_WHOLE_FILE_LIMIT ? 60000 : 12000;
 }
 
-// Sent on the retry after an empty reply. Latch forwards both on its allowlist; a provider that does not know
-// them ignores or rejects them, and the caller falls back rather than failing the turn.
+// Sent on EVERY paid turn now, not only on the retry. Latch forwards both on its allowlist; a provider that does
+// not know them rejects the call, and the run stops sending them after the first refusal.
+//
+// The cap used to apply only to the retry, so each turn spent an uncapped call first. Measured on DeepSeek: that
+// first call returned "1,000 of 1,000 output tokens (100%) went to reasoning, leaving 0 for the answer" on ELEVEN
+// of twelve turns. There was no judgement being preserved by leaving it off — the thinking was discarded, not
+// carried forward — only tokens burned and a round trip wasted per turn.
 export const NO_THINKING = { reasoningEffort: "minimal", thinking: { type: "disabled" } };
+
+// Every call of a turn, priced separately. `meta.usage` is overwritten per call and the turn books once, so a
+// turn that retried charged only for the survivor. The fallback estimate describes the text the turn ended up
+// using, so it belongs to the LAST call; an earlier call that reported nothing is counted as reporting nothing
+// rather than being handed the final call's estimate.
+export function usagesForTurn(meta, fallbackTotal = 0) {
+  const list = Array.isArray(meta?.usages) && meta.usages.length ? meta.usages : [meta?.usage ?? null];
+  return list.map((u, i) => usageSplit(u, i === list.length - 1 ? fallbackTotal : 0));
+}
 
 // Why a reply came back empty, said in terms of what was measured rather than what was assumed.
 //
@@ -4510,10 +4594,15 @@ export const NO_THINKING = { reasoningEffort: "minimal", thinking: { type: "disa
 // 29,125 were reasoning, leaving 121 tokens of content across twelve calls — ten per call. And a larger budget is
 // the wrong lever: it buys more reasoning, so the round retried eleven times, each with more room, and finished
 // "clean" having found nothing. An instrument that names the wrong cause sends the fix in the wrong direction.
-export function blankReplyReason(split) {
+export function blankReplyReason(split, capped = false) {
+  // `capped` changes what an empty reply MEANS. Uncapped, reasoning is the obvious suspect and capping it is the
+  // fix. Already capped, reasoning has been ruled out, and saying "retrying with thinking capped" would be the
+  // instrument claiming to do something it already did — the same class of lie as the line this replaced.
+  const next = capped ? " — thinking is already capped, so retrying with more room instead"
+                      : " — a larger budget would only buy more reasoning, so retrying with thinking capped instead";
   const out = Number(split?.output), rea = Number(split?.reasoning);
   if (!Number.isFinite(out) || !Number.isFinite(rea) || out <= 0) {
-    return "the model returned no content, and reported no token split to say why — retrying with thinking capped";
+    return "the model returned no content, and reported no token split to say why" + next;
   }
   const pct = Math.round((100 * rea) / out);
   // "en-US", not the machine's locale. On a Danish machine toLocaleString() rendered 29,125 as "29.125", which
@@ -4522,8 +4611,9 @@ export function blankReplyReason(split) {
   const n = (v) => v.toLocaleString("en-US");
   return `the model returned no content: ${n(rea)} of ${n(out)} output tokens (${pct}%) `
     + `went to reasoning, leaving ${n(out - rea)} for the answer`
-    + (pct >= 90 ? " — a larger budget would only buy more reasoning, so retrying with thinking capped instead"
-                 : " — retrying with thinking capped");
+    + (capped ? " — thinking is ALREADY capped and it still went to reasoning, so retrying with more room"
+              : (pct >= 90 ? " — a larger budget would only buy more reasoning, so retrying with thinking capped instead"
+                           : " — retrying with thinking capped"));
 }
 
 // Which of the three things a read_repo turn does, in one place so a test can assert the decision the runner

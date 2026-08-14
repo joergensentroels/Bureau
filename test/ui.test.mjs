@@ -136,6 +136,12 @@ ok("the sign-in control is shared, not duplicated per call site", (HTML.match(/f
   // one, and the operator has no way to know that from a feed that shows nothing at all.
   ok("the live feed renders an empty-reply retry", HTML.includes('ev.type==="retry"'));
   ok("and the compact history does too", HTML.includes("retry:" + BT));
+  // An unparseable reply was invisible too, and worse: the round produced text, found a candidate defect, and
+  // registered nothing, which in the feed was indistinguishable from a round that found nothing.
+  ok("an unparsed reply is rendered", HTML.includes('ev.type==="unparsed"'));
+  ok("and appears in the compact history", HTML.includes("unparsed:" + BT));
+  ok("the reason is shown, not just the fact", HTML.includes("d.reason"));
+  ok("and it says nothing ran, which is the part that matters", HTML.includes("nothing ran"));
   ok("the reason travels with it rather than a generic label", HTML.includes("d.why"));
   ok("and it says the empty turn still cost money", HTML.includes("not a free one"));
 }

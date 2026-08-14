@@ -98,6 +98,24 @@ try {
         !("reasoning_effort" in plain) && !("thinking" in plain));
   }
 
+  // Does a REAL call record its usage where the booking site will find it? The unit test builds `meta` by hand,
+  // so it passes even if askLlm never populates meta.usages — and then a turn that retried would charge for one
+  // call and let the other be free. That is a money bug that only a real call can rule out.
+  {
+    const meta = {};
+    await askLlm([{ role: "user", content: "one" }], { ...opts, meta }).catch(() => {});
+    chk("  a real call records its usage for booking", Array.isArray(meta.usages) && meta.usages.length === 1);
+    await askLlm([{ role: "user", content: "two" }], { ...opts, meta }).catch(() => {});
+    chk("  and a second call on the same turn APPENDS rather than overwriting",
+        Array.isArray(meta.usages) && meta.usages.length === 2);
+    const { usagesForTurn } = await import("../server.mjs");
+    const booked = usagesForTurn(meta, 0);
+    chk("  so both calls are booked, not just the survivor",
+        booked.length === 2 && booked.every((s) => s.total > 0));
+    // The control: meta.usage still holds only the LAST call, which is exactly why booking from it undercharged.
+    chk("  CONTROL: meta.usage alone would have booked one call", usagesForTurn({ usage: meta.usage }, 0).length === 1);
+  }
+
   const at = seen.length;
   let capErr = null;
   await askLlm([{ role: "user", content: "hi" }], { ...opts, ...NO_THINKING }).catch((e) => { capErr = e; });

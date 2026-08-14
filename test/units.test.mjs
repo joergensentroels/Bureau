@@ -11,7 +11,7 @@ import {
   objectiveSignature, dedupeMemories, deliverableEmbedText, deliverableTitle,
   chunkDocument, deliverableChunks, modelUnreachable, trimVersions, clientKey, isLoopback,
   startLogTee, webhookBody,
-  normalizeFinding, verifyFinding, findingCheckAllowed, npmArgv, agentMayRun, usageSplit, addUsage, tierModelToSend, callCostUsd, repoReadCap, blankReplyReason, NO_THINKING,
+  normalizeFinding, verifyFinding, findingCheckAllowed, npmArgv, agentMayRun, usageSplit, addUsage, tierModelToSend, callCostUsd, repoReadCap, blankReplyReason, NO_THINKING, usagesForTurn, jsonFailure,
   LENSES, pickLens, investigateObjective, investigate, seedLenses, activeLenses, bookLensRound,
   normalizeLens, lensParaphrase, addProposedLens, lensProposalObjective, sigWords, postReadGuidance,
   turnBudgetWarning,
@@ -1239,6 +1239,68 @@ console.log("# the token SPLIT is recorded, and an unreported field is not zero"
   chk('  the counts make a partial measurement legible rather than confident',
       acc.inputCalls < acc.calls && acc.outputCalls < acc.calls);
 }
+console.log("# every call of a turn is charged, not only the one that survived");
+{
+  // Measured. `meta.usage` is overwritten per call and the turn booked once, so the eleven first calls that
+  // returned nothing but reasoning were free. The round reported $0.003336; the uncounted calls had really cost
+  // $0.004372, making the true spend 2.3x the figure canUsePaid() was enforcing the budget against.
+  const failed = { total_tokens: 1000, completion_tokens: 1000, completion_tokens_details: { reasoning_tokens: 1000 } };
+  const kept   = { total_tokens: 500, prompt_tokens: 100, completion_tokens: 400 };
+  const both = usagesForTurn({ usages: [failed, kept] }, 99);
+  eq('  a turn that retried books BOTH calls', both.map((s) => s.total), [1000, 500]);
+  // The control. Without it this passes just as well when only the survivor is booked.
+  eq('  CONTROL: booking only the last would have charged 500, not 1,500',
+     both.reduce((n, s) => n + s.total, 0), 1500);
+  chk('  and the failed call is not silently free', both[0].total > 0);
+
+  // The estimate describes the text the turn ended up using, so it belongs to the LAST call. Handing it to an
+  // earlier call would invent tokens for a call that reported none.
+  const est = usagesForTurn({ usages: [null, null] }, 42);
+  eq('  the fallback estimate lands on the last call only', est.map((s) => s.total), [0, 42]);
+
+  // Backwards compatibility: anything that still sets only meta.usage keeps working.
+  eq('  a single legacy meta.usage still books', usagesForTurn({ usage: { total_tokens: 7 } }, 0).map((s) => s.total), [7]);
+  eq('  and no usage at all falls back to the estimate', usagesForTurn({}, 42).map((s) => s.total), [42]);
+
+  const src2 = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
+  chk('  askLlm records every call, not just the last', /opts\.meta\.usages \|\| \(opts\.meta\.usages = \[\]\)/.test(src2));
+  chk('  and the booking site loops over them', /for \(const split of usagesForTurn\(meta, callTokens\)\)/.test(src2));
+}
+console.log("# an unparseable reply says WHY, and stops being invisible");
+{
+  const src3 = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
+  // The measured round said "I've been unable to format the probe JSON correctly", tried an action it was not
+  // allowed, and finished having registered nothing. Bureau emitted no event for any of it, so from outside it
+  // looked exactly like a round that found nothing.
+  eq('  a reply cut off mid-object is diagnosed as truncated',
+     jsonFailure('{"speak":"x","next":{"details":"a long expl').reason, "truncated");
+  eq('  a real line break inside a string is named as such',
+     jsonFailure('{"speak":"one\ntwo","next":{}}').reason, "raw-newline");
+  eq('  prose with no object at all', jsonFailure("I could not format that.").reason, "prose");
+  eq('  an empty reply', jsonFailure("").reason, "empty");
+  eq('  and anything else falls through to the parser message',
+     jsonFailure('{"speak":"hi","next":{"a":1,},}').reason, "syntax");
+
+  // The controls. A diagnosis that fires on VALID json, or a parser that broke while being refactored, would both
+  // pass a suite that only checked the failure cases.
+  chk('  CONTROL: valid JSON still parses after the refactor',
+      safeParse('{"speak":"ok","next":{"actionType":"note"}}')?.next?.actionType === "note");
+  chk('  CONTROL: junk after the object is still tolerated',
+      safeParse('{"speak":"ok","next":{}} trailing junk }')?.speak === "ok");
+  chk('  CONTROL: a fenced reply still parses', safeParse('```json\n{"speak":"ok","next":{}}\n```')?.speak === "ok");
+
+  const g = jsonFailure('{"speak":"x","next":{"details":"cut', 1).guidance;
+  chk('  the guidance names the actual problem', /CUT OFF/.test(g));
+  chk('  shows a concrete valid shape', /"actionType":"register_finding"/.test(g));
+  chk('  and forbids the raw line break that causes most of these', /NO raw line breaks/.test(g));
+  chk('  a repeat attempt escalates to "send less"', /attempt 2/.test(jsonFailure("nope", 2).guidance));
+  chk('  but a first attempt does not nag about it', !/attempt 1/.test(jsonFailure("nope", 1).guidance));
+
+  chk('  the turn loop emits an event instead of failing silently', /emit\(run, "unparsed"/.test(src3));
+  const code3 = src3.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+  chk('  and the old contentless line is gone from the code',
+      !/That was not valid JSON\. Reply again with STRICT JSON only\./.test(code3));
+}
 console.log("# an empty reply reports what was actually spent, and the retry pulls the right lever");
 {
   const src = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
@@ -1266,16 +1328,25 @@ console.log("# an empty reply reports what was actually spent, and the retry pul
 
   // Wiring. The old string must be GONE, not merely joined by a new one — a log still saying "retrying with a
   // larger output budget" while actually capping the thinking is a worse instrument than either behaviour alone.
-  chk('  the turn loop retries with the cap', /ask\(2600, NO_THINKING\)/.test(src));
+  // The cap now applies from the FIRST call, not only the retry. Measured on the round that forced the change:
+  // capping only the retry left an uncapped call at the head of every turn, and that call returned "1,000 of
+  // 1,000 output tokens (100%) went to reasoning" on eleven of twelve turns — a wasted round trip per turn, for
+  // thinking that was then discarded rather than carried forward.
+  chk('  the FIRST call of a turn is capped', /raw = await askCapped\(1000\)/.test(src));
+  chk('  and the retry raises the budget, the only lever left once thinking is capped',
+      /raw = await askCapped\(2600\)/.test(src));
   // Against the CODE, not the whole file. The first version searched the source and failed on the COMMENT that
   // quotes the old line in order to explain why it was wrong — an assertion satisfiable by deleting the
   // explanation. Strip comment lines and ask what the runner actually emits.
   const code = src.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
   chk('  and no longer claims a larger budget is the first move',
       !/retrying with a larger output budget/.test(code));
-  chk('  CONTROL: stripping comments did not just empty the haystack', code.includes("ask(2600, NO_THINKING)"));
-  chk('  a provider that refuses the cap falls back rather than failing the turn',
-      /capRefused: true/.test(src) && /raw = await ask\(2600\);/.test(src));
+  chk('  CONTROL: stripping comments did not just empty the haystack', code.includes("askCapped(2600)"));
+  chk('  a provider that refuses the cap falls back rather than failing the turn', /capRefused: true/.test(src));
+  // One refusal per RUN, not per turn: re-sending a field the provider has already rejected would cost an extra
+  // round trip on every remaining turn.
+  chk('  and it remembers the refusal for the rest of the run',
+      /run\.capUnsupported = true/.test(src) && /run\.capUnsupported\) return ask\(maxTokens\)/.test(src));
   // askLlm has to actually forward them, or every line above describes a request that was never sent.
   chk('  and askLlm forwards both fields to Latch',
       /reasoningEffort: opts\.reasoningEffort/.test(src) && /thinking: opts\.thinking/.test(src));
