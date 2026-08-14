@@ -11,7 +11,7 @@ import {
   objectiveSignature, dedupeMemories, deliverableEmbedText, deliverableTitle,
   chunkDocument, deliverableChunks, modelUnreachable, trimVersions, clientKey, isLoopback,
   startLogTee, webhookBody,
-  normalizeFinding, verifyFinding, findingCheckAllowed, npmArgv, agentMayRun, usageSplit, addUsage, tierModelToSend, callCostUsd,
+  normalizeFinding, verifyFinding, findingCheckAllowed, npmArgv, agentMayRun, usageSplit, addUsage, tierModelToSend, callCostUsd, repoReadCap,
   LENSES, pickLens, investigateObjective, investigate, seedLenses, activeLenses, bookLensRound,
   normalizeLens, lensParaphrase, addProposedLens, lensProposalObjective, sigWords, postReadGuidance,
   turnBudgetWarning,
@@ -1147,16 +1147,12 @@ console.log("# a round starts from the codebase's own names, not from convention
     // The read cap was a mitigation for a 4,096-token LOCAL window; on a paid turn it cost ten searches
     // reconstructing a 4,785-byte file.
     {
-      // No regex: this session has had escapes eaten nine times, and a pattern that silently matches nothing
-      // reports a defect that is not there. Also no pinned literal — the first version hardcoded 24000 and broke
-      // the moment the number was tuned. The PROPERTY is what matters: a paid turn gets more room than a local one.
-      const key = 'const readCap = canUsePaid() ? ';
-      const at = src.indexOf(key);
-      chk('  the read cap follows the tier', at >= 0);
-      const parts = at < 0 ? [] : src.slice(at + key.length, at + key.length + 40).split(':');
-      const paid = parseInt(parts[0], 10), local = parseInt(parts[1], 10);
-      chk('  and a paid turn gets more room than a local one',
-          Number.isFinite(paid) && Number.isFinite(local) && paid > local);
+      // This scraped the source for `const readCap = canUsePaid() ? ` and parsed the two numbers out of the
+      // ternary — a workaround for the decision being inline and therefore uncallable. It is a function now, so
+      // the property can be asserted by asking it rather than by reading the file it lives in. Scope-dependent
+      // behaviour is covered in scope.test.mjs; what belongs here is the tier property this block always meant.
+      chk('  a paid turn gets more room than a local one', repoReadCap(true, []) > repoReadCap(false, []));
+      chk('  and the local cap still fits a 4,096-token window', repoReadCap(false, []) <= 4000);
     }
   }
 }

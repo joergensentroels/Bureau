@@ -16,7 +16,7 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
-  normScopeFiles, inScope, scopeLine, scopeRefusal, repoReadPlan,
+  normScopeFiles, inScope, scopeLine, scopeRefusal, repoReadPlan, repoReadCap, SCOPED_WHOLE_FILE_LIMIT,
   listRepoFiles, searchRepoFiles, readRepoFile, repoDigest,
 } from "../server.mjs";
 
@@ -97,6 +97,31 @@ console.log("# the turn loop's own decision — the hole filtering the listing d
   chk("  and the turn loop actually calls it", /const plan = repoReadPlan\(target, want, scope\)/.test(src));
   chk("  with no second, unrouted read of `want` left behind",
       !/:\s*want\s*\?\s*await readRepoFile\(repo, want\)/.test(src));
+}
+
+console.log("# how much of a file one read returns, once the file set is finite");
+{
+  // The number that matters, from the live round: the planted defect is at character 12,155 of a 12,263-character
+  // file. The old paid cap was 12,000. The round opened the right file first, saw the truncation marker, searched,
+  // and its term missed — so the scope fixed attention and the cap still hid the answer, 155 characters out.
+  const DEFECT_AT = 12155, FILE_LEN = 12263;
+  const one = normScopeFiles(["src/roster.mjs"]);
+  chk("  CONTROL: the old paid cap really did stop short of the defect", 12000 < DEFECT_AT);
+  chk("  a scoped paid read now reaches it", repoReadCap(true, one) > DEFECT_AT);
+  chk("  and reaches the end of that file", repoReadCap(true, one) > FILE_LEN);
+
+  eq("  unscoped stays at 12000, because the file set is unbounded again", repoReadCap(true, []), 12000);
+  eq("  a scope larger than the limit also stays at 12000",
+     repoReadCap(true, normScopeFiles(Array.from({ length: SCOPED_WHOLE_FILE_LIMIT + 1 }, (_, i) => "f" + i + ".mjs"))), 12000);
+  eq("  a scope exactly at the limit still reads whole",
+     repoReadCap(true, normScopeFiles(Array.from({ length: SCOPED_WHOLE_FILE_LIMIT }, (_, i) => "f" + i + ".mjs"))), 60000);
+  // The local window is 4,096 TOKENS. No scope makes that bigger, and handing it 60,000 characters would clip the
+  // prompt's front — the failure already measured on this project as "flaky model".
+  eq("  a local turn is 4000 whatever the scope says", repoReadCap(false, one), 4000);
+  eq("  including an unscoped local turn", repoReadCap(false, []), 4000);
+
+  const src = await (await import("node:fs/promises")).readFile(new URL("../server.mjs", import.meta.url), "utf8");
+  chk("  and the turn loop actually uses it", /const readCap = repoReadCap\(canUsePaid\(\), scope\)/.test(src));
 }
 
 console.log("# enforcement against a real repository");

@@ -2698,7 +2698,17 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
           const full = target ? await readRepoFile(repo, target, 400000) : null;
           // The 4,000-character cap is a mitigation for a 4,096-token LOCAL window. On a paid turn it costs more than
           // it saves: a 4,785-byte file cost ten follow-up searches reconstructing what one read should have given.
-          const readCap = canUsePaid() ? 12000 : 4000;   // 24000 doubled a run's cost and overran the ceiling: the per-run cap is checked BETWEEN turns, so dearer turns overshoot it
+          // 24000 across a whole repository doubled a run's cost and overran the ceiling: the per-run cap is checked
+          // BETWEEN turns, so dearer turns overshoot it. That argument is about an UNBOUNDED file set, and a scope
+          // makes the set finite — so a small scope reads whole files instead.
+          //
+          // Measured, and it is why this exists. With a one-file scope the round opened the right file first and
+          // still registered nothing: the planted defect sits at character 12,155 of a 12,263-character file, and
+          // the cap is 12,000. It was 155 characters past the window. The round behaved correctly — it saw the
+          // truncation marker and searched — and its search term missed. Reading it whole removes a step that has
+          // to go right. The LOCAL cap is untouched: 4,000 characters is a mitigation for a 4,096-token window,
+          // and no scope changes how big that window is.
+          const readCap = repoReadCap(canUsePaid(), scope);
           const plan = repoReadPlan(target, want, scope);
           const r = plan.kind === "refuse" ? { ok: false, error: "outside this round's scope", outOfScope: true }
                   : plan.kind === "list"   ? { ok: false, error: "that is a directory — list it instead of reading it" }
@@ -4450,6 +4460,26 @@ export function scopeLine(org, list = null) {
     + ` these. Any other path is refused by the runner rather than by your judgement, so there is nothing to be`
     + ` gained by trying one:\n` + shown.map((x) => "    " + x).join("\n")
     + (scope.length > shown.length ? `\n    …and ${scope.length - shown.length} more` : "");
+}
+
+// How much of a file one read returns.
+//
+// 24,000 across a whole repository doubled a run's cost and overran the ceiling: the per-run cap is checked
+// BETWEEN turns, so dearer turns overshoot it. That argument is about an UNBOUNDED file set, and a scope makes
+// the set finite — so a small scope reads whole files instead.
+//
+// Measured, and it is the reason this function exists. With a one-file scope the round opened the right file
+// FIRST and still registered nothing: the planted defect sits at character 12,155 of a 12,263-character file and
+// the cap was 12,000. It was 155 characters past the window. The round behaved correctly — it saw the truncation
+// marker and searched — and its search term missed. Reading it whole removes a step that has to go right.
+//
+// The LOCAL cap is untouched. 4,000 characters is a mitigation for a 4,096-token context window, and no scope
+// changes how big that window is.
+export const SCOPED_WHOLE_FILE_LIMIT = 20;
+export function repoReadCap(paid, scope) {
+  if (!paid) return 4000;
+  const n = Array.isArray(scope) ? scope.length : 0;
+  return n > 0 && n <= SCOPED_WHOLE_FILE_LIMIT ? 60000 : 12000;
 }
 
 // Which of the three things a read_repo turn does, in one place so a test can assert the decision the runner
