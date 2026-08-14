@@ -376,7 +376,32 @@ export function remoteBlocksApproval(cur, gr = {}) {
   if (actType === "purchase") return requiresCeoAlways("purchase", { command: cur?.command || "", details: cur?.details || "" }, gr || {});
   return !SAFE_TIER_ACTIONS.has(actType);
 }
-const POLICY_ACTIONS = ["web_search", "web_research", "read_file", "file_write", "note", "purchase", "api_call", "shell", "email_draft", "ask_peer"];
+// Every actionType a proposal can carry into evaluatePolicy — taken from the dispatcher below and the
+// action catalogue in the agent prompt, NOT from SAFE_TIER_ACTIONS or the hard floor, which are smaller
+// on purpose. Completeness is the whole property here, because a MISSING entry does not disable a rule,
+// it widens one: cleanPolicyWhen drops an actionType it does not recognise, and evaluatePolicy reads an
+// absent actionType as "any action". This list held 10 of 23 while the policy editor offered five GitHub
+// types it did not contain, so "block github_pr for Ada" was stored as `when:{agentId:"ada"}` and blocked
+// every action Ada took; the 400 only fired when actionType was the sole condition. The hard floor still
+// clamped floored types, so nothing escaped — the operator's own control silently got broader instead.
+// test/ui.test.mjs derives both this list and the editor's from source and fails if they part company.
+export const POLICY_ACTIONS = [
+  "web_search", "web_research", "read_file", "file_write", "note", "purchase", "api_call", "shell",
+  "email_draft", "ask_peer", "ask_stakeholder", "plan_add", "mcp_call", "register_finding", "read_repo",
+  "declined_check", "propose_lens", "github_file", "github_repo", "read_issues", "github_issue",
+  "github_comment", "github_pr",
+];
+// The actionType the caller asked for that this server cannot dispatch, or "" when the clause is fine.
+// Split out from cleanPolicyWhen rather than folded into it: the sanitizer is exported and total by
+// contract (garbage in, clause out, never throws), and only the write endpoints know the difference
+// between "the operator typed a type we do not have" and "some other caller passed junk". A quiet drop
+// is the wrong answer at the edge for the reason above — it returns a rule BROADER than the one asked
+// for, and answers 201 while doing it, so the operator has nothing to notice.
+export function unknownPolicyAction(w) {
+  if (!w || typeof w !== "object" || !w.actionType) return "";
+  const at = String(w.actionType).toLowerCase().trim();
+  return POLICY_ACTIONS.includes(at) ? "" : at;
+}
 // Sanitize a rule's condition clause: keep only recognized, well-typed conditions.
 export function cleanPolicyWhen(w) {
   const out = {};
@@ -6571,6 +6596,8 @@ const server = createServer(async (req, res) => {
     if (p === "/api/policies" && req.method === "POST") {
       const body = await readBody(req);
       if (!["block", "require", "allow"].includes(body.then)) return send(res, 400, { error: "then must be block|require|allow" });
+      const badAct = unknownPolicyAction(body.when);
+      if (badAct) return send(res, 400, { error: `unknown actionType "${badAct}" — this rule would match EVERY action, not that one` });
       const when = cleanPolicyWhen(body.when);
       if (!Object.keys(when).length) return send(res, 400, { error: "at least one condition required" });
       const r = await updateOrg((o) => {
@@ -6583,6 +6610,11 @@ const server = createServer(async (req, res) => {
     if (p.startsWith("/api/policies/") && req.method === "PATCH") {
       const id = p.split("/")[3];
       const body = await readBody(req);
+      // Checked before the write, not inside it: an unrecognised type sanitizes to an EMPTY clause, which
+      // the guard below then reads as "nothing to change" and leaves the rule's old `when` in place. So an
+      // edit meant to narrow a rule to one action returned 200 with the rule completely unchanged.
+      const badAct = unknownPolicyAction(body.when);
+      if (badAct) return send(res, 400, { error: `unknown actionType "${badAct}" — this rule would match EVERY action, not that one` });
       const r = await updateOrg((o) => {
         const rule = (o.policies || []).find((x) => x.id === id);
         if (!rule) return null;

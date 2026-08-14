@@ -146,5 +146,52 @@ ok("the sign-in control is shared, not duplicated per call site", (HTML.match(/f
   ok("and it says the empty turn still cost money", HTML.includes("not a free one"));
 }
 
+// ---- the policy editor's actions vs the ones the server recognises ---------
+//
+// Two lists in two files, kept in step by hand — which failed. The editor offered five GitHub action types
+// that POLICY_ACTIONS did not contain, and an unrecognised type there is not a dead menu entry: the
+// sanitizer DROPS it and evaluatePolicy reads an ABSENT actionType as "any action", so picking one stored a
+// rule matching EVERY action instead of that one. "Block github_pr for Ada" blocked everything Ada did, and
+// the POST answered 201 whenever the rule carried any second condition.
+//
+// Both lists are parsed from source, so the check cannot be satisfied by editing this test — and each parse
+// is asserted non-empty BEFORE it is used, because the empty set is a subset of everything and a parser that
+// silently returned [] would report this green forever.
+{
+  const SERVER = readFileSync(join(ROOT, "server.mjs"), "utf8");
+  // Odd-indexed split fragments are the quoted strings. No regex literals, for the reason at the top of
+  // this file; no escape handling needed because neither list contains one.
+  const strings = (src, open, close) => {
+    const i = src.indexOf(open);
+    if (i < 0) return [];
+    const j = src.indexOf(close, i + open.length);
+    return j < 0 ? [] : src.slice(i + open.length, j).split(Q).filter((_, k) => k % 2 === 1);
+  };
+  const serverActions = strings(SERVER, "export const POLICY_ACTIONS = [", "]");
+  // The editor's entries are [value,label] pairs, so every other string is a value. The "" entry is
+  // "(any action)" — no actionType condition at all — dropped by falsiness rather than by name, so a
+  // relabelled option cannot turn that skip into a hole.
+  const uiActions = strings(HTML, "const POL_ACTIONS=[", "];").filter((_, k) => k % 2 === 0).filter(Boolean);
+  ok("parsed the server's POLICY_ACTIONS", serverActions.length >= 10, `${serverActions.length} parsed`);
+  ok("parsed the policy editor's POL_ACTIONS", uiActions.length >= 10, `${uiActions.length} parsed`);
+
+  const orphans = uiActions.filter((a) => !serverActions.includes(a));
+  ok(`every action the policy editor offers, the server recognises (${uiActions.length} vs ${serverActions.length})`,
+    orphans.length === 0, orphans.join(", "));
+
+  // The other direction, and the one that will catch the NEXT drift: a type the runner dispatches but
+  // POLICY_ACTIONS omits widens rules exactly the same way, and the dispatcher is where new types appear
+  // first. Derived from the two comparison forms the runner actually uses, not from a list typed here.
+  const after = (marker) => SERVER.split(marker).slice(1).map((s) => s.split(Q)[0]);
+  const dispatched = [...new Set([
+    ...after("next.actionType || " + Q + Q + ") === " + Q),
+    ...after("actType === " + Q),
+  ])].filter(Boolean).sort();
+  ok("found the dispatcher's action comparisons", dispatched.length >= 15, `${dispatched.length} parsed`);
+  const unpolicyable = dispatched.filter((a) => !serverActions.includes(a));
+  ok(`every action type the runner dispatches can be named in a policy (${dispatched.length} checked)`,
+    unpolicyable.length === 0, unpolicyable.join(", "));
+}
+
 console.log(fail ? `\nFAILURES — ${pass} passed, ${fail} failed` : `\nALL PASS ✓ — ${pass} passed, 0 failed`);
 process.exitCode = fail ? 1 : 0;

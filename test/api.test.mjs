@@ -147,6 +147,22 @@ const ok = (c, m) => (c ? pass : fail).push(m);
     ok(pol.status === 201 && pol.j.id, "policy created");
     ok((await api("GET", "/api/policies")).j.policies.length === 1, "policy listed");
     ok((await api("PATCH", "/api/policies/" + pol.j.id, { enabled: false })).j.enabled === false, "policy toggled off");
+    // An actionType the server does not know is REFUSED, not quietly dropped. Dropping it does not make the
+    // rule inert — evaluatePolicy reads an absent actionType as "any action" — so the operator got back a
+    // BROADER rule than the one they wrote, with a 201 on it. Second condition present on purpose: that is
+    // the case that used to survive validation, because the empty-clause 400 only fires when nothing is left.
+    { const r = await api("POST", "/api/policies", { then: "block", when: { actionType: "no_such_action", agentId: "ada" } });
+      ok(r.status === 400, "policy rejects an unknown actionType instead of widening the rule (400)");
+      ok((await api("GET", "/api/policies")).j.policies.length === 1, "and nothing was stored when it did"); }
+    { const r = await api("PATCH", "/api/policies/" + pol.j.id, { when: { actionType: "no_such_action" } });
+      ok(r.status === 400, "PATCH rejects an unknown actionType (400)");
+      ok((await api("GET", "/api/policies")).j.policies[0].when.costOver === 5, "and the rule's old condition is intact"); }
+    // The five GitHub types the editor offers must now actually store. Before this they sanitized to {} and
+    // this exact POST answered 400 "at least one condition required" — with any second condition, 201 and a
+    // rule matching everything. github_pr is the one an operator is most likely to want to block.
+    { const r = await api("POST", "/api/policies", { then: "block", when: { actionType: "github_pr" } });
+      ok(r.status === 201 && r.j.when.actionType === "github_pr", "a github_pr rule stores the actionType it was given");
+      await api("DELETE", "/api/policies/" + r.j.id); }
     ok((await api("DELETE", "/api/policies/" + pol.j.id)).status === 200, "policy deleted");
 
     // ---- triggers CRUD (no firing) ----
