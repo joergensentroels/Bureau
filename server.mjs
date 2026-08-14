@@ -6611,7 +6611,11 @@ const server = createServer(async (req, res) => {
       if (!objective) return send(res, 400, { error: "objective required" });
       const cadence = SCHED_CADENCES.includes(body.cadence) ? body.cadence : "daily";
       const s = {
-        id: newId("sched"), objective, mode: body.mode === "company" ? "company" : "single",
+        // "hunt" joined the whitelist when the first scheduled review was set up: the review subsystem's whole
+        // point is running unattended, and the coercion below silently turned a hunt schedule into a "single"
+        // task run — which would have DERIVED CRITERIA from "hunt for defects", constructed nothing, and then
+        // hunted only if its own non-work passed verification. Wrong shape, discovered before it fired once.
+        id: newId("sched"), objective, mode: ["company", "hunt"].includes(body.mode) ? body.mode : "single",
         agentId: String(body.agentId || ""), maxTurns: Math.max(1, Math.min(20, Number(body.maxTurns) || 6)),
         cadence, enabled: true, hush: Boolean(body.hush), createdAt: Date.now(), lastRunAt: 0, nextRunAt: Date.now() + cadenceMs(cadence),
       };

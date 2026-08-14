@@ -181,6 +181,15 @@ const ok = (c, m) => (c ? pass : fail).push(m);
     ok((await api("GET", "/api/schedules")).j.schedules.length === 1, "schedule listed");
     ok((await api("PATCH", "/api/schedules/" + sc.j.id, { enabled: false })).j.enabled === false, "schedule disabled");
     ok((await api("DELETE", "/api/schedules/" + sc.j.id)).status === 200, "schedule deleted");
+    // A schedule can be a HUNT. The whitelist used to coerce everything to company/single, which would have turned
+    // a scheduled review into a task run that derives criteria from "hunt for defects" and hunts only if its own
+    // non-work passes verification — wrong shape, caught before the first scheduled review ever fired.
+    const hunt = await api("POST", "/api/schedules", { objective: "review the repo", mode: "hunt", cadence: "daily" });
+    ok(hunt.status === 201 && hunt.j.mode === "hunt", "a hunt schedule stores mode hunt");
+    const bogus = await api("POST", "/api/schedules", { objective: "x", mode: "arbitrary-nonsense" });
+    ok(bogus.j.mode === "single", "CONTROL: an unknown mode still coerces to single, not to whatever was sent");
+    await api("DELETE", "/api/schedules/" + hunt.j.id);
+    await api("DELETE", "/api/schedules/" + bogus.j.id);
 
     // ---- goal cadence auto-links a schedule; deleting the goal removes it ----
     const gc = await api("POST", "/api/goals", { title: "Cadenced goal", cadence: "daily" });
