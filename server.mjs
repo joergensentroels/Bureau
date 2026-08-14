@@ -1142,6 +1142,48 @@ function emit(run, type, data) {
 // commit — and noise is not free when the context window is 4,096 tokens and the prompt is clipped from the front.
 const HUNT_ACTIONS = new Set(["read_repo", "register_finding", "ask_stakeholder", "note", "propose_lens", "ask_peer", "declined_check"]);
 
+// May a hunting round take this action, and if not, what does the agent get told? Returns null when it may — including
+// for every action of every run that is NOT hunting, which is the property this must not break: it narrows one phase,
+// never ordinary company/single work.
+//
+// It exists because the prompt's promise — "You are in a REVIEW phase: you cannot write files, buy anything, send
+// anything or commit" — was, for everything except shell and api_call, the ENTIRE enforcement. An agent whose allowlist
+// holds file_write could therefore save a deliverable in the middle of an unattended hunting round and nothing would
+// stop it: file_write is in SAFE_TIER_ACTIONS, so on a trusted agent it auto-approves with no human anywhere. This
+// project rejects that pattern everywhere else and says so on its own front page — "Enforced by the runner, not asked
+// of the model" — on measured grounds: asking a model to stay inside a named file set produced 44-67% compliance
+// across two providers, while enforcing the same set mechanically produced 100%.
+//
+// HUNT_ACTIONS is the single source of truth: this reads it, and so does the doc-line filter at the end of
+// systemPrompt, so the catalogue the agent is shown and the set the runner will accept cannot drift apart.
+export function huntRefusal({ phase, actType, next = {}, gr = {} } = {}) {
+  if (phase !== "investigate") return null;
+  const at = String(actType || "").toLowerCase();
+  if (HUNT_ACTIONS.has(at)) return null;
+  const canDo = [...HUNT_ACTIONS].join(", ");
+  // A hard-floored action is refused for its own reason, because its cost is different and worse. A hunting round is
+  // unattended by definition — it runs after the work is done, often on a schedule — so filing the approval does not
+  // buy a decision, it buys the full ten-minute approval deadline (the wait loop below, `Date.now() + 10 * 60 * 1000`)
+  // and then a failure. Measured: 600 of one round's 776 seconds went to a single `shell` proposing `npm test`. That
+  // argument was never specific to shell and api_call — a round that has just confirmed a defect and reaches for
+  // `github_issue`, the obvious next move, stalls in exactly the same way — so every floored type short-circuits.
+  if (requiresCeoAlways(at, next, gr)) {
+    const instead = at === "shell" || at === "api_call"
+      ? `You do NOT need it: put the command in a register_finding "check" instead (npm test | npm run <script> | node --test [file] | node tools/<x>.mjs) and the runner will run it itself, in a throwaway copy, and tell you whether it fails. That is how a finding gets proved here. Or use read_repo to look at the code.`
+      : `Nothing leaves this machine during a review round. If you have found a defect, register_finding proves it HERE — the runner runs the check itself and the finding is kept on the record, which is what filing it somewhere else was for. If you need a decision from the CEO, ask_stakeholder queues the question WITHOUT waiting for an answer.`;
+    return {
+      reason: "hunting rounds are unattended — nothing that needs the CEO can be answered",
+      error: "hard-floor action during an unattended hunting round",
+      say: `BLOCKED: "${at}" needs the CEO to approve it, and nobody is watching a hunting round — waiting on that would stall this round for ten minutes and then fail. ${instead} Your actions in this round: ${canDo}.`,
+    };
+  }
+  return {
+    reason: "not one of the actions a hunting round can take",
+    error: "action outside HUNT_ACTIONS during a hunting round",
+    say: `BLOCKED: this is a REVIEW round — it does not write files, buy, send or commit, and "${at}" is none of the things it can do. Your actions in this round: ${canDo}. read_repo reads the code under review; register_finding claims a defect and the runner proves it itself; note records what you checked when there is nothing to run; declined_check records a check you could NOT perform; ask_stakeholder queues a question for the CEO without waiting.`,
+  };
+}
+
 // Which model tier will serve a turn, and — the useful half — why it is not the other one. Exported and pure so the
 // reasoning is testable without a provider, a budget or a model.
 export function tierReason({ paidAvailable, hush, budgetUsd, paidSpent = 0, phase = "" } = {}) {
@@ -2462,14 +2504,16 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
     }
     // ---- Guardrails: per-agent action allowlist, per-run action cap, purchase auto-approve ceiling ----
     const actType = String(next.actionType || "").toLowerCase();
-    // A hunting round is unattended by definition — it runs after the work is done, often on a schedule. A hard-floored
-    // action there files an approval and waits ten minutes for a CEO who is not watching: measured, 600 of one round's
-    // 776 seconds went to a single `shell` proposing `npm test`. The floor is right; the wait is pure loss, because a
-    // finding's `check` field runs exactly those commands under the runner's own allowlist with no approval at all.
-    if (run.phase === "investigate" && (actType === "shell" || actType === "api_call")) {
-      emit(run, "blocked", { agent: who, depth, actionType: actType, reason: "hunting rounds are unattended — use a finding's check instead" });
-      logAudit({ kind: "blocked", runId: run.id, agentId: agent.id, agent: who, actionType: actType, error: "hard-floor action during an unattended hunting round", decision: "denied" });
-      history.push({ role: "user", content: `BLOCKED: "${actType}" needs the CEO to approve it, and nobody is watching a hunting round — waiting on that would stall this round for ten minutes and then fail. You do NOT need it: put the command in a register_finding "check" instead (npm test | npm run <script> | node --test [file] | node tools/<x>.mjs) and the runner will run it itself, in a throwaway copy, and tell you whether it fails. That is how a finding gets proved here. Or use read_repo to look at the code.` });
+    // A hunting round takes only the actions HUNT_ACTIONS names, and the refusal happens HERE — above the per-agent
+    // allowlist, above the action cap, above the approval seam — for two reasons. The phase is not a property of the
+    // agent, so it is not the allowlist's question to answer; and everything below this line has already spent
+    // something irreversible: either a Latch card in front of a human, or, for a safe-tier action on a trusted agent,
+    // the side effect itself. huntRefusal carries the two refusals and what each one measured.
+    const hunt = huntRefusal({ phase: run.phase, actType, next, gr });
+    if (hunt) {
+      emit(run, "blocked", { agent: who, depth, actionType: actType, reason: hunt.reason });
+      logAudit({ kind: "blocked", runId: run.id, agentId: agent.id, agent: who, actionType: actType, error: hunt.error, decision: "denied" });
+      history.push({ role: "user", content: hunt.say });
       continue;
     }
     if (!agentMayRun(agent, actType)) {
