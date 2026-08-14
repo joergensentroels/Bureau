@@ -4307,16 +4307,26 @@ export async function investigate(run, worker, opts = {}) {
     const before = run.findings.length;
     run.currentLens = lens;   // the read_repo result repeats it: by then it is behind a listing and 4000 characters of source
     emit(run, "lens", { lens: lens.id, round: roundNo });
+    const seenBefore = run.filesSeen instanceof Set ? run.filesSeen.size : 0;
     const w = await worker(investigateObjective(run, lens, taxonomy,
       typeof digest === "string" ? digest : digestText(digest, 8000, coverageMap ? run.filesSeen : null)));
     tokens += (w && w.tokens) || 0;
     const confirmed = run.findings.length - before;
-    // Dry counts NEW CONFIRMED findings only. Counting claims would let a stream of refused guesses keep the loop
-    // alive forever, which is precisely how an unbounded critic bills without producing anything.
-    run.dryRounds = confirmed ? 0 : run.dryRounds + 1;
     // Coverage on the round record, beside the lens. A dry round that opened five of eighty-seven files and a dry
     // round that opened all of them are the same entry without this, and they mean opposite things.
     const cov = repoCoverage(typeof digest === "string" ? null : digest, run.filesSeen);
+    // Dry counts NEW CONFIRMED findings only. Counting claims would let a stream of refused guesses keep the loop
+    // alive forever, which is precisely how an unbounded critic bills without producing anything.
+    //
+    // ...and a dry round that GREW COVERAGE does not count toward the stop while unseen files remain. The comment
+    // above already said the two kinds of dry round "mean opposite things" — and then the stop decision treated
+    // them identically. Measured on the first real hunt: the operator asked for six rounds over a 30-file scope,
+    // rounds one and two saw 3 then 4 files, and the hunt declared the scope EXHAUSTED at 13% coverage — with the
+    // 26 unseen files listed in the same event as the stop. A round that opened new files and found nothing is
+    // evidence about those files, not about the ones nobody has opened; "exhausted" means dry AND plateaued.
+    // maxRounds and the paid-budget caps still bound the loop, so this cannot run away.
+    const grewCoverage = cov.total > 0 && cov.seen > seenBefore && cov.unseen.length > 0;
+    run.dryRounds = confirmed ? 0 : grewCoverage ? run.dryRounds : run.dryRounds + 1;
     run.rounds.push({ lens: lens.id, at: Date.now(), confirmed, dryAfter: run.dryRounds,
                       filesSeen: cov.seen, filesTotal: cov.total });
     emit(run, "round", { round: roundNo, lens: lens.id, confirmed, dryRounds: run.dryRounds,

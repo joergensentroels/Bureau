@@ -790,6 +790,41 @@ console.log("# investigate — the loop stops on EXHAUSTION, not on satisfaction
         seenOff[1].indexOf("src/a.mjs") < seenOff[1].indexOf("src/c.mjs"));
     chk("  but coverage is still RECORDED, so the control arm can still be measured",
         off.rounds[1].filesSeen === 1 && off.events.some((e) => e.type === "coverage" && e.data.seen === 1));
+
+    // EXHAUSTED MEANS DRY AND PLATEAUED. Measured on the first real hunt: the operator asked for six rounds over a
+    // 30-file scope, rounds one and two saw 3 then 4 files, and the hunt declared the scope exhausted at 13%
+    // coverage — with the 26 unseen files named in the same event as the stop. A dry round that grew coverage is
+    // evidence about the files it opened, not about the ones nobody has opened, so it must not count toward the
+    // stop while unseen files remain.
+    {
+      const five = { ok: true, readCap: 12000, total: 5, shown: 5,
+                     entries: ["a", "b", "c", "d", "e"].map((f) => mk("src/" + f + ".mjs", 10)) };
+      // Opens one NEW file every round, never finds anything: coverage keeps growing, so the dry-stop must not
+      // fire and the loop runs to the round cap.
+      const growing = mkRun();
+      let g = 0;
+      await investigate(growing, async () => { noteRepoRead(growing, "src/" + "abcde"[g++] + ".mjs"); return { tokens: 1 }; },
+        { dryLimit: 2, maxRounds: 4, digest: five });
+      chk("  a dry round that grew coverage does not count toward the stop", growing.rounds.length === 4);
+      chk("  and the end is reported as the round cap, not exhaustion",
+          growing.events.some((e) => e.type === "investigated" && e.data.stoppedBecause === "round cap"));
+
+      // The CONTROL: a worker that plateaus. Round one grows, then nothing new — two plateaued dry rounds stop it.
+      const plateau = mkRun();
+      let p = 0;
+      await investigate(plateau, async () => { if (++p === 1) noteRepoRead(plateau, "src/a.mjs"); return { tokens: 1 }; },
+        { dryLimit: 2, maxRounds: 8, digest: five });
+      chk("  CONTROL: a plateaued hunt still stops at the dry limit", plateau.rounds.length === 3
+          && plateau.events.some((e) => e.type === "investigated" && e.data.stoppedBecause === "dry"));
+
+      // And once EVERYTHING has been seen, the protection ends: full coverage + dry = genuinely exhausted.
+      const one = { ok: true, readCap: 12000, total: 1, shown: 1, entries: [mk("src/a.mjs", 10)] };
+      const done = mkRun();
+      let d = 0;
+      await investigate(done, async () => { if (++d === 1) noteRepoRead(done, "src/a.mjs"); return { tokens: 1 }; },
+        { dryLimit: 2, maxRounds: 8, digest: one });
+      chk("  full coverage ends the protection — dry rounds then stop the hunt", done.rounds.length === 2);
+    }
   }
   {
     // A stream of REFUSED claims must not keep the loop alive: only confirmed findings reset the counter, or an
