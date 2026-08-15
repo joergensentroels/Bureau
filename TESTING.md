@@ -1296,6 +1296,54 @@ every hunt memory is written in. So the query is the LENS on a hunting round and
 The lens can now influence own-work recall, which is exactly the thing this paragraph said it could not do even in
 principle.
 
+#### The same query was diluted two lines further down, and "shared recall was empty" is why nobody looked
+
+The paragraph above closes with `recallSharedMemory` skipping the asking agent, Ada being the only agent, and the
+cross-team block therefore being **empty**. All true — and it reads like a reason that block was fine. It is not.
+It is a fact about the company that hunt ran in, not about the code: `runHunt` picks one agent out of `org.agents`
+and nothing bounds that roster to one. Give the company a second agent and the block is populated, ranked against
+the same 7,225-character blob the own-work fix was about. `retrieveRelevant` eleven lines below does not even have
+that reprieve — deliverables belong to the company and are excluded only by name, so the deliverable block is
+populated **on exactly the single-agent hunts where the cross-team one is empty**.
+
+Both were already "ranked", which is why they looked finished. Ranked, and ranked against the right thing, are
+different properties; only one of them had been established. Measured over 24 teammate memories into four slots,
+across the eight built-in lenses:
+
+| ranked against | lens-invariant slots | mean pairwise Jaccard across lenses | the lens's own top pick |
+| --- | --- | --- | --- |
+| the whole objective | **3 of 4** | 0.69 | absent 2/8, displaced 5/8 |
+| the lens | 0 of 4 | 0.11 | at rank 1 by construction |
+
+For 28 of 28 lens pairs the objective-ranked block is at least as lens-insensitive as the lens-ranked one, and for
+one pair — `stale-claim` against `collector-blind`, two lenses with nothing whatever in common — the four entries
+are **identical**. The deliverable block behaves the same way at 2 of its 3 slots.
+
+The semantic half is worse, not better, which is the opposite of the intuition that a vector "understands" more.
+`recallSharedMemoryHybrid` calls `embedText(query)` on the same blob, so the digest is most of what gets embedded.
+Against the local `nomic-embed-text`: query vectors for the eight lenses sit at mean pairwise cosine **0.9746**, and
+deleting the lens from the objective **entirely** moves the vector by 1–2% (cos 0.977–0.991 against its own
+lens-free text). A vector that cannot tell whether the lens is present cannot rank by it.
+
+So `ownWorkQuery` is now `recallQuery` and governs all three blocks. Five negative controls, each
+mutate-confirm-red-restore with the restore verified by hash. Two are worth recording. **The deliverable control
+failed first**: reverting that call site to the objective changed nothing and the check stayed green through the
+exact defect it was written for, because all three seeded documents were topical and none competed on the standing
+instructions' own vocabulary. It discriminates now because a `probe-register` decoy was added, dense in
+probe/finding/round/register/repository — which is what the diluted query is mostly made of. **The unwiring controls
+threw rather than failed**: with the block never pushed, the extractors read off `undefined` and took every later
+assertion in the file down with them. A missing block has to make each assertion red on its own terms, so the
+extractors tolerate absence and the floors carry the verdict — 6 clean reds for the cross-team block, 3 for the
+deliverable one.
+
+One measurement was wrong before it was right, and it is the same mistake in two places. The first pass reported the
+cross-team block as **completely constant** across all eight lenses. It was constant — from a corpus of five
+memories into four slots, where returning everything is arithmetic rather than evidence. The corpus went to 24 and
+the honest figure is 3 of 4. The end-to-end fixture then hit the identical trap from the other side: two seeded
+memories against a four-slot block, where RRF fusion returns both whatever the query, so "the irrelevant one is
+absent" was never something the ranker could have falsified. Both now assert ORDER over a corpus larger than the
+block, which is also what survives the hybrid half being live on one machine and absent on another.
+
 ### Hypothesis 2: the outline was steering them. ALSO REFUTED — but it was a real defect.
 
 `src/server.mjs` is 79,219 characters against a 12,000-character paid read cap, so a turn sees **15%** of it and

@@ -1957,9 +1957,7 @@ export function memoryKey(agentId, m) {
 }
 export const memoryText = (m) => `${m?.objective || ""}\n${m?.summary || ""}`.trim();
 
-// ---- own-work recall: the agent's OWN memory, ranked instead of merely recent -------------------
-//
-// What relevance is measured AGAINST, and why it is not simply "the objective".
+// ---- what every recall block is ranked AGAINST --------------------------------------------------
 //
 // On a construction task the objective IS the work, and it is the query. On a HUNTING round it is not:
 // `investigateObjective` wraps the lens in the standing hunt instructions plus the repository digest.
@@ -1974,7 +1972,21 @@ export const memoryText = (m) => `${m?.objective || ""}\n${m?.summary || ""}`.tr
 // `investigateObjective` already contains `lens.prompt` verbatim, so appending the lens yields a
 // byte-identical term list. That is asserted in the unit suite rather than left in this comment, because
 // it is exactly the kind of claim that gets re-litigated.
-export function ownWorkQuery(run, objective) {
+//
+// This was named `ownWorkQuery` and used by the own-work block alone, because that block was the one with
+// no relevance filter at all and it got the attention. The cross-team block and the deliverable RAG two
+// and eleven lines below it were already ranked, so they looked fine — and were being ranked against the
+// same 7kB blob. Measured over 24 teammate memories with the same eight lenses: three of the four
+// cross-team slots hold the same entries WHATEVER the lens (mean pairwise Jaccard 0.69 against 0.11 for
+// the lens), and the memory the lens itself ranks first is absent from the block 2 times in 8 and
+// displaced 5 more. Ranking is not the same property as ranking against the right thing.
+//
+// The semantic half is worse, not better, and it is worth being concrete about why. `recallSharedMemoryHybrid`
+// calls `embedText(query)` on the same blob, so the digest is most of what gets embedded: measured against
+// the local `nomic-embed-text`, query vectors for eight completely different lenses sit at mean pairwise
+// cosine 0.9746, and deleting the lens from the objective ENTIRELY moves the vector by 1-2% (cos 0.977-0.991
+// against its own lens-free text). A vector that barely notices whether the lens is present cannot rank by it.
+export function recallQuery(run, objective) {
   const lens = run?.phase === "investigate" ? run?.currentLens?.prompt : "";
   return String(lens || objective || "");
 }
@@ -1998,7 +2010,7 @@ export function rankOwnWork(memory, query, limit = 5) {
 // cannot exercise the ranking through a path production does not use — that leaves the call site with
 // nothing to get wrong but its arguments. Returns "" when nothing is relevant, and then nothing is sent.
 export function ownWorkBlock(run, agent, objective, limit = 5) {
-  const items = rankOwnWork(agent?.memory, ownWorkQuery(run, objective), limit);
+  const items = rankOwnWork(agent?.memory, recallQuery(run, objective), limit);
   if (!items.length) return "";
   return "Your own recent work — build on it, don't repeat it. To revise a document you wrote before, use read_file with its filename to get the current content, then file_write the SAME title to overwrite it:\n"
     + items.map((m) => `- "${m.objective}" → ${m.summary}${(m.files || []).length ? ` [files: ${m.files.join(", ")}]` : ""}`).join("\n");
@@ -2317,17 +2329,20 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
   if ((agent.lessons || []).length) history.push({ role: "user", content:
     "Coaching from the CEO's past feedback on your work — APPLY these; do not repeat the mistakes they point at:\n" +
     agent.lessons.slice(0, 8).map((l) => `- ${l.text}`).join("\n") });
-  // De-duplicated for the same reason shared recall is (re-runs and QA remediation passes of one task would
-  // otherwise fill all five slots with the same objective) and now RANKED for the same reason too — see
-  // ownWorkQuery for what "relevant" is scored against on a hunting round, where it is the lens and not this
-  // objective. Recency-only here is the mechanism that sent three hunting rounds to the same subsystem.
+  // Every recall block below is ranked against `recallQuery(run, objective)`, NOT against `objective` —
+  // see that function for what "relevant" is scored against on a hunting round, where it is the lens and
+  // not this objective. Recency-only own work is the mechanism that sent three hunting rounds to the same
+  // subsystem; ranking the other two blocks against the whole 7kB blob is the same defect one line down.
+  const query = recallQuery(run, objective);
+  // De-duplicated for the same reason shared recall is: re-runs and QA remediation passes of one task would
+  // otherwise fill all five slots with the same objective.
   const ownWork = ownWorkBlock(run, agent, objective);
   if (ownWork) history.push({ role: "user", content: ownWork });
   // Shared company memory: the most RELEVANT prior work from ACROSS the team — semantic (vector) and
   // lexical (BM25) recall fused, not just this agent's own recency — so work compounds company-wide
   // instead of siloing per agent. Degrades to BM25 alone when no embedder is available.
   try {
-    const shared = await recallSharedMemoryHybrid(org, objective, 4, agent.id);
+    const shared = await recallSharedMemoryHybrid(org, query, 4, agent.id);
     if (shared.length) history.push({ role: "user", content:
       "What the company already knows that's relevant here — prior work by teammates. Build on it; reuse their files; don't duplicate it or ask them to re-supply it:\n" +
       shared.map((m) => `- ${m.agentName} (${m.role}): "${m.objective}" → ${m.summary}${(m.files || []).length ? ` [files: ${m.files.join(", ")}]` : ""}`).join("\n") });
@@ -2335,8 +2350,12 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
   if (priorWork) history.push({ role: "user", content:
     `Work your teammates have already produced toward this goal. USE it directly — do NOT ask anyone to provide it:\n\n${priorWork}` });
   // RAG: surface relevant PAST company deliverables so work compounds (reuse/extend, don't duplicate).
+  // This one is NOT saved by the roster being small. Shared recall skips the asking agent, so a
+  // single-agent company gets an empty cross-team block and the query cannot matter there; deliverables
+  // belong to the COMPANY and are excluded only by name, so this block is populated on exactly the
+  // single-agent hunts where the other one is empty — measured at 2 of its 3 slots lens-invariant.
   try {
-    const rel = await retrieveRelevant(objective, 3);
+    const rel = await retrieveRelevant(query, 3);
     if (rel.length) history.push({ role: "user", content:
       `Relevant existing company deliverables — build on or reuse these; do NOT redo work already done:\n\n${rel.map((r) => `### ${r.name}\n${r.excerpt}`).join("\n\n")}` });
   } catch {}
