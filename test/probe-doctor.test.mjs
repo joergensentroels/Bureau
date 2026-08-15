@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { gitSafeEnv } from "../tools/git-env.mjs";
 const run = promisify(execFile);
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -17,8 +18,12 @@ const TOOL = path.join(HERE, "..", "tools", "probe-doctor.mjs");
 let pass = 0, fail = 0;
 const chk = (name, cond) => { if (cond) { pass++; console.log("✓ " + name); } else { fail++; console.log("✗ " + name); } };
 
+// The fixtures below run `git init` and `git config` in a throwaway directory. With an inherited GIT_DIR those
+// land on whatever repository invoked this process instead — see tools/git-env.mjs, which this suite's own
+// fixture identity (t@example.invalid) once ended up written into. Scrubbed here rather than only in the hook,
+// because TESTING.md documents running this file directly.
 const sh = async (cmd, args, cwd) => {
-  try { const r = await run(cmd, args, { cwd, timeout: 180000, maxBuffer: 8e6 }); return { ok: true, out: String(r.stdout || "") + String(r.stderr || "") }; }
+  try { const r = await run(cmd, args, { cwd, timeout: 180000, maxBuffer: 8e6, env: gitSafeEnv() }); return { ok: true, out: String(r.stdout || "") + String(r.stderr || "") }; }
   catch (e) { return { ok: false, out: String(e.stdout || "") + String(e.stderr || "") }; }
 };
 const doctor = (repo, ...rest) => sh(process.execPath, [TOOL, repo, ...rest]);

@@ -20,6 +20,7 @@ import net from "node:net";
 import dns from "node:dns/promises";
 import path from "node:path";
 import os from "node:os";
+import { gitSafeEnv } from "./tools/git-env.mjs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { randomUUID, createHash, timingSafeEqual } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -5243,9 +5244,13 @@ export async function withFindingIo(repo, fn) {
   const os = await import("node:os"); const path = await import("node:path");
   // The try/catch is load-bearing: execFile can throw synchronously (EINVAL on a .cmd), and without it the promise
   // never settles and the whole verification hangs or unwinds past its own error handling.
+  //
+  // env is scrubbed for the reason tools/git-env.mjs gives at length: this builds a worktree of a repository it
+  // names explicitly, and an inherited GIT_DIR would point every one of these commands — and the operator's own
+  // check command, which runs in the worktree and may itself use git — at some other repository entirely.
   const run1 = (cmd, args, cwd) => new Promise((res) => {
     try {
-      execFile(cmd, args, { cwd, timeout: 600e3, maxBuffer: 8e6 },
+      execFile(cmd, args, { cwd, timeout: 600e3, maxBuffer: 8e6, env: gitSafeEnv() },
         (err, out, errOut) => res({ ok: !err, out: String(out || "") + String(errOut || "") }));
     } catch (e) { res({ ok: false, out: "could not start " + cmd + ": " + e.message }); }
   });

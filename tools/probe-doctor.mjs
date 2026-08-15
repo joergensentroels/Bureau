@@ -37,10 +37,14 @@ import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { gitSafeEnv } from "./git-env.mjs";
 
 const run = promisify(execFile);
+// env last and scrubbed through gitSafeEnv, so a caller may still supply one but cannot supply an inherited
+// GIT_DIR — this tool is handed the repository to inspect as an argument and must never be told a different
+// one by the environment. See tools/git-env.mjs.
 const sh = async (cmd, args, opts = {}) => {
-  try { const r = await run(cmd, args, { timeout: 300000, maxBuffer: 8e6, ...opts }); return { ok: true, out: String(r.stdout || "") + String(r.stderr || "") }; }
+  try { const r = await run(cmd, args, { timeout: 300000, maxBuffer: 8e6, ...opts, env: gitSafeEnv(opts.env) }); return { ok: true, out: String(r.stdout || "") + String(r.stderr || "") }; }
   catch (e) { return { ok: false, out: String(e.stdout || "") + String(e.stderr || "") || String(e.message || "") }; }
 };
 

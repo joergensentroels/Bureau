@@ -2558,6 +2558,84 @@ console.log("# ask_stakeholder — it is a safe action, and it is NOT an escalat
       !code.includes("latch(") && !code.includes("latchApproval") && !code.includes('"waiting"') && !code.includes("sleep("));
 }
 
+// ---- THE INSTRUMENT: a spawned git must never inherit the caller's repository ----------------------------
+//
+// Git exports GIT_DIR into every hook, and every child inherits it. The suites that build throwaway fixtures
+// then run `git init` and `git config user.*` against whatever repository invoked the hook instead of against
+// their own — and `git init` with GIT_DIR set re-inits THAT repository, with no work tree named, as BARE.
+//
+// This is the defect that had already happened, silently, and hid itself: the leftover `core.bare = true` made
+// every work-tree operation fail, including `git push`, so the pre-push gate could not run, so nothing reported
+// the damage it had done. The fingerprints were the suites' own fixture identities sitting in [user] —
+// gate@example.invalid from finding-gate.test.mjs, t@example.invalid from probe-doctor.test.mjs.
+//
+// The fix has to be mechanical, not remembered. .githooks/pre-push unsets the variables, but that only covers
+// the hook, and the suites are documented as runnable directly. So each spawn site scrubs — and the set of
+// files that spawn git is DERIVED here rather than listed, because a list is the thing that goes stale on the
+// day someone adds the fifth spawner.
+console.log("# git-env — no spawned git inherits the caller's repository");
+{
+  const { gitSafeEnv, GIT_ENV_VARS } = await import("../tools/git-env.mjs");
+
+  // ---- the function, behaviourally ------------------------------------------------------------------------
+  const dirty = { GIT_DIR: "/elsewhere/.git", GIT_WORK_TREE: "/elsewhere", PATH: "/usr/bin", HOME: "/home/x" };
+  const clean = gitSafeEnv(dirty);
+  chk("  it removes every variable it names", GIT_ENV_VARS.every((k) => !(k in clean)));
+  chk("  and keeps everything else, or the child loses its PATH", clean.PATH === "/usr/bin" && clean.HOME === "/home/x");
+  // The argument is almost always process.env. A mutating version would strip the PARENT for the rest of its life.
+  chk("  and does not mutate its argument, which is usually process.env", dirty.GIT_DIR === "/elsewhere/.git");
+  chk("  the list names the variable that did the damage", GIT_ENV_VARS.length >= 5 && GIT_ENV_VARS.includes("GIT_DIR"));
+  // CONTROL: it must be able to keep something. A function that returned {} would satisfy every check above.
+  chk("  CONTROL: a variable outside the list survives", gitSafeEnv({ GIT_ZZZ_NOT_REAL: "1" }).GIT_ZZZ_NOT_REAL === "1");
+
+  // ---- the cross-file property, both sides derived from source --------------------------------------------
+  // The needle is BUILT rather than written, so this file does not match its own detector and inflate the count.
+  const DQ = String.fromCharCode(34);
+  const SPAWNS = "(" + DQ + "git" + DQ + ",";
+  // Comments are not code, and this matters in both directions. The prose a few lines below describes the very
+  // pattern this looks for, and unstripped the detector matched its own description and reported THIS file as a
+  // spawner. The same cut protects the other side: a file must not satisfy the property by mentioning
+  // gitSafeEnv in a comment while spawning git for real.
+  const codeOf = (src) => src.split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
+  const sources = [];
+  for (const [prefix, dir] of [["", new URL("../", import.meta.url)],
+                               ["tools/", new URL("../tools/", import.meta.url)],
+                               ["test/", new URL("../test/", import.meta.url)]])
+    for (const f of readdirSync(dir))
+      if (f.endsWith(".mjs")) sources.push([prefix + f, codeOf(readFileSync(new URL(f, dir), "utf8"))]);
+  chk(`  read the repository's .mjs sources (${sources.length})`, sources.length >= 15);
+
+  // Every git spawn here goes through a local helper, so the signal is the COMMAND ARGUMENT rather than the
+  // child_process call — a direct execFileSync and a call through a helper both match.
+  const spawners = sources.filter(([, src]) => src.includes(SPAWNS));
+  const names = spawners.map(([n]) => n).sort();
+  chk(`  found the files that spawn git: ${names.join(", ")}`, spawners.length >= 4);
+  // A CALL, not a mention. `import { gitSafeEnv } from …` contains the name, so a file whose spawn site
+  // regressed to `env: process.env` would still carry the import and read as compliant.
+  const unscrubbed = (list) => list.filter(([, src]) => !src.includes("gitSafeEnv(")).map(([n]) => n);
+  const missing = unscrubbed(spawners);
+  chk(`  every file that spawns git routes its environment through gitSafeEnv`
+      + (missing.length ? ` — MISSING: ${missing.join(", ")}` : ""), missing.length === 0);
+
+  // ---- permanent negative controls ------------------------------------------------------------------------
+  // The subset test must be able to say no, and this voids the empty-set trap in the same assertion: were
+  // `spawners` empty, the invented entry is still the only thing returned and the comparison still holds only
+  // because it ran — while the floor above would already have failed.
+  chk("  CONTROL: a spawner that does not scrub is reported, and nothing else is",
+      unscrubbed([...spawners, ["zzzNotAFile.mjs", "execFileSync with no scrubbing at all"]]).join(",") === "zzzNotAFile.mjs");
+  // The detector must discriminate. normalizeAction's synonym tables in this very file list "git" as a bare
+  // string; if those counted, every file mentioning git would be demanded to scrub and the property would be noise.
+  chk("  CONTROL: git named as data, not as a command, is not counted as a spawn",
+      !('const t = ["github", "git", "commit"];').includes(SPAWNS));
+  chk("  CONTROL: git named as a command IS counted", ('sh(' + DQ + 'git' + DQ + ', ["init"])').includes(SPAWNS));
+  // ...and the comment strip is load-bearing, not tidiness: it is what stops prose describing a spawn from
+  // being counted as one. This file is the proof — it describes the pattern and must not appear above.
+  chk("  CONTROL: a spawn written inside a comment is not counted",
+      !codeOf('  // sh(' + DQ + 'git' + DQ + ', ["init"])').includes(SPAWNS));
+  chk("  CONTROL: and this file, which describes the pattern, is not itself listed as a spawner",
+      !names.includes("test/units.test.mjs"), names.join(", "));
+}
+
 console.log(`\n${fail === 0 ? "ALL PASS ✓" : "FAILURES ✗"} — ${pass} passed, ${fail} failed`);
 
 process.exit(fail === 0 ? 0 : 1);
