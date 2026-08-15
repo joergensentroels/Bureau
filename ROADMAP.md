@@ -329,7 +329,7 @@ _(Deliverable delete is complete — API and UI both shipped, see below.)_
 
 The core vision — *point Bureau at a goal and let it run itself, only surfacing finished, QA'd
 work* — is built, and guarded by an automated suite (`node test/run-all.mjs --serve` —
-**<!--fig:assertions-->1,785 headless assertions across <!--fig:suites-->20 suites** + a live `--e2e`; see
+**<!--fig:assertions-->1,786 headless assertions across <!--fig:suites-->20 suites** + a live `--e2e`; see
 `test/README.md`). _Those two numbers are checked against a real run on every invocation of the runner
 and fail it if they disagree — this line read "636 across 7" for a fortnight while the truth was more
 than twice that, which is why it is now an instrument rather than a habit._

@@ -14,7 +14,7 @@ node tools/restore-drill.mjs      # restore the newest snapshot and boot a REAL 
 .\Install-Heartbeat.ps1 -Verify   # the dead-man's switch, against the REAL Bureau/Ollama/watcher
 ```
 
-**Where the suite stands right now: <!--fig:assertions-->1,785 headless assertions across
+**Where the suite stands right now: <!--fig:assertions-->1,786 headless assertions across
 <!--fig:suites-->20 suites** (<!--fig:pure-suites-->14 pure, <!--fig:server-suites-->6 server), plus the
 live `--e2e` at 18/18 and the scripted verifications written up below.
 
@@ -798,9 +798,12 @@ response schema enum, the prompt's action catalogue, `normalizeAction`'s synonym
 one of the three was introduced by someone editing one list correctly.
 
 So the deliverable is a checker rather than a fourth correct list. `test/action-surface.test.mjs` (pure) derives
-both sides from `server.mjs`, so it cannot be satisfied by editing itself, and it canonicalises the reachable side
-by **calling** the real `normalizeAction` instead of reasoning about what it would do — precisely the gap the
-`note` defect lived in. **126 reachable names against 22 branches**; anything left over must be named in the new
+both sides from `server.mjs` — through `test/action-surface.mjs`, which holds the parses so `docs.test.mjs` can
+read these counts without importing a suite that asserts at import time — so it cannot be satisfied by editing
+itself, and it canonicalises the reachable side by **calling** the real `normalizeAction` instead of reasoning
+about what it would do — precisely the gap the `note` defect lived in.
+**<!--fig:reachable-actions-->126 reachable names against <!--fig:dispatch-branches-->22 branches** (both pinned
+by `docs.test.mjs`, so this sentence goes red rather than stale); anything left over must be named in the new
 `UNEXECUTED_ACTIONS` export, which holds `other` alone. It also asserts each parse is non-empty *before*
 concluding anything from it (the empty set is a subset of everything, so a silently broken parser would report
 green forever), that every action the catalogue promises "runs instantly" is dispatched above the approval seam,

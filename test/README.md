@@ -16,9 +16,9 @@ node test/run-all.mjs --ui      # holds the throwaway server open so the UI can 
 The runner runs the pure suites always, the server suites only if a server is reachable on
 `BUREAU_PORT` (else it skips them with a note), and the live e2e only with `--e2e`.
 
-Current totals: **<!--fig:pure-assertions-->1,493 pure assertions** across
+Current totals: **<!--fig:pure-assertions-->1,494 pure assertions** across
 **<!--fig:pure-suites-->14 pure suites**, plus **<!--fig:server-assertions-->292 server assertions**
-across **<!--fig:server-suites-->6 server suites** — **<!--fig:assertions-->1,785 headless assertions
+across **<!--fig:server-suites-->6 server suites** — **<!--fig:assertions-->1,786 headless assertions
 across <!--fig:suites-->20 suites** in all. The live `--e2e` adds 18 more and is not counted here,
 because it is not part of the pre-push gate.
 
@@ -52,7 +52,7 @@ asserts that every suite there is described below and that nothing described bel
 | `readme-demo.test.mjs` | that the README's pasted `demo-floor` transcript still matches what the tool prints |
 | `docs.test.mjs` | this file and the other docs: the figure checker itself, the suite counts, and the suite list above |
 | `ui.test.mjs` | the browser UI statically — the inline `<script>` parses, and every literal `#id` lookup resolves to an id that exists |
-| `action-surface.test.mjs` | that every action the model can reach has somewhere to land: the schema enum, the prompt catalogue, the synonym table and the dispatcher, derived from `server.mjs` and compared |
+| `action-surface.test.mjs` | that every action the model can reach has somewhere to land: the schema enum, the prompt catalogue, the synonym table and the dispatcher, derived from `server.mjs` and compared. The four parses live in `test/action-surface.mjs` so `docs.test.mjs` can read the counts TESTING.md pins without importing a suite that asserts at import time |
 | `hunt-scope.test.mjs` | what `huntRefusal` answers — a review round may not write, buy, send or commit |
 | `hunt-dispatch.test.mjs` | that the **runner** enforces that scope rather than the prompt merely asking. Brings its own Bureau and its own stub Latch, which is why it is pure despite spawning |
 

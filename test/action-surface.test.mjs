@@ -32,64 +32,21 @@
 // while renaming it (the shape the real defect had — advertised, and nothing anywhere answering to the name) went
 // red immediately. Closing that gap needs a turn loop driven end to end, which needs a provider and a Latch; the
 // pure suite cannot have one. Both defects this file was written for were absent branches, not dead ones.
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { normalizeAction, decideApproval, UNEXECUTED_ACTIONS } from "../server.mjs";
+import { deriveActionSurface } from "./action-surface.mjs";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const SRC = readFileSync(join(ROOT, "server.mjs"), "utf8");
-const Q = String.fromCharCode(34);
+// The four parses live in `action-surface.mjs` so `docs.test.mjs` can read the two counts TESTING.md
+// pins without importing this file — importing THIS file runs every assertion below and sets
+// process.exitCode, which would let this suite's verdict overwrite the importer's. The parses moved;
+// the assertions did not, and the comments explaining each parse moved with the code they describe.
+const { SRC, Q, fromEnum, fromDocs, docLines, synTargets, synAliases,
+        runStart, catchAll, RUN, dispatched, registered, fallback, reachable } = deriveActionSurface();
 
 let pass = 0, fail = 0;
 const ok = (name, cond, detail = "") => {
   if (cond) { pass++; console.log("✓ " + name); }
   else { fail++; console.log("✗ " + name + (detail ? "  — " + detail : "")); }
 };
-
-// ---------------------------------------------------------------------------
-// The four lists, each read out of the source
-// ---------------------------------------------------------------------------
-
-// 1. The response schema enum: the alternatives in "actionType":"a"|"b"|...
-const enumStart = SRC.indexOf(Q + "actionType" + Q + ":");
-const fromEnum = SRC.slice(enumStart, SRC.indexOf(",'", enumStart)).split(Q).filter((s) => /^[a-z][a-z_]*$/.test(s));
-
-// 2. The prompt's action catalogue: the "- name: ..." doc lines. Parsed the same way systemPrompt's own hunt
-//    filter parses them, so a line this cannot see is also a line the review-round filter cannot see. Each doc
-//    line is one source line, so the promise the catalogue makes about an action is kept with its name.
-const docLines = new Map();
-for (const chunk of SRC.split(Q + "- ").slice(1)) {
-  const line = chunk.split("\n")[0];
-  const m = /^([a-z][a-z_]{2,}):/.exec(line);
-  if (m && !docLines.has(m[1])) docLines.set(m[1], line);
-}
-const fromDocs = [...docLines.keys()];
-
-// 3. normalizeAction's synonym table: both the ALIASES the model might emit and the canonical TARGETS they
-//    resolve to. Aliases are included deliberately — a synonym list pointing at a type with no branch is the
-//    same defect wearing a different name, and it is the one nobody would think to look for.
-const normBody = SRC.slice(SRC.indexOf("export function normalizeAction"), SRC.indexOf("\n}", SRC.indexOf("export function normalizeAction")));
-const synTargets = [...new Set([...normBody.matchAll(/\bat = "([a-z_]+)"/g)].map((m) => m[1]))];
-const synAliases = [...new Set([...normBody.matchAll(/\[([^\]]*)\]\.includes\(at\)/g)]
-  .flatMap((m) => [...m[1].matchAll(/"([a-z_]+)"/g)].map((x) => x[1])))];
-
-// 4. The dispatcher, in the two comparison forms the runner actually uses.
-//
-//    SCOPED to runAgentTask, and that is not tidiness. Unscoped, `actType === "email_draft"` matches inside
-//    requiresCeoAlways — the HARD FLOOR — and the checker would have called email_draft dispatched on the
-//    strength of the very line proving it needs a human it was never going to reach a branch for. The floor and
-//    the dispatcher ask about the same strings for opposite reasons; conflating them hides exactly this bug.
-const runStart = SRC.indexOf("async function runAgentTask");
-const catchAll = SRC.indexOf("cannot execute that action type yet");
-const RUN = SRC.slice(runStart, SRC.indexOf("\n}", catchAll));
-const after = (marker) => RUN.split(marker).slice(1).map((s) => s.split(Q)[0]);
-const dispatched = [...new Set([
-  ...after("next.actionType || " + Q + Q + ") === " + Q),
-  ...after("actType === " + Q),
-])].filter((s) => /^[a-z][a-z_]*$/.test(s)).sort();
-
-const registered = Object.keys(UNEXECUTED_ACTIONS || {});
 
 console.log("# the parses themselves, before anything is concluded from them");
 ok("read the response schema enum", fromEnum.length >= 15, fromEnum.length + " parsed");
@@ -110,12 +67,10 @@ ok("CONTROL: the hard floor's mentions are NOT counted as branches",
 
 console.log("\n# every actionType the model can reach has a branch or a written-down reason it has none");
 {
-  // The fallback normalizeAction hands the dispatcher when it cannot make sense of a choice. Obtained by CALLING
-  // it rather than by typing "other" here, so the checker keeps up with the function instead of with a memory.
-  const fallback = normalizeAction({ type: "propose_action", actionType: "", title: "x", details: "y" }, "do a thing").actionType;
+  // The fallback normalizeAction hands the dispatcher when it cannot make sense of a choice — derived by
+  // CALLING it (in action-surface.mjs), not by typing "other" here, so it keeps up with the function.
   ok("normalizeAction's own fallback was derived by calling it", /^[a-z][a-z_]*$/.test(fallback), fallback);
 
-  const reachable = [...new Set([...fromEnum, ...fromDocs, ...synTargets, ...synAliases, fallback])].sort();
   ok("assembled the reachable set from all four surfaces", reachable.length >= 100, reachable.length + " names");
 
   // Canonicalise the way the runner does: whatever the model emits goes through normalizeAction first, and the

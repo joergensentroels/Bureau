@@ -33,7 +33,13 @@
 
 // The figures a document may pin. Adding a key here without claiming it somewhere is itself reported:
 // a key nobody states is a figure nobody is checking.
-export const FIG_KEYS = ["assertions", "suites", "pure-assertions", "pure-suites", "server-assertions", "server-suites"];
+// `reachable-actions` / `dispatch-branches` are the action-surface counts TESTING.md states in prose.
+// They are not run totals: they are facts about server.mjs that move whenever an action type is added or
+// removed, which is the same staleness this file exists for. They must be listed HERE even though only
+// docs.test.mjs observes them — `unknownKeys()` runs inside `compare()` regardless of what the caller
+// observed, so a marker whose key is absent from this array is reported as a typo by run-all.mjs too.
+export const FIG_KEYS = ["assertions", "suites", "pure-assertions", "pure-suites", "server-assertions", "server-suites",
+  "reachable-actions", "dispatch-branches"];
 
 // Documents scanned for claims. A doc absent from this list is unchecked, which is why the list is short
 // and the required floor below is not empty.

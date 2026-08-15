@@ -22,6 +22,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { checkDocFigures, compare, extractClaims, selfTestProblems, FIG_KEYS, FIGURE_DOCS, REQUIRED_DOCS } from "./doc-figures.mjs";
+import { deriveActionSurface } from "./action-surface.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -145,7 +146,17 @@ const mk = (key, n) => `<!--fig:${key}-->${n}`;
   const sources = FIGURE_DOCS.map((f) => {
     try { return { file: f, text: readFileSync(join(ROOT, f), "utf8") }; } catch { return { file: f, text: "" }; }
   });
-  const observed = { suites: PURE.length + SERVER.length, "pure-suites": PURE.length, "server-suites": SERVER.length };
+  // The action-surface counts belong in this half rather than in run-all.mjs's: they are static facts
+  // about server.mjs, so they cost a parse and not a run. Derived through action-surface.mjs, NOT by
+  // importing action-surface.test.mjs — that file asserts at import time and sets process.exitCode,
+  // so importing it here would run its suite and let its verdict overwrite this one's.
+  const surface = deriveActionSurface();
+  ok("derived the action surface for the figure check",
+    surface.reachable.length > 0 && surface.dispatched.length > 0,
+    `${surface.reachable.length} reachable, ${surface.dispatched.length} branches`);
+
+  const observed = { suites: PURE.length + SERVER.length, "pure-suites": PURE.length, "server-suites": SERVER.length,
+    "reachable-actions": surface.reachable.length, "dispatch-branches": surface.dispatched.length };
   const problems = checkDocFigures(observed, sources);
   ok("the documents' SUITE figures match run-all.mjs's own lists", problems.length === 0, problems.join(" | "));
 
