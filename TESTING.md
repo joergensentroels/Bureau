@@ -3,7 +3,7 @@
 ## Run it
 
 ```sh
-node test/run-all.mjs --serve     # pure + server suites; boots a throwaway server itself. THE command.
+node test/run-all.mjs --serve     # pure + server suites; boots a throwaway server on a free port. THE command.
 node test/run-all.mjs             # pure suites; server suites only if a server is already up on :4174
 node test/run-all.mjs --e2e       # also the live autonomy e2e (needs Latch + a local model)
 node test/coverage-audit.mjs      # soft audit: exported fns / routes not tested AND not listed below
@@ -39,8 +39,70 @@ lessons are baked into it — count data in the *file*, not through `/api/state`
 at 100 and filters archived items, so it reported 100 of 360 approvals and failed a good backup), and
 compare restored-vs-live rather than against a hardcoded number.
 
-`--serve` self-hosts a Bureau on :4174 (generating its own `OPERATOR_TOKEN`, so no Latch/auth.json
-needed) and tears it down after. Exits non-zero on any failure — it's the pre-push and CI gate.
+`--serve` self-hosts a Bureau on **a port the OS says is free** (generating its own `OPERATOR_TOKEN`, so
+no Latch/auth.json needed) and tears it down after. Exits non-zero on any failure — it's the pre-push and
+CI gate. `BUREAU_PORT` still pins the port when you want a known one.
+
+**It used to self-host on a fixed :4174, and that is a defect this repo produced rather than imported.**
+Several agent sessions work in sibling git worktrees off one clone and every pre-push hook runs
+`run-all --serve`, so two gate runs overlap routinely. `bootServer()` returned early on "something is
+already listening" — and generated its disposable `OPERATOR_TOKEN` on the line *after* that return, so the
+second run reused the first run's server without ever learning its token. Measured 2026-08-15: `api`,
+`workspaces`, `endpoints`, `robustness` and `mcp-floor` all red with `status 401` and "could not create
+test workspace", plus `HARNESS ERROR TypeError: Cannot read properties of undefined (reading 'length')` at
+`workspaces.test.mjs:29`. Every symptom pointed at the source. The cause was the port.
+
+Three things changed, and `test/gate-harness.test.mjs` (pure) holds all of them:
+
+- **`--serve` no longer shares a port**, so concurrent runs cannot meet. Deliberately NOT applied to the
+  bare command: `node test/run-all.mjs` documents "server suites run if a server is already up on :4174",
+  and an ephemeral port there would find nothing every time and skip them in silence — the exact
+  regression-hiding failure `--serve` was added to end.
+- **A server we did not start is probed on an *authenticated* route before it is reused.** `serverUp()`
+  probes `/`, which is not token-gated, so it can answer "is something listening" and never "is it mine".
+  A 200 is not sufficient either, and that is measured rather than argued: Latch's narrower `agentToken`
+  authenticates and `/api/whoami` answers **200 with `role: "readonly"`**, on which every mutation 403s.
+  The permit is an allowlist of one — `role === "operator"` — and everything else is refused by name.
+- **`workspaces.test.mjs` diagnoses instead of throwing.** It reads a company before it asserts anything,
+  so a refused credential surfaced as a `TypeError` on `.agents.length` — a stack trace naming the line
+  that tripped and nothing about the cause. It now reports the status, which credential it resolved and
+  where from, and what to do about it. A second guard stops the run if workspace creation returns no id:
+  an undefined id sends no `x-workspace` header at all, so the whole suite would silently re-target the
+  **default** company and report a dozen unrelated-looking failures against real data.
+
+_Controls, all mutate/restore with the restore hash-verified: 29 assertions, and each one was shown to go
+red under a mutation naming it — reuse-anything (the original defect) turns 10 red; reuse-nothing turns the
+permit half red; probing on status alone turns exactly the two read-only assertions red; probing `/` instead
+of `/api/whoami` turns all four live-probe assertions red; removing the preflight puts the `TypeError`
+back. Two assertions were **rewritten because their controls left them green**: `typeof … === "string"`
+passed even with the probe pointed at `/` (role comes out null and a different branch returns a string
+anyway), and the bail exit code alone could not tell a diagnosis from a `TypeError`, since both exit 2._
+
+**The exit-code rule is about WHEN, not about which call is safer — and both directions cost something
+here.** Calling `process.exit()` immediately after a `fetch` on Windows trips the assertion
+`!(handle->flags & UV_HANDLE_CLOSING), src\win\async.c:94` that `tools/heartbeat.mjs` documents: the
+refusal path printed a perfect diagnosis and then died with **exit 127**, and `workspaces.test.mjs`'s bail
+returned **3221226505** instead of 2. The pre-push hook blocks on any non-zero code so the gate held
+either way, but 127 means "command not found", which is the wrong story to tell someone whose push was
+just refused. So bail paths set the code and return.
+
+Then the same fix applied to the *end* of a suite went wrong the other way, and a control caught it. With
+`gate-harness.test.mjs` ending on `process.exitCode`, the C8 mutation — `freePort` returning without
+`s.close()` — left a listening socket, the event loop never drained, the suite never exited, and
+`run-all`'s `run()` waits on child close with no timeout. **The control that should have gone red hung the
+whole gate instead**, and a 10-minute cap was the only thing that ended it; worse, the controls script
+died between mutate and restore and left the defect in the working tree. So: `process.exit()` at the
+natural end of a suite, where termination must be guaranteed and the last fetch is subprocess-lifetimes
+ago; `process.exitCode` + return only on the paths that fire within a tick or two of one. _The controls
+script now runs each suite under a timeout and restores on exit, because cleanup that has never been
+watched is not cleanup — the same lesson the workspace sweep in `workspaces.test.mjs` carries._
+
+_What is verified by hand rather than by an assertion: that `main()` actually calls the refusal before the
+first suite. A suite spawning `run-all` is a recursion hazard — `run-all` runs that suite — so this one is
+measured and recorded instead. With a foreign server on :4174 holding a different token, the bare command
+refuses in **0.12s** with exit 2, where it previously spent ~2 minutes on the pure suites first and then
+reported five red server suites. The decision function behind it, `reuseDiagnosis`, is unit-tested against
+every status a real server answers with._
 
 ## The gate (how we avoid pushing broken/untested code)
 

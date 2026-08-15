@@ -7,13 +7,18 @@ Latch + the local model).
 ## Run everything
 
 ```
+node test/run-all.mjs --serve  # pure + server suites; self-hosts a server. THE command.
 node test/run-all.mjs          # pure suites + server suites (if a server is up)
 node test/run-all.mjs --e2e    # also the live autonomy e2e
 ```
 
 The runner runs the pure suites always, the server suites only if a server is
 reachable on `BUREAU_PORT` (else it skips them with a note), and the live e2e only
-with `--e2e`. Current totals: **194 pure assertions + 98 server assertions** (plus
+with `--e2e`. `--serve` boots one itself, on **a free port of its own** so that two
+concurrent runs — several worktrees off one clone, each with a pre-push hook — never
+share a server; set `BUREAU_PORT` to pin it. A server it did **not** start is probed
+on an authenticated route first and refused if that credential does not work there,
+rather than handed to the suites to fail as 401s (see TESTING.md). Current totals: **194 pure assertions + 98 server assertions** (plus
 the 10-assertion live e2e) — 292 in all.
 
 ### What's covered vs. not

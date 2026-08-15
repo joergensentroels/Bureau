@@ -23,9 +23,35 @@ const pass = [], fail = [];
 const ok = (c, m) => (c ? pass : fail).push(m);
 const orgOf = async (ws) => (await api("GET", "/api/org", null, ws)).j;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Bails out of the run with a REASON. Throws rather than calling process.exit(): every call site here is
+// downstream of a fetch, and on Windows exiting while undici's handles are still closing trips a libuv
+// assertion and kills the process with 0xC0000409 instead of the code being set — the same trap
+// tools/heartbeat.mjs carries a note about. Measured here too: the first version of the read-only case
+// below exited 3221226505 rather than 2, which would have reported this refusal as a crash.
+class Bail extends Error {}
+const die = (msg) => { console.error(`✗ workspaces.test.mjs cannot run against :${PORT} — ${msg}`); throw new Bail(); };
+// Where the token above came from, so a refusal says which credential was tried and not just that one was.
+const tokenSource = process.env.OPERATOR_TOKEN ? "OPERATOR_TOKEN" : (TOKEN ? "Latch's auth.json" : "nowhere — no token was found at all");
 
 (async () => {
-  const before = await orgOf("default");
+  // Every assertion below reads a company off the server, so a server that refuses this suite's credential
+  // used to surface as `TypeError: Cannot read properties of undefined (reading 'length')` on the
+  // .agents.length one line down. Measured: that is exactly what a second gate run produced when it found
+  // a concurrent run's server already on the shared port and reused it without its disposable token. A
+  // TypeError names the line that tripped and never the reason, so a port collision read as a source
+  // regression. Diagnose instead — the status, the credential, and what to do about it.
+  const baseline = await api("GET", "/api/org", null, "default");
+  if (!Array.isArray(baseline.j?.agents)) {
+    die(`GET /api/org answered ${baseline.status} with no company in the body`
+      + ` (${String(baseline.j?.error || JSON.stringify(baseline.j)).slice(0, 90)}).`
+      + ` The operator token came from ${tokenSource}.`
+      + (baseline.status === 401 || baseline.status === 429
+        ? ` That token is not this server's. If a concurrent test run booted it, the token is disposable and`
+          + ` exists only inside that run — use \`node test/run-all.mjs --serve\`, which self-hosts on a free`
+          + ` port of its own rather than sharing one.`
+        : ``));
+  }
+  const before = baseline.j;
   const dAgents = before.agents.length, dPolicies = (before.policies || []).length;
   console.log(`default baseline: ${dAgents} agents, ${dPolicies} policies`);
 
@@ -45,6 +71,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       try { await api("DELETE", "/api/workspaces/" + w.id); } catch { /* already gone, or the server is down */ }
     }
   };
+
+  // A missing id is not an assertion failure worth continuing past: every check below addresses a company
+  // BY id, and an undefined id sends no x-workspace header at all — so the whole suite would run against
+  // the DEFAULT company and report a dozen unrelated-looking failures. Sweeps first, because the
+  // finally-sweep below is not reached from here and the other workspace may well have been created.
+  if (!a.id || !b.id) {
+    await sweep();
+    die(`POST /api/workspaces returned no id (A: ${JSON.stringify(a).slice(0, 100)}, B: ${JSON.stringify(b).slice(0, 100)})`);
+  }
   try {
 
   ok((await orgOf(a.id)).agents.length === 0, "new workspace A starts empty");
@@ -180,4 +215,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   pass.forEach((m) => console.log("  ✓ " + m));
   fail.forEach((m) => console.log("  ✗ " + m));
   process.exit(fail.length ? 1 : 0);
-})().catch((e) => { console.error("HARNESS ERROR:", e); process.exit(2); });
+})().catch((e) => {
+  // A Bail already printed its own diagnosis; anything else is a genuine harness error and keeps the
+  // stack. Both set the code and RETURN rather than calling process.exit() — see the note on `die`.
+  if (!(e instanceof Bail)) console.error("HARNESS ERROR:", e);
+  process.exitCode = 2;
+});
