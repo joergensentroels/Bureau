@@ -55,15 +55,42 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
    _This item spent a while claiming to be a gate without being one._ CI ran it as
    `node test/coverage-audit.mjs || true`, the pre-push hook did not run it at all, and the script's own
    header called it "a soft nudge, not a hard gate" — three artifacts, two stories, and the rule above
-   enforced by nothing but memory. It is wired for real now, and it fails the build. Note what it can and
-   cannot do: `accounted()` is a substring match, so it never fails falsely but can be satisfied by a
-   coincidental mention. It asks "did anyone account for this name", not "is this exercised" — which is
-   why transitive-coverage entries in the ledger below carry mutation evidence rather than a pointer.
+   enforced by nothing but memory. It is wired for real now, and it fails the build.
+
+   **`accounted()` matches on word boundaries, not substrings.** While it was a substring match an export
+   named `sum` or `emit` was satisfied by `checksum` or `emitted` — the gate could not fail falsely, but it
+   could be silently satisfied, which is the worse failure for something that blocks a push. _This paragraph
+   is itself inside the scanned corpus, so an illustrative name here must not be a real export: a third
+   example was dropped from that list on finding it was one, which would have let the ledger account for a
+   real symbol purely by discussing the matcher._ Boundaries apply only on an edge that is itself a word character, so `/relocate` and
+   `/steer` — registered via `.endsWith()` and only ever reached as `/api/run/<id>/steer` — keep matching;
+   requiring a delimiter before the leading `/` was tried and reported both as false gaps. Hardening the
+   matcher surfaced **no new gaps**: all 127 exports and 73 routes were already accounted for by name.
+
+   The matcher carries its own negative control and runs it on every invocation, because a checker that
+   quietly stopped discriminating would print the same clean bill of health as one that works. The control
+   derives both halves from the live corpus — a real word must be accounted, its two-character truncation
+   must not — so it fails if the matcher is reverted to substring, pinned to `true`, or pinned to `false`.
+   Evidence, mutate/restore with the restore hash-verified: reverting to `includes()` → self-test names the
+   boundary regression; `() => true` and `() => false` → self-test fires on the negative and positive half
+   respectively; adding a new export named by truncating `heartbeat` by two characters — a string the corpus
+   contains only inside that longer word — → **reported as a gap** under the new matcher and **silently
+   accounted** under the old one. That last pair is what makes the control matcher-specific rather than
+   merely noticing that a new export appeared. The truncated name is deliberately not written out here:
+   spelling it would place it in the corpus as a word and retire the control that depends on its absence.
+
+   Still true, and the reason transitive-coverage entries below carry mutation evidence rather than a
+   pointer: it asks "did anyone account for this name", not "is this exercised". A mention in a comment or
+   an unrelated local of the same name in a test still counts. (`configuredPaidModel` is the live example —
+   its only occurrence in a test file is a comment; it is legitimately carried by its ledger entry below,
+   not by that comment.) Two entries in the route list, `/api/` and `/mcp`, are router prefixes rather than
+   endpoints and are accounted no matter what.
 
 ## Suites
 
-- **Pure** (`decision`, `units`, `net`) — no server, no model. Logic, validators, SSRF guard, BM25,
-  the semaphore, the approval-decision core (incl. hard floor).
+- **Pure** (`decision`, `units`, `net`, `action-surface`) — no server, no model. Logic, validators, SSRF guard,
+  BM25, the semaphore, the approval-decision core (incl. hard floor), and the model-facing action surface —
+  every actionType the model can reach has a dispatch branch or a registered reason it has none.
 - **Server** (`api`, `workspaces`, `endpoints`, `robustness`) — hit a running server (no model). CRUD + validation,
   auth gate + role separation, security headers, MCP JSON-RPC, steer routing, SOP CRUD, spend cap,
   workspace isolation, hardening/malformed-input.
@@ -666,7 +693,10 @@ Round 2 then found a new defect. After reading `src/auth.mjs` the agent emitted 
 
 - **`"other"` was advertised in the actionType enum the system prompt hands out, and nothing implements it.** It
   fell off the end of the dispatch chain — no result, no error, no feedback — even when it carried content. The
-  prompt was offering an action that does nothing. Removed; `note` is the implemented catch-all.
+  prompt was offering an action that does nothing. Removed; `note` is the implemented catch-all. _That last
+  clause was false the day it was written — `note` had no branch either, and did not get one until `97fda1a`
+  nine days later; see below. `other` is now refused by name with a reason before dispatch, three in a row end
+  the round, and it is registered in `UNEXECUTED_ACTIONS` as the one action deliberately left unexecuted._
 - **Nothing noticed an action carrying no content at all**, so there was no reason for the model to stop.
 
 A wasted turn the model cannot detect is a turn it will repeat until the cap, and it did — nine times. Both are
@@ -709,9 +739,66 @@ review phase. 8,613 → 6,338 characters, about 570 tokens back, with controls a
 It is a mitigation and not a fix — the turn still begins near the limit — but it is the half that does not require
 someone to trade VRAM.
 
-Also found while measuring: **`note` is implemented and enumerated but was never described to the agent** — the
-exact inverse of the `other` defect. In a review round it is the right action for "I looked here, this is what I
-checked, nothing to report", which is the answer most rounds should give. Now documented.
+Also found while measuring: **`note` was enumerated, and documented from this same day, but it was never
+implemented.** _This paragraph originally said the exact inverse — "implemented and enumerated but was never
+described to the agent" — and it was wrong in the direction that mattered. It stood for nine days, 2026-08-06 to
+2026-08-15._
+
+There was no dispatch branch, and `note` could not have reached one anyway, because two layers above the
+dispatcher rewrote it first:
+
+- **`normalizeAction`'s catch-all.** It had treated `note` as a vague choice to reinterpret since the initial
+  commit — back when the word really was model noise — and "note" is itself in the `wantsWrite` regex, so a note
+  headed *"Note on X"* with a paragraph under it became a `file_write`. Measured over five notes written exactly
+  the way the doc line asks for them, **four came out as a different action**: two `file_write`, one
+  `web_research` (it had quoted the URL it checked), one `web_search`.
+- **The turn loop's finish coercion**, which swallowed the fifth. It listed `note` beside "done", "stop" and
+  "nothing", so the one short neutral note that survived rewriting ended the agent's task instead of recording
+  anything.
+
+So the single action offered for an honest empty-handed round was also the one that **stopped** the round — or
+silently escalated it into a disk write or a live fetch. The two halves landed **four commits apart on the same
+day**: `9d11bae` put `note` in the finish list while it was still noise, then `8f77c4d` documented it as the RIGHT
+answer for "I looked and found nothing" and revisited neither layer. `units.test.mjs` asserted *"while `note` —
+which IS implemented — still is"* and was green the whole time, because it checked the **enum's spelling** and
+then said something about a **dispatcher nothing had looked at**.
+
+**Fixed in `97fda1a` (2026-08-15).** `note` has a branch, beside `plan_add` and **above the approval seam** — the
+doc line promises it runs instantly and changes nothing, and routed through `fileApproval` on the default
+`supervised` tier it would instead park the agent for up to ten minutes waiting for a human to approve a no-op. It
+sets `didExecute`, because this IS the work product of a round that found nothing and the finish guard would
+otherwise answer an honest note with *"NOTHING has actually run yet"* — the nag that makes an agent invent an
+action. It records on `run.notes`, emits, and reaches the company audit through `emitResult`, so no new collection
+and no new panel. `normalizeNote` refuses a note carrying only a heading, for `declined_check`'s reason: a shrug
+and a round that never looked leave the same mark on the record. Policy and the action cap still apply, so no
+approval does not mean ungoverned. `note` is out of the catch-all and out of the finish list, and the rule those
+two now encode is written down: **that layer may sharpen a VAGUE choice, never overrule a documented one.**
+
+### The checker for the whole class: `action-surface.test.mjs`
+
+Advertised-to-the-model, undispatched has now shipped three times — `other`, `note`, `email_draft` — and reading
+never once caught it, because the model-facing surface is **four lists in one file that nothing compared**: the
+response schema enum, the prompt's action catalogue, `normalizeAction`'s synonym table, and the dispatcher. Every
+one of the three was introduced by someone editing one list correctly.
+
+So the deliverable is a checker rather than a fourth correct list. `test/action-surface.test.mjs` (pure) derives
+both sides from `server.mjs`, so it cannot be satisfied by editing itself, and it canonicalises the reachable side
+by **calling** the real `normalizeAction` instead of reasoning about what it would do — precisely the gap the
+`note` defect lived in. **126 reachable names against 22 branches**; anything left over must be named in the new
+`UNEXECUTED_ACTIONS` export, which holds `other` alone. It also asserts each parse is non-empty *before*
+concluding anything from it (the empty set is a subset of everything, so a silently broken parser would report
+green forever), that every action the catalogue promises "runs instantly" is dispatched above the approval seam,
+that a documented action survives all four rewrite heuristics — with controls that those heuristics still fire for
+a vague choice — and that nothing the prompt documents is coerced into a finish. The dispatcher parse is **scoped
+to `runAgentTask`**, which is load-bearing: unscoped, `actType === "email_draft"` matches inside
+`requiresCeoAlways`, and the checker would have pronounced `email_draft` dispatched on the strength of the line
+proving it needs a human. A control asserts the scope holds.
+
+**Stated limit, measured rather than assumed.** The dispatched side is source text, so it answers "is there a
+branch of this name", not "does that branch run". Disabling the `note` branch with `&& false` left the suite
+green; **renaming** it — the shape the real defect had — went red at once. Closing that gap needs a turn loop
+driven end to end, which needs a provider and a Latch the pure suite cannot have. Both defects it was written for
+were absent branches, not dead ones.
 
 ## Before a new API key can help: the paying agent needs a budget
 

@@ -29,6 +29,12 @@ is what makes the rule load-bearing rather than decorative:
   autonomy tier, `run.autoApprove`, or any policy rule. It is deliberately not
   reachable from any API. Adding an action with real-world reach means adding it
   here too, and saying why if you don't.
+  **Floored is not the same as offered:** `email_draft` is on this list but has no
+  executor and is no longer in the response schema enum, so no agent can propose it.
+  Don't tidy it off the floor — the floor's job is to be shut *before* something
+  needs it, including for approvals filed by older builds. And the converse is now
+  mechanical: `test/action-surface.test.mjs` fails if any actionType the model can
+  reach has no dispatch branch and no entry in `UNEXECUTED_ACTIONS`.
 - **Bureau must never approve its own Latch approval.** It has the operator token,
   so it *could*; that is precisely why `mcp_call` and the GitHub write actions are
   hard-floored. Auto-approval would bypass Latch's per-tool allowlist and its

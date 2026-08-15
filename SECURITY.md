@@ -168,6 +168,20 @@ rule. **The hard floor is code, not editable data:** there is no API that mutate
 authenticated-but-hostile call cannot make Bureau shell out, hit an arbitrary API, send email, or make
 a large purchase without you.
 
+**Floored *and* no longer offered — `email_draft`.** As of 2026-08-15 (`97fda1a`) it is gone from the
+response schema enum, so no agent can propose it. It never had an executor: it was hard-floored and mapped
+to an `external_contact` approval in Latch, so it cost a real card, a real interruption and a real human
+decision, and *then* fell to the dispatcher's catch-all. Implementing it would mean adding outbound mail,
+which Bureau has no transport for, in the repository whose whole argument is that reach belongs behind a
+credential boundary. An absent capability is honest; an advertised one that burns a human approval and does
+nothing is not. **It stays on the floor above, in `POLICY_ACTIONS` and in `tools/demo-floor.mjs`
+deliberately** — a floor that covers only what the current enum happens to offer is one release behind its
+own threat model, and an approval tagged `act:email_draft` filed by an older build must still find the gate
+shut. Dropping it from `POLICY_ACTIONS` would additionally reopen the widening `8ef68b3` closed, since
+`cleanPolicyWhen` discards an unrecognised `actionType` and `evaluatePolicy` reads an absent one as "any
+action". `test/action-surface.test.mjs` pins both halves: gone from the enum, the synonyms and the prompt
+catalogue, and still refused by `decideApproval` in the most permissive configuration that can be built.
+
 ## Review findings (2026-07-23)
 
 | # | Severity | Finding | Status |
