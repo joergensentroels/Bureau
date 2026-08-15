@@ -12,20 +12,64 @@ _Forward-looking only — the detail of what's shipped lives in the code, the te
 
 **The repo went public on 2026-08-01, which changed what "valuable" means.** The feature roadmap and the
 operational-durability work are both done. What follows is ordered for **legibility to strangers**, not
-feature parity — the first two items are not features at all, and are the two highest-value things here.
+feature parity.
 
-  1. **A demo showing the hard floor actually firing.** An agent proposes `shell`, the floor refuses it at
-     trusted tier, the operator approves in Latch, it executes. Twenty seconds of asciinema or a GIF in the
-     README. Today the README *argues* the differentiator in prose, and so does every competitor's README;
-     nobody who watches the floor refuse an action needs the paragraph. Cheapest item on this list and the
-     one that most changes how a visitor reads the repo — it turns the central claim into evidence.
-  2. **Browser UI smoke coverage.** The UI is the largest untested surface (TESTING.md has said so all
-     along) and the first thing a visitor judges. A small Playwright pass — loads → sign in → org renders →
-     run feed streams → inbox — is where a stranger's first bug report otherwise comes from. The signed-out
-     path was hand-verified on 2026-08-01 and is sound, but that is one path, checked once, and checking it
-     produced a wrong conclusion first (an automated browser throws on `window.prompt`, which surfaced as a
-     fake "Can't reach the Bureau server" bug — see the note in TESTING.md).
-  3. **MCP elicitation — scoped 2026-08-02, and it is NOT prototype-sized. Read this before starting.**
+_Rewritten 2026-08-15, because this list predated the entire **review subsystem** — hunt mode, the
+finding/probe gate, the lens register, the question queue, the declined-check register and the scope
+guardrail all landed between 2026-08-06 and 2026-08-15 and appeared in no document but TESTING.md and the
+git log. See **Shipped → The review subsystem** below for what exists and what it has and has not yet
+shown. Two items above were not stale but **false**, and are restated rather than deleted: a roadmap that
+quietly drops a wrong claim teaches nobody why it was wrong._
+
+  1. **The floor firing in the LIVE loop, and a recording of it.** _Narrowed on 2026-08-15: this item used
+     to say "the README argues the differentiator in prose", and that has been false since 2026-08-02._
+     `tools/demo-floor.mjs` sweeps every autonomy tier × policy effect × `autoApprove` against the real
+     `decideApproval()` and exits non-zero if a hard-floored action is ever auto-approved; its transcript
+     **is** a README section; and `test/readme-demo.test.mjs` pins that code fence to the tool, so the
+     numbers in it cannot drift quietly. The claim is already evidence rather than prose. What is still
+     open is narrower and worth stating exactly: **that sweep is `decideApproval()` in process.** Nothing
+     demonstrates the live chain — an agent proposing `shell`, the floor refusing at trusted tier, the
+     operator approving in Latch, Latch executing — and there is no recording of any of it. Twenty seconds
+     of asciinema is still the cheapest item here; it is now an *addition* to the proof, not a substitute
+     for a missing one.
+  2. **Browser UI — Playwright is DECLINED, not pending.** _This item ranked it second and called the UI
+     "the largest untested surface"; TESTING.md recorded the opposite decision on the same day, and the two
+     documents gave opposite instructions for two weeks. TESTING.md is the one that is right._
+     `test/ui.test.mjs` shipped 2026-08-02 in the **pure** set: the inline `<script>` is really parsed, and
+     every literal `#id` lookup must resolve to an id defined somewhere in the file — the single most likely
+     way this UI breaks, because a misspelled selector throws nothing, fails no syntax check, and just
+     returns `null` onto a silently dead control. `node test/run-all.mjs --ui` holds the throwaway server
+     open on a disposable token so the page can be *looked at* without assembling a harness, which is how
+     the panels shipped in this stretch were reviewed. **Playwright is declined on a stated trade:** it
+     needs a live Bureau *and* a browser dependency in a repo whose zero-dependency property is a design
+     feature, CI has neither, so it would live outside both gates — and a ~150 MB Chromium download changes
+     the clone-and-run story. That is an owner decision, recorded so it stops being re-proposed. What
+     remains is manual and cheap: load the page under `--ui`, read the console and network log. _And know
+     that an automated browser is not a browser — a driven browser throwing on `window.prompt` produced a
+     completely convincing fake bug once already; the note is in TESTING.md._
+  3. **The review subsystem's open question is ATTENTION, not judgement — and it was measured.** The
+     machinery is built and works (see Shipped): a round lists a repository, reads real source, forms a
+     hypothesis, checks it, and either registers a finding the gate proves or says plainly that the lens
+     showed nothing. What it does not reliably do is **look in the right place**. Five rounds against a
+     green 4water spent 41 of 50 searches on one file and never opened the one holding the planted defect;
+     three separate rounds under `what-would-it-accept` all went to authorization because that lens reads
+     as an authorization question to a model looking at a web app. Judgement was eliminated as the cause
+     for 21 cents: handed the defective function whole, the model named the defect **5 times in 8** and
+     produced **zero false positives in 12** runs against the correct version, with and without the lens.
+     - **The mechanisms that make looking cheaper are done and did not fix it** — the outline, the
+       visibility markers, `collapseReads` (57% off billed tokens), the whole-repo digest (87 files in
+       ~2,000 tokens), the file-coverage ledger. None of them makes looking *broader*.
+     - **The coverage marking is built, tested, and UNPROVEN as an intervention.** A valid A/B (both arms
+       proved distinct first, one lens throughout) showed no measurable effect and two signals pointing
+       opposite ways. Settling it costs roughly five runs per arm at ~$1.15 each — a spending decision.
+       Recorded as unproven rather than quietly dropped, because a mechanism that is built, tested and
+       ineffective is the easiest kind to keep believing in.
+     - **The scope guardrail is the current best answer** and it is mechanical rather than persuasive:
+       `guardrails.scopeFiles` restricts what `read_repo` may open at all, and a scope of ≤20 files raises
+       the read cap from 12,000 to 60,000 characters so a bounded file set is read WHOLE. That removes
+       both failure modes at once — wandering, and reasoning from a prefix — at the cost of someone
+       choosing the files.
+  4. **MCP elicitation — scoped 2026-08-02, and it is NOT prototype-sized. Read this before starting.**
      The idea stands: MCP has a standard mechanism for a server to pause and ask *the human*, which is what
      `requiresCeoAlways` already does, and implementing it would let an external client (Claude Desktop)
      drive a run and receive the approval prompt in its own UI. It remains the only item where the feature
@@ -50,11 +94,11 @@ feature parity — the first two items are not features at all, and are the two 
        `resultType: input_required` + `inputRequests` pattern. Bureau's `/mcp` is tools-only, so nothing is
        broken meanwhile — but it echoes back the client's requested `protocolVersion`, i.e. claims a
        revision it has not implemented. One-line honesty fix, not a roadmap item.
-  4. **Land the 4water scheduling case.** Chosen on 2026-08-01 as Bureau's first real external case,
+  5. **Land the 4water scheduling case.** Chosen on 2026-08-01 as Bureau's first real external case,
      explicitly *before* publishing — and publishing went first. The ordering slipped, so this is now the
      most valuable non-code item on the list: one real external deployment is worth more than three
      features when the repo's job is to be evidence.
-  5. **Durable / resumable runs — on the list, deliberately not started.** Checkpointing so a crash resumes
+  6. **Durable / resumable runs — on the list, deliberately not started.** Checkpointing so a crash resumes
      mid-run is table stakes across LangGraph, CrewAI and AutoGen; Bureau has none, and a restart silently
      loses in-flight runs. Coherent with the unattended-service work, and the honest counterweight is that
      runs are minutes of local-model time, so the loss per crash is small. **Write the trigger down rather
@@ -284,8 +328,83 @@ _(Deliverable delete is complete — API and UI both shipped, see below.)_
 ## Shipped
 
 The core vision — *point Bureau at a goal and let it run itself, only surfacing finished, QA'd
-work* — is built, and guarded by an automated suite (`node test/run-all.mjs` — 636 headless
-assertions across 7 suites + a live `--e2e`; see `test/README.md`).
+work* — is built, and guarded by an automated suite (`node test/run-all.mjs --serve` —
+**<!--fig:assertions-->1,752 headless assertions across <!--fig:suites-->20 suites** + a live `--e2e`; see
+`test/README.md`). _Those two numbers are checked against a real run on every invocation of the runner
+and fail it if they disagree — this line read "636 across 7" for a fortnight while the truth was more
+than twice that, which is why it is now an instrument rather than a habit._
+
+- **The review subsystem (2026-08-06 → 2026-08-15)** — a second phase whose exit condition is
+  **exhaustion, not satisfaction.** The Definition-of-Done gate answers *did we build what was asked?*
+  Nothing answered *what is wrong with it that nobody asked about?* — the motivating observation being
+  that 4water was feature-complete at commit 35 while the 121 commits after it found real defects, none of
+  them in any acceptance criterion. Runs after a run PASSES (`guardrails.investigate`, default on,
+  `investigateRounds` to cap it, `investigate:false` per run), or on its own as **`mode: "hunt"`** — which
+  a schedule can also ask for. The full narrative, including every experiment that failed and what it
+  cost, is in [TESTING.md](TESTING.md); this is what exists.
+  - **The probe gate — a finding is a claim PLUS an observed control, and the RUNNER does the observing.**
+    An agent registers a finding with a `check` (from a narrow allowlist — `node --test`, `npm test`,
+    `npm run <script>`; not `shell`, which is hard-floored) and a fix as an exact `{file,find,replace}`
+    anchor. In a throwaway git worktree the runner observes: the check **fails** as things stand, **passes**
+    with the fix, the project's **existing suite still passes**, and it **fails again** on revert. Anything
+    else is REFUSED with the reason. A finding may also carry a **probe** — a test the agent writes, which
+    the runner writes in, runs and throws away — because most real defects have no failing check already;
+    if one did, somebody would know. `check` is *derived* from the probe, so a probe cannot be paired with
+    a command that runs something else. Four refusals guard the rest, each with its own test: a probe that
+    reads the source file and asserts on its **text** (the proxy problem in its purest form — fails, passes,
+    fails again, while testing nothing about behaviour); a probe that passes regardless; a fix that
+    satisfies the probe but breaks the existing suite; and a probe that would **overwrite** an existing
+    test rather than add one, which would let an agent replace a check that disagreed with it. An ambiguous
+    anchor cannot patch anything: `apply()` counts occurrences and requires exactly one.
+  - **The lens register** — eight built-in ways of looking (`spec-descriptive`, `sibling-path`,
+    `what-would-it-accept`, `collector-blind`, `walk-the-sequence`, `stale-claim`, `permissive-default`,
+    `first-command`), each a standing instruction, selected **coverage-first** so an unused lens outranks a
+    productive one. A round books `found` / `dry` / `rounds` against its lens, and an autonomous **critic**
+    proposes new lenses citing the findings that motivated them, capped. `GET/POST/PATCH /api/lenses`, and
+    a panel in the UI. _Exhaustion means dry **and** plateaued — a dry round that opened new files does not
+    count against the limit, or a run stops at 13% coverage and calls it thorough._
+  - **The question queue — an open question must not stop the work.** A second derivation runs alongside
+    the criteria asking *what decisions does this objective not make?*, as its **own** model call: a
+    malformed reply must cost a missed question, never a run with no criteria. The agent queues the
+    question with `ask_stakeholder` and **carries on** — nothing waits, no approval is created. An
+    assumption claiming approval, agreement or a decision is refused (*"assuming the CEO approved the
+    2-year retention"* reached a deliverable as *"(assumed approved by CEO)"* once; the CEO approved
+    nothing), while **owning** the choice still passes. `GET/POST/PATCH/DELETE /api/questions`.
+  - **The declined-check register — an excuse is a claim.** The third gate: Bureau refuses an unproven
+    *finding* and an unstated *assumption*, and the missing one was an unexamined **exemption**. It comes
+    from a real failure here, caught by the operator: two panels and a dozen renderers shipped unlooked-at
+    because *"the authed UI needs the operator token"* — false, since this repo's own test runner had
+    always minted a disposable one. `declined_check` requires three fields and refuses without any of them:
+    what was not checked, why, and **what would have to be true for it to become possible**. Then the
+    runner tries to **falsify** it, translating noun phrases into identifier spellings and grepping the
+    repository; it hands the counter-evidence back **once** and accepts a re-declaration, because a gate
+    that overrules the conclusion gets routed around. `GET /api/declined-checks`, and a **Not checked**
+    panel in the UI.
+  - **The scope guardrail** — `guardrails.scopeFiles` mechanically restricts which paths `read_repo` may
+    open, as a rule in the runner rather than a sentence in the prompt (the prompt said "you cannot write
+    files"; the dispatcher blocked exactly two action types). A scope of **≤20 files** raises the read cap
+    from 12,000 to 60,000 characters, so a bounded file set is read WHOLE — every false claim this
+    subsystem produced came from an agent reasoning about a 4,000- or 12,000-character prefix as though it
+    were the file.
+  - **Reading a repository at all** — `read_repo` lists, reads and greps, all through Latch's boundary and
+    Bureau's own guard. A truncated read carries a complete **outline** of every declaration with line
+    numbers (bounded by symbol count, never by position) and marks each `seen`/`partial`/`unseen`, because
+    *a truncated read is evidence of PRESENCE and never of ABSENCE* — a warning saying so was ignored twice,
+    so the fix is structural. A round opens with a **whole-repo digest** (87 files in ~2,000 tokens for
+    4water) whose index is always complete and whose per-file breakdown is what gives way under budget; a
+    file bigger than one read is marked. Older read bodies **collapse to their outline** before the history
+    is re-sent (57% off billed tokens), keeping the two most recent verbatim so anchors can still be
+    quoted. A **file-coverage ledger** records what each round opened and orders the map by it.
+  - **A refuter, scoped to the two questions no mechanical control can answer** — whether a check tests the
+    property its claim names (`fail → pass → fail` cannot see a proxy), and whether a declined check's
+    reason is sound when the falsifier finds nothing to contradict. It produces a **caveat, never a
+    verdict**, is recorded *after* the finding so it cannot overturn an observation, and the stored text
+    says it ran on the same model as the agent — a same-model refuter that could overrule an observation
+    manufactures the appearance of independent confirmation.
+  - **What it has and has not shown.** One confirmed finding on a repository deliberately made red; one on
+    a **green** repository under a controlled arm with the lens forced. Zero across five unforced rounds on
+    that same green repository, which is the open item in **Next**. Every mechanism is unit-tested; none of
+    that is a substitute for the outcome.
 
 - **Unattended operation (2026-07-31)** — the boot-at-startup work changed Bureau's category from
   *a thing you start* to *a service that runs whether or not anyone is watching*, which needs things a

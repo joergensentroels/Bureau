@@ -1,137 +1,93 @@
 # Tests
 
-Automated coverage for Bureau. Three tiers: **pure** unit tests (no dependencies),
-**server** tests (need a running server, no model), and one **live** e2e (needs
-Latch + the local model).
+Automated coverage for Bureau. Three tiers: **pure** suites (no server, no model, no network),
+**server** suites (need a running server, still no model), and one **live** e2e (needs Latch + the
+local model).
 
 ## Run everything
 
 ```
-node test/run-all.mjs          # pure suites + server suites (if a server is up)
-node test/run-all.mjs --e2e    # also the live autonomy e2e
+node test/run-all.mjs --serve   # pure + server suites; boots a throwaway server itself. THE command.
+node test/run-all.mjs           # pure suites; server suites only if a server is already up
+node test/run-all.mjs --e2e     # also the live autonomy e2e
+node test/run-all.mjs --ui      # holds the throwaway server open so the UI can be LOOKED at
 ```
 
-The runner runs the pure suites always, the server suites only if a server is
-reachable on `BUREAU_PORT` (else it skips them with a note), and the live e2e only
-with `--e2e`. Current totals: **194 pure assertions + 98 server assertions** (plus
-the 10-assertion live e2e) — 292 in all.
+The runner runs the pure suites always, the server suites only if a server is reachable on
+`BUREAU_PORT` (else it skips them with a note), and the live e2e only with `--e2e`.
 
-### What's covered vs. not
+Current totals: **<!--fig:pure-assertions-->1,464 pure assertions** across
+**<!--fig:pure-suites-->14 pure suites**, plus **<!--fig:server-assertions-->288 server assertions**
+across **<!--fig:server-suites-->6 server suites** — **<!--fig:assertions-->1,752 headless assertions
+across <!--fig:suites-->20 suites** in all. The live `--e2e` adds 18 more and is not counted here,
+because it is not part of the pre-push gate.
 
-Covered (deterministic, headless): the safe-autonomy decision core, the SSRF guard
-(pure IPs + the `apiCall`/`fetchUrl` entry points), action normalization, the
-delegation matcher, org normalization, RAG ranking, filename safety, the full
-management API (agents / goals / policies / triggers / schedules / guardrails /
-deliverable lifecycle / reporting), workspace isolation, static-file traversal, and
-input/concurrency hardening (malformed bodies, oversized fields, a 4 MB body cap,
-unicode, the per-workspace write mutex).
+> Those figures are **checked, not maintained**. `run-all.mjs` compares every number marked
+> `<!--fig:…-->` in the docs against what the run just produced and fails if they disagree; the suite
+> counts are settled even earlier, in `docs.test.mjs`, straight off the runner's own arrays. If you
+> changed the numbers, the failure message says exactly what to write. See `test/doc-figures.mjs`.
+>
+> Per-suite counts are deliberately **not** written down here. The runner prints them on every run, and
+> a figure that has a live readout does not need a second copy that can rot. This file used to claim
+> "292 in all" across nine suites while the runner ran far more across twice as many — the numbers and
+> the list were both wrong, and nothing was in a position to notice.
 
-Not covered here (LLM- or Latch-bound — exercised by the `--e2e` suite instead): the
-deep delegation/decompose recursion, agent bio generation, HR suggestions, a live
-trigger firing a run, and deliverable revision/versioning. These need the model and a
-real Latch, so they can't be asserted deterministically.
+## The suites
 
-## `decision.test.mjs` — pure unit tests (fast, no server)
+The authoritative list is the `PURE` / `SERVER` / `LIVE` arrays in `run-all.mjs`; `docs.test.mjs`
+asserts that every suite there is described below and that nothing described below has been deleted.
 
-Exercises the decision core directly via the functions `server.mjs` exports —
-`decideApproval()` and `evaluatePolicy()`. No server, no Latch, no model.
+### Pure — no server, no model, no network
 
-```
-node test/decision.test.mjs
-```
+| suite | what it establishes |
+|---|---|
+| `decision.test.mjs` | the approval-decision core: the tier truth table, the hard floor under every tier and under run-level auto-approve, policy first-match-wins, and the precedence rule **tier grants → policy loosens/tightens → floor clamps** |
+| `units.test.mjs` | the exported helpers — SSRF guard, tolerant JSON parse, action normalization, org normalization, BM25 + RRF ranking, recall de-duplication, vector pack/unpack, remote-mode allowlist, `trimVersions`, the review subsystem's own logic, and much else. By far the largest suite |
+| `scope.test.mjs` | the **scope guardrail** — which repository paths a run may open at all, as a rule in the runner rather than a sentence in the prompt |
+| `reasoning-cap.test.mjs` | that the thinking cap actually reaches the provider, rather than being asserted structurally one layer above |
+| `probe-doctor.test.mjs` | `tools/probe-doctor.mjs` against fixtures it builds itself: is the finding gate's worktree usable, and can a defect there be detected at all |
+| `finding-gate.test.mjs` | the **probe gate** against a REAL git repository — real worktree, real check command, real edit, real revert |
+| `net.test.mjs` | `apiCall` / `fetchUrl`, offline: input parsing, protocol rejection, and the SSRF guard refusing loopback / link-local / cloud-metadata / private hosts |
+| `heartbeat.test.mjs` | `tools/heartbeat.mjs`'s four failure paths and its exit-code contract, always against a **local sink**, never a real watcher |
+| `readme-demo.test.mjs` | that the README's pasted `demo-floor` transcript still matches what the tool prints |
+| `docs.test.mjs` | this file and the other docs: the figure checker itself, the suite counts, and the suite list above |
+| `ui.test.mjs` | the browser UI statically — the inline `<script>` parses, and every literal `#id` lookup resolves to an id that exists |
+| `action-surface.test.mjs` | that every action the model can reach has somewhere to land: the schema enum, the prompt catalogue, the synonym table and the dispatcher, derived from `server.mjs` and compared |
+| `hunt-scope.test.mjs` | what `huntRefusal` answers — a review round may not write, buy, send or commit |
+| `hunt-dispatch.test.mjs` | that the **runner** enforces that scope rather than the prompt merely asking. Brings its own Bureau and its own stub Latch, which is why it is pure despite spawning |
 
-Covers the tier truth table, the hard floor under every tier and under run-level
-auto-approve, policy matching / first-match-wins / disabled-rule skipping, and the
-precedence rule **tier grants → policy loosens/tightens → floor clamps** — including
-the guarantee that a policy `allow` can never auto-approve a floored action.
+### Server — need a running server, no model
 
-## `units.test.mjs` — pure unit tests for standalone logic (fast, no server)
+| suite | what it establishes |
+|---|---|
+| `api.test.mjs` | the management API: CRUD + validation across company/budget, guardrails, goals, policies, triggers, agents, deliverables, schedules, embeddings, memory, the approval seam, `/api/whoami`, and the auth gate + role separation |
+| `workspaces.test.mjs` | workspace isolation — a write to one never reaches another, an unknown id is **refused** rather than silently served from default, and failed-run accounting |
+| `endpoints.test.mjs` | the endpoints that predated the coverage ledger: purchases, inbox queues, HR refusals, `hire-plan` cycle resolution, `/api/ceo`, `/api/agent-status` |
+| `robustness.test.mjs` | hardening — malformed JSON, oversized fields, a 4 MB body cap, unicode, static-file traversal, not-found sweeps, and the per-workspace write mutex under 15 concurrent writes |
+| `mcp-floor.test.mjs` | that the MCP surface can never **decide** an approval. It pins the tool list exactly, so adding any tool trips the test and forces the question to be answered deliberately |
+| `mcp-protocol.test.mjs` | that the MCP handshake does not claim a protocol revision Bureau has not implemented |
 
-133 assertions over the exported helpers: the **SSRF guard** (`ipv4Blocked` /
-`ipBlocked` — every private/internal range + IPv6/mapped), `normalizeAction` (the
-"do what the model meant" action corrections), `safeParse` (tolerant JSON),
-`ragTerms`, `expectsDeliverable`, `resolveReport` (tolerant assignee matching, no
-double-assignment), `goalObjective`, `normKRs`, `cadenceMs`, `cleanPolicyWhen`,
-`htmlToText`, `ensureBudget` (org normalization + safe agent defaults),
-`renderChecklist` (the DoD checklist markdown), `validDeliverableName` (the API
-filename gate), and `rankDeliverables` (the pure RAG keyword ranker).
+Every server suite runs inside a **throwaway workspace** it creates and deletes, against the live
+SQLite datastore — so they exercise the real persistence layer (atomic transactions, the audit table,
+per-workspace isolation) and never touch your real company.
 
-## `net.test.mjs` — outbound-network helpers, offline (fast, no server)
+### Live — needs Latch + the local model
 
-13 assertions over `apiCall` and `fetchUrl`: input parsing (JSON request vs plain
-URL), protocol rejection, and the **SSRF guard** refusing loopback / link-local /
-cloud-metadata / private hosts. Every case short-circuits before any real network
-I/O (DNS on an IP literal resolves locally), so it needs no live hosts.
+`e2e-autonomy.mjs` (`--e2e` only) proves the safe-autonomy stack composes end to end: trusted-tier
+auto-approve → a policy `require` overriding the tier → the in-app approval seam → the
+Definition-of-Done verdict → a policy `block` refusing a write before any approval is filed → the
+GitHub loop, where an agent saves a deliverable and opens a real PR, the floor holds at trusted tier,
+the seam approves, and the URL comes back. **18/18 as of 2026-07-31.**
 
-```
-node test/net.test.mjs
-```
+It takes ~13 minutes with retries, which is why it is outside the pre-push gate. Scenarios that need
+the model to propose a specific action retry up to 3× and report **INCONCLUSIVE** rather than failed —
+a live suite that goes red because a nondeterministic model picked a different tool teaches people to
+ignore it.
 
-```
-node test/units.test.mjs
-```
+## What is not covered here
 
-> The server suites run against the live **SQLite** datastore (`data-bureau.db`), so they also
-> exercise the real persistence layer — atomic transactions, the audit table, and per-workspace
-> isolation — not just in-memory state.
-
-## `api.test.mjs` — model-free API/CRUD + validation (needs a running server)
-
-57 assertions over the management endpoints — company/budget, guardrails (clamping),
-notify (url validation), goals lifecycle, policies validation + CRUD, triggers CRUD
-(+ bad-token rejection on the public endpoint), agents (tier validation), deliverable
-status transitions + versions endpoint + name/status validation, schedules CRUD, the
-goal-cadence → linked-schedule wiring, and the reporting endpoints (dashboard / runs /
-performance / audit-filtering). Runs entirely **inside a throwaway workspace** it
-creates and deletes, so your real company is never touched.
-
-```
-BUREAU_PORT=4174 node server.mjs
-BUREAU_PORT=4174 node test/api.test.mjs
-```
-
-## `robustness.test.mjs` — hardening / edge cases (needs a running server)
-
-30 assertions: unknown route / wrong method → 404, malformed JSON body handled
-gracefully (not a 500), oversized **fields** truncated, an oversized **request body**
-(>4 MB) → 413, unicode / control chars in names accepted and length-capped, a
-non-ASCII workspace name still producing a filename-safe id, **static-file traversal
-blocked** (can't read the org file or source via `/..%2f..%2f…`), run-lifecycle
-endpoints on unknown ids (stop is idempotent; plan/stream → 404), a not-found sweep
-(PATCH/DELETE unknown agent/goal/policy/trigger/schedule/workspace → 404), numeric
-clamping (negative/NaN → 0), agent-field round-trips (allow de-duped/lowercased,
-lessons cleaned), and the **concurrent-write guarantee** — 15 simultaneous writes to
-one workspace all land (the per-workspace mutex loses none). Also in a throwaway workspace.
-
-```
-BUREAU_PORT=4174 node server.mjs
-BUREAU_PORT=4174 node test/robustness.test.mjs
-```
-
-## `e2e-autonomy.mjs` — live end-to-end (needs a running server + Latch + model)
-
-Drives real company runs and asserts the layers compose:
-tier auto-approve → a policy `require` override → the **in-app approval seam** →
-the Definition-of-Done verdict → a policy `block`.
-
-```
-BUREAU_PORT=4174 node server.mjs          # in one shell
-BUREAU_PORT=4174 node test/e2e-autonomy.mjs   # in another
-```
-
-The runs are real: they create deliverables in `drafts/` and file/resolve Latch
-approvals. The test discovers an agent from the org, restores its tier, and clears
-the policies it adds — but it does **not** delete the `welcome-*` / `thank-you-*`
-drafts it produces, so remove those by hand if you don't want the sample output.
-
-## `workspaces.test.mjs` — workspace isolation (needs a running server)
-
-Proves each workspace is a fully separate company: new workspaces start empty,
-writes to one never touch another (or the default), an unknown workspace id falls
-back to default, and delete removes a workspace's data while leaving default intact.
-Uses only throwaway workspaces it creates and deletes — it never mutates default.
-
-```
-BUREAU_PORT=4174 node server.mjs
-BUREAU_PORT=4174 node test/workspaces.test.mjs
-```
+Anything that needs the model, a live Latch, an embedder or real money. Those are scripted and
+verified by hand instead, and each one is written up in **[TESTING.md](../TESTING.md)** with what it
+measured and when. The rule that keeps that honest is in the same file: **every exported function and
+`/api`+`/mcp` route must be either referenced by a test or listed in the coverage ledger with a
+reason** — enforced by `node test/coverage-audit.mjs`, which the pre-push hook and CI both run.

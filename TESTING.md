@@ -14,6 +14,22 @@ node tools/restore-drill.mjs      # restore the newest snapshot and boot a REAL 
 .\Install-Heartbeat.ps1 -Verify   # the dead-man's switch, against the REAL Bureau/Ollama/watcher
 ```
 
+**Where the suite stands right now: <!--fig:assertions-->1,752 headless assertions across
+<!--fig:suites-->20 suites** (<!--fig:pure-suites-->14 pure, <!--fig:server-suites-->6 server), plus the
+live `--e2e` at 18/18 and the scripted verifications written up below.
+
+_That figure is an instrument, not a note-to-self._ Every number the docs mark with `<!--fig:…-->` is
+compared against what the run actually produced, and `run-all.mjs` exits non-zero if any of them
+disagrees; the suite counts are settled earlier still, by `docs.test.mjs`, off the runner's own arrays.
+It exists because ROADMAP.md claimed "636 assertions across 7 suites" and `test/README.md` claimed "292
+in all" across a list of nine suites, for a fortnight, while a real run produced more than twice that
+across twenty — and both were true on the day they were typed. **Prose fails exactly like code, and
+unlike code it is never re-executed.** The narrative below deliberately keeps its dated figures (786 →
+792 → 819 → 832 → 852) as a record of what each commit measured; those are history and are not checked.
+Only the live claims carry markers. _The idea is borrowed from 4water's `test/docs.test.mjs`, which
+checks its documents against its code and explicitly declines the assertion count because a suite cannot
+spawn its own runner — hence the split here: counts are settled by the runner, not by a suite._
+
 `tools/heartbeat.mjs` is covered by `heartbeat.test.mjs` in the pure set, but **only its four failure paths
 and its exit-code contract** — Bureau down, model dead behind an open port, watcher unreachable, no URL
 configured. The exit code is the entire interface the scheduled task reads, and it broke once: calling

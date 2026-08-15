@@ -18,6 +18,14 @@ floor for `shell`, `api_call`, email, repo creation, over-ceiling purchases and 
 it — and Bureau cannot lower it for itself, because it holds no credentials to act with in the first
 place. The hierarchy is the product; the floor is what makes it safe to leave running.
 
+**Third parties now describe this as a gap in the frameworks.** 2026 comparisons of the main agent
+frameworks — LangGraph, CrewAI, and the merged Microsoft Agent Framework — note that none of them
+natively provides out-of-process security or a pre-dispatch approval gate, and recommend pairing
+whichever you pick with a separate agent control plane for policy, approvals and audit. Bureau plus
+Latch is a working instance of that pairing: an orchestrator that proposes, and a boundary process that
+holds the credentials and decides. That is a statement about layers, not a claim to be first or only —
+those frameworks and a control plane are different things, and they compose.
+
 > Single file, **zero dependencies** — Node built-ins only (`node:http`, `node:sqlite`, …).
 
 ### Don't take that on faith — run it
@@ -147,6 +155,17 @@ SSRF-guarded web fetches — while everything credentialed or high-reach goes th
   everyone else stays on the free local model. Per-agent and per-run spend caps.
 - **Goals/OKRs, scheduled runs, inbound triggers, notifications**, a persistent **plan/backlog**, and
   **multi-workspace** isolation (each workspace is a separate company).
+- **A review phase that ends on exhaustion, not satisfaction.** The Definition-of-Done gate asks *did we
+  build what was asked?* This asks *what is wrong with it that nobody asked about?* — it runs after a run
+  passes, or on its own as a **hunt**. An agent picks a **lens** (a standing way of looking, chosen
+  coverage-first from a register the run itself extends), reads a real repository, and may
+  **register a finding** — but a finding is a claim **plus a control the runner observes**, in a throwaway
+  git worktree: the check must fail as things stand, pass with the fix, leave the existing suite passing,
+  and fail again on revert. A finding may carry a **probe** the agent writes, since most real defects have
+  no failing test already. Anything else is refused with the reason. Alongside it: a **question queue**
+  (an unstated assumption is surfaced without stopping the work), a **declined-check register** (a reason
+  for *not* checking something is itself a claim, and gets falsified against the repository), and a
+  **scope guardrail** that mechanically bounds which files a round may open.
 
 ## Quick start
 
@@ -267,9 +286,15 @@ Full threat model, review findings and accepted residuals:
 
 ```sh
 node test/run-all.mjs --serve     # pure + server suites (self-hosts a throwaway server)
+node test/run-all.mjs --ui        # …then holds the server open so the UI can be looked at
 ```
-A pre-push hook and GitHub Actions run this on every push. See **[TESTING.md](TESTING.md)** for the
-suites, the coverage ledger, and the "tested-or-documented" rule.
+**<!--fig:assertions-->1,752 headless assertions across <!--fig:suites-->20 suites**, plus a live `--e2e`
+that needs Latch and a model. A pre-push hook and GitHub Actions run this on every push. See
+**[TESTING.md](TESTING.md)** for the suites, the coverage ledger, and the "tested-or-documented" rule.
+
+Those two figures are **checked rather than maintained**: the runner compares every number the docs mark
+with `<!--fig:…-->` against what the run just produced, and fails if they disagree. Docs rot because
+nothing re-reads them — `test/doc-figures.mjs` is the part that does.
 
 ## Docs
 
