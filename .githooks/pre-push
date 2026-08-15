@@ -6,6 +6,21 @@
 # Enabled via:  git config core.hooksPath .githooks   (run once; already set in this clone)
 # Emergency bypass (use sparingly):  git push --no-verify
 #
+# Git exports GIT_DIR and friends into every hook, and every child process inherits them. That is not
+# merely noisy here: probe-doctor and finding-gate BUILD throwaway repositories, and they set a fixture
+# identity with `git config`, use it, and restore it afterwards. With GIT_DIR inherited, every one of
+# those commands retargets THIS repository instead — so the set-and-restore lands on the operator's real
+# config, and a suite that crashes between the two never restores it.
+#
+# That is not hypothetical. It is what left `core.bare = true` in .git/config, which made every worktree
+# refuse work-tree operations, which made `git push` impossible — so this gate stopped running, which is
+# why nothing caught it. The suites pass standalone and fail only in here, which is the signature of an
+# inherited environment rather than a broken test.
+#
+# Strip the lot before running anything. This hook shells out to no git of its own, so it needs none of them.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX \
+      GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR
+#
 # Two gates, cheapest first. The coverage audit is TESTING.md's gate item 3 — "no new export/endpoint
 # ships without a test or a ledger entry" — and it was not run here at all, so the rule held only as
 # long as somebody remembered it. It takes well under a second, and failing on it before spending two
