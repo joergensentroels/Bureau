@@ -6603,7 +6603,13 @@ const server = createServer(async (req, res) => {
       if (!objective) return send(res, 400, { error: "objective required" });
       const t = await updateOrg((o) => {
         const trig = { id: newId("trig"), name: String(body.name || "Trigger").slice(0, 80), objective,
-          mode: body.mode === "company" ? "company" : "single", agentId: String(body.agentId || ""),
+          // Same whitelist as POST /api/schedules, and for the same reason — the fix was applied there and not
+          // here, so a webhook asking for a hunt kept getting the wrong shape in silence. An inbound trigger is
+          // MORE exposed than a schedule, not less: it fires unattended on someone else's event, with
+          // autoApprove:true, and nothing on the wire tells the caller its mode was rewritten. Coerced to
+          // "single", a hunt request would derive acceptance criteria from "hunt for defects", construct
+          // nothing, and then hunt only if its own non-work passed verification.
+          mode: ["company", "hunt"].includes(body.mode) ? body.mode : "single", agentId: String(body.agentId || ""),
           token: randomUUID().replace(/-/g, ""), enabled: true, hush: Boolean(body.hush), createdAt: Date.now(), lastFiredAt: 0, fires: 0 };
         o.triggers = [trig, ...(o.triggers || [])].slice(0, 30);
         return trig;

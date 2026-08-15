@@ -1668,13 +1668,51 @@ function openRelocateDialog(id,r){
   $("#rfocus",wrap).focus();
 }
 
+// ---- the run-target picker: the ONE place that says which run shapes the UI can start -------------------
+// Three forms — the work panel, triggers and schedules — each built this option list and parsed it back by
+// hand, and all three understood exactly two shapes. So when the server learned a third, the whole hunting
+// subsystem was startable only by curl: POST /api/run took mode:"hunt" and no form could send it. One list,
+// one parser, three call sites, and test/ui.test.mjs asserts the set this produces covers every mode
+// beginRun accepts — so the next mode fails a test instead of quietly having no way in.
+//
+// A hunt is agent-shaped, not company-shaped: runHunt picks ONE agent and refuses unless that agent may run
+// read_repo. So hunt is offered PER AGENT rather than as a bare sentinel — a sentinel would leave the server
+// falling back to agents[0] and the operator never choosing who hunts. Everything else a hunt needs — which
+// repository, the scope, the round cap — is company-wide and already has controls in Guardrails, so this
+// points at them rather than growing a second set that would then have to be kept in step.
+const HUNT_PICK="hunt:";
+function runTargetOptions(agents){
+  const list=agents||(typeof ORG!=="undefined"&&ORG&&ORG.agents)||[];
+  return `<option value="__company__">The whole company — Manager delegates</option>`
+    +list.map(a=>`<option value="${a.id}">${esc(a.name)} — ${esc(a.role)}</option>`).join("")
+    +(list.length?`<optgroup label="Hunt for defects — review the repository set in Guardrails">`
+      +list.map(a=>`<option value="${HUNT_PICK}${a.id}">🔎 ${esc(a.name)} hunts for defects</option>`).join("")
+      +`</optgroup>`:"");
+}
+function runTargetSpec(value){
+  const v=String(value==null?"":value);
+  if(v==="__company__") return {mode:"company",agentId:""};
+  if(v.indexOf(HUNT_PICK)===0) return {mode:"hunt",agentId:v.slice(HUNT_PICK.length)};
+  return {mode:"single",agentId:v};
+}
+// What a hunt needs that a task run does not, said where the choice is made rather than in a commit message.
+// Two wordings because there are two spaces. The dialogs print theirs under the picker whatever is selected,
+// so it describes the OPTION rather than the current choice; the work panel swaps its one in only once a hunt
+// is picked, into a narrow column beside the Run button. The non-breaking space keeps the shield with the word
+// it labels — in that column it wrapped alone onto the end of a line, which reads as a stray glyph.
+const RUN_HINT="Actions you don't auto-approve appear in Latch for you to decide.";
+const HUNT_HINT="🔎 hunt options review the repository set in 🛡️ Guardrails — the scope and round cap there apply, and the agent needs read_repo. A hunt produces findings, not a deliverable.";
+const RUN_HUNT_HINT="Reviewing the repository set in 🛡️ Guardrails — scope and round cap apply there; the agent needs read_repo.";
+const OBJ_PLACEHOLDER="Draft a short welcome note for a new customer and get it ready to send.";
+const HUNT_PLACEHOLDER="What should this review look for? e.g. Check the files changed in the last release for defects.";
+
 function workPanel(){
   const c=el("div","card");
   if(!ORG.agents.length){ c.innerHTML=`<div class="dim">Hire an agent first, then you can assign objectives.</div>`; return c; }
   c.innerHTML=`
     <div class="fields">
-      <div><label>Assign to</label><select id="who"><option value="__company__">The whole company — Manager delegates</option>${ORG.agents.map(a=>`<option value="${a.id}">${esc(a.name)} — ${esc(a.role)}</option>`).join("")}</select></div>
-      <div><label>Objective</label><textarea id="obj" placeholder="Draft a short welcome note for a new customer and get it ready to send."></textarea></div>
+      <div><label>Assign to</label><select id="who">${runTargetOptions()}</select></div>
+      <div><label>Objective</label><textarea id="obj" placeholder="${OBJ_PLACEHOLDER}"></textarea></div>
       <div class="row">
         <div style="width:120px"><label>Max turns</label><input id="turns" type="number" min="1" max="20" value="6"></div>
         <label class="row" style="text-transform:none;letter-spacing:0;color:var(--ink-2);gap:8px;margin:18px 0 0;cursor:pointer">
@@ -1687,7 +1725,7 @@ function workPanel(){
           <input id="parallel" type="checkbox" style="width:auto"> ⚡ parallel reports</label>
       </div>
       <div class="row" style="justify-content:space-between">
-        <span class="dim" id="runhint">Actions you don't auto-approve appear in Latch for you to decide.</span>
+        <span class="dim" id="runhint">${RUN_HINT}</span>
         <button class="primary" id="runBtn">Run</button>
       </div>
       <div class="row" id="runControls" style="display:none;gap:8px;align-items:center;margin-top:10px">
@@ -1697,6 +1735,8 @@ function workPanel(){
         <button id="stopBtn" title="Stop the run" style="color:var(--bad,#c0392b)">⏹ Stop</button>
       </div>
     </div>`;
+  c.querySelector("#who").onchange=()=>paintRunTarget(c);
+  paintRunTarget(c);
   c.querySelector("#runBtn").onclick=startRun;
   c.querySelector("#pauseBtn").onclick=togglePause;
   c.querySelector("#steerBtn").onclick=sendSteer;
@@ -1739,11 +1779,23 @@ async function stopRun(){
   if(!CUR_RUN) return;
   try{ await api("POST","/api/run/"+CUR_RUN+"/stop",{}); }catch{}
 }
+// The controls that only make sense for one shape of run, shown only for that shape. "⚡ parallel reports"
+// fans a MANAGER's direct reports out; a hunt has one agent and so does a single task, so offering it there
+// advertises something the server ignores.
+function paintRunTarget(root){
+  const r=root||document, sel=r.querySelector("#who"); if(!sel) return;
+  const mode=runTargetSpec(sel.value).mode;
+  const pw=r.querySelector("#parallelWrap"); if(pw) pw.style.display=mode==="company"?"":"none";
+  const h=r.querySelector("#runhint"); if(h) h.textContent=mode==="hunt"?RUN_HUNT_HINT:RUN_HINT;
+  // A hunt's objective is a review brief, not a thing to build. The task-run example actively suggests the
+  // wrong shape — and the objective is the ONLY steer a hunt gets, so a misled one costs a whole run.
+  const ob=r.querySelector("#obj"); if(ob) ob.placeholder=mode==="hunt"?HUNT_PLACEHOLDER:OBJ_PLACEHOLDER;
+}
 async function startRun(){
-  const agentId=$("#who").value, objective=$("#obj").value.trim();
+  const target=runTargetSpec($("#who").value), objective=$("#obj").value.trim();
   if(!objective){$("#obj").focus();return;}
-  const maxTurns=Number($("#turns").value)||6, autoApprove=$("#auto").checked, dryRun=$("#dryrun").checked, hush=$("#hush").checked, parallel=$("#parallel").checked;
-  launchRun(agentId==="__company__" ? {mode:"company",objective,maxTurns,autoApprove,dryRun,hush,parallel} : {agentId,objective,maxTurns,autoApprove,dryRun,hush});
+  const maxTurns=Number($("#turns").value)||6, autoApprove=$("#auto").checked, dryRun=$("#dryrun").checked, hush=$("#hush").checked;
+  launchRun({...target,objective,maxTurns,autoApprove,dryRun,hush,...(target.mode==="company"?{parallel:$("#parallel").checked}:{})});
 }
 function resetRun(){ const b=$("#runBtn"); if(b){b.disabled=false;b.textContent="Run";} const ctl=$("#runControls"); if(ctl) ctl.style.display="none"; RUN_PAUSED=false; }
 
@@ -2098,7 +2150,7 @@ async function loadTriggers(){
   if(!list.length){ box.innerHTML=`<div class="dim">No triggers. Create one to let an external event (a webhook POST) start a run.</div>`; return; }
   box.innerHTML=list.map(t=>{
     const url=location.origin+"/api/trigger/"+t.token;
-    return `<div class="delivrow" style="cursor:default;align-items:flex-start"><span>${t.enabled?"⚡":"⏸️"}</span><span style="flex:1;min-width:0"><span class="dn" style="display:block">${t.hush?`<span title="hush — local model only">🤫 </span>`:""}${esc(t.name)}${t.fires?` <span class="dim" style="font-weight:400">· fired ${t.fires}×</span>`:""}</span><span class="dim" style="font-size:11px;display:block;white-space:normal">${esc(t.objective.slice(0,80))}${t.objective.length>80?"…":""}</span><span style="font-size:10px;display:flex;gap:6px;align-items:center;margin-top:4px"><code style="font-size:10px;overflow:hidden;text-overflow:ellipsis;max-width:210px;white-space:nowrap;color:var(--ink-3)">${esc(url)}</code><button class="rvbtn tcopy" data-u="${esc(url)}">copy URL</button></span></span><span class="row" style="gap:6px;flex:none"><button class="rvbtn ttoggle" data-id="${t.id}" data-en="${t.enabled?1:0}">${t.enabled?"Pause":"Enable"}</button><button class="rvbtn tdel" data-id="${t.id}">Delete</button></span></div>`;
+    return `<div class="delivrow" style="cursor:default;align-items:flex-start"><span>${t.enabled?"⚡":"⏸️"}</span><span style="flex:1;min-width:0"><span class="dn" style="display:block">${t.hush?`<span title="hush — local model only">🤫 </span>`:""}${esc(t.name)}${t.mode==="hunt"?` <span class="stbadge qa" title="fires a defect hunt over the repository set in Guardrails">🔎 hunt</span>`:""}${t.fires?` <span class="dim" style="font-weight:400">· fired ${t.fires}×</span>`:""}</span><span class="dim" style="font-size:11px;display:block;white-space:normal">${esc(t.objective.slice(0,80))}${t.objective.length>80?"…":""}</span><span style="font-size:10px;display:flex;gap:6px;align-items:center;margin-top:4px"><code style="font-size:10px;overflow:hidden;text-overflow:ellipsis;max-width:210px;white-space:nowrap;color:var(--ink-3)">${esc(url)}</code><button class="rvbtn tcopy" data-u="${esc(url)}">copy URL</button></span></span><span class="row" style="gap:6px;flex:none"><button class="rvbtn ttoggle" data-id="${t.id}" data-en="${t.enabled?1:0}">${t.enabled?"Pause":"Enable"}</button><button class="rvbtn tdel" data-id="${t.id}">Delete</button></span></div>`;
   }).join("");
   box.querySelectorAll(".tcopy").forEach(b=>b.onclick=()=>{ try{ navigator.clipboard.writeText(b.dataset.u); }catch{} b.textContent="copied ✓"; setTimeout(()=>b.textContent="copy URL",1200); });
   box.querySelectorAll(".ttoggle").forEach(b=>b.onclick=async()=>{ await api("PATCH","/api/triggers/"+b.dataset.id,{enabled:b.dataset.en!=="1"}); loadTriggers(); });
@@ -2106,13 +2158,14 @@ async function loadTriggers(){
 }
 function openTriggerDialog(){
   const wrap=el("div","modalwrap");
-  const agentOpts=`<option value="__company__">The whole company — Manager delegates</option>`+ORG.agents.map(a=>`<option value="${a.id}">${esc(a.name)} — ${esc(a.role)}</option>`).join("");
+  const agentOpts=runTargetOptions();
   wrap.innerHTML=`<div class="modal" style="max-width:520px"><h1 style="font-size:16px;margin:0 0 4px;text-transform:none">⚡ New trigger</h1>
     <div class="dim" style="font-size:12px;margin-bottom:12px">You get a secret webhook URL. When an external service POSTs to it, this run fires automatically (autoApprove — but shell / api_call / big purchases still need your approval, and all guardrails apply). The POST body is passed into the run as context.</div>
     <div class="fields">
       <div><label>Name</label><input id="tname" placeholder="New GitHub issue"></div>
       <div><label>Run this objective</label><textarea id="tobj" placeholder="Triage the incoming issue and draft a first response."></textarea></div>
-      <div><label>Run as</label><select id="twho">${agentOpts}</select></div>
+      <div><label>Run as</label><select id="twho">${agentOpts}</select>
+        <div class="dim" style="font-size:11px;margin-top:4px">${HUNT_HINT}</div></div>
       <label class="row" style="text-transform:none;letter-spacing:0;color:var(--ink-2);gap:8px;cursor:pointer" title="Hush: every run this trigger fires stays on the local model — no agent may use the paid/external LLM, whatever its budget.">
         <input id="thush" type="checkbox" style="width:auto"> 🤫 hush (local model only)</label>
     </div>
@@ -2123,7 +2176,7 @@ function openTriggerDialog(){
   wrap.querySelector("#ts").onclick=async()=>{
     const objective=wrap.querySelector("#tobj").value.trim(); if(!objective){ wrap.querySelector("#tobj").focus(); return; }
     const who=wrap.querySelector("#twho").value, name=wrap.querySelector("#tname").value.trim()||"Trigger", hush=wrap.querySelector("#thush").checked;
-    const body=who==="__company__"?{name,objective,mode:"company",hush}:{name,objective,mode:"single",agentId:who,hush};
+    const body={name,objective,hush,...runTargetSpec(who)};
     await api("POST","/api/triggers",body); wrap.remove(); loadTriggers();
   };
   wrap.querySelector("#tname").focus();
@@ -2133,7 +2186,10 @@ async function loadSchedules(){
   let data; try{ data=await api("GET","/api/schedules"); }catch{ box.innerHTML=`<div class="dim">Couldn't load schedules.</div>`; return; }
   const list=(data&&data.schedules)||[];
   if(!list.length){ box.innerHTML=`<div class="dim">No schedules. Add one and the company runs it automatically (scheduled runs auto-approve their actions).</div>`; return; }
-  box.innerHTML=list.map(s=>{ const who=s.mode==="company"?"whole company":((ORG.agents.find(a=>a.id===s.agentId)||{}).name||"an agent");
+  box.innerHTML=list.map(s=>{ const nm=((ORG.agents.find(a=>a.id===s.agentId)||{}).name)||"an agent";
+    // A scheduled hunt reads as a scheduled task run unless the row says otherwise — same two words, very
+    // different unattended behaviour.
+    const who=s.mode==="company"?"whole company":s.mode==="hunt"?`🔎 ${nm} hunting`:nm;
     const next=s.enabled?`next ${new Date(s.nextRunAt).toLocaleString()}`:"paused";
     return `<div class="delivrow" style="cursor:default"><span>${s.enabled?"⏱️":"⏸️"}</span>
       <span style="flex:1;min-width:0"><span class="dn" style="display:block;white-space:normal">${s.hush?`<span title="hush — local model only">🤫 </span>`:""}${esc(s.objective)}</span><span class="dim" style="font-size:11px">${CADENCE_LABEL[s.cadence]||s.cadence} · ${esc(who)} · ${next}${s.hush?" · local only":""}</span></span>
@@ -2154,7 +2210,8 @@ function openScheduleDialog(){
     <h1 style="font-size:16px;margin:0 0 12px;text-transform:none">New schedule</h1>
     <div class="fields">
       <div><label>Objective</label><textarea id="scobj" placeholder="Summarize any new customer feedback and save it as a report."></textarea></div>
-      <div><label>Assign to</label><select id="scwho"><option value="__company__">The whole company — Manager delegates</option>${ORG.agents.map(a=>`<option value="${a.id}">${esc(a.name)} — ${esc(a.role)}</option>`).join("")}</select></div>
+      <div><label>Assign to</label><select id="scwho">${runTargetOptions()}</select>
+        <div class="dim" style="font-size:11px;margin-top:4px">${HUNT_HINT}</div></div>
       <div><label>How often</label><select id="sccad"><option value="hourly">Every hour</option><option value="daily" selected>Every day</option><option value="weekly">Every week</option></select></div>
       <label class="row" style="text-transform:none;letter-spacing:0;color:var(--ink-2);gap:8px;cursor:pointer" title="Hush: every run of this schedule stays on the local model — no agent may use the paid/external LLM, whatever its budget.">
         <input id="schush" type="checkbox" style="width:auto"> 🤫 hush (local model only)</label>
@@ -2166,7 +2223,7 @@ function openScheduleDialog(){
   wrap.querySelector("#scc").onclick=()=>wrap.remove();
   wrap.querySelector("#scg").onclick=async()=>{ const objective=wrap.querySelector("#scobj").value.trim(); if(!objective){wrap.querySelector("#scobj").focus();return;}
     const who=wrap.querySelector("#scwho").value, cadence=wrap.querySelector("#sccad").value, hush=wrap.querySelector("#schush").checked;
-    const body=who==="__company__"?{mode:"company",objective,cadence,hush}:{mode:"single",agentId:who,objective,cadence,hush};
+    const body={objective,cadence,hush,...runTargetSpec(who)};
     await api("POST","/api/schedules",body); wrap.remove(); loadSchedules();
   };
   wrap.querySelector("#scobj").focus();

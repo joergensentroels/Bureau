@@ -173,6 +173,19 @@ const ok = (c, m) => (c ? pass : fail).push(m);
     ok((await api("PATCH", "/api/triggers/" + tr.j.id, { enabled: false })).j.enabled === false, "trigger disabled");
     ok((await api("POST", "/api/trigger/bogus-token-xyz")).status === 404, "public trigger endpoint rejects a bad token (404)");
     ok((await api("DELETE", "/api/triggers/" + tr.j.id)).status === 200, "trigger deleted");
+    // A TRIGGER can be a hunt too. The whitelist fix landed on schedules and stopped there, so an inbound webhook
+    // asking for a hunt was still silently rewritten to "single" — a task run deriving criteria from "hunt for
+    // defects", constructing nothing, then hunting only if its own non-work passed. Unattended and auto-approved.
+    const th = await api("POST", "/api/triggers", { name: "Review", objective: "review the repo", mode: "hunt" });
+    ok(th.status === 201 && th.j.mode === "hunt", "a hunt trigger stores mode hunt");
+    // What the fire path actually reads is the PERSISTED record, not the object the POST echoed back — those are
+    // two different values and only one of them starts the run.
+    const thStored = ((await api("GET", "/api/triggers")).j.triggers || []).find((x) => x.id === th.j.id);
+    ok(thStored && thStored.mode === "hunt", "and the stored record the fire path reads still says hunt");
+    const tbog = await api("POST", "/api/triggers", { objective: "x", mode: "arbitrary-nonsense" });
+    ok(tbog.j.mode === "single", "CONTROL: an unknown trigger mode still coerces to single, not to whatever was sent");
+    await api("DELETE", "/api/triggers/" + th.j.id);
+    await api("DELETE", "/api/triggers/" + tbog.j.id);
 
     // ---- agents CRUD + tier validation ----
     const ag = await api("POST", "/api/agents", { name: "Nova", role: "Analyst" });
