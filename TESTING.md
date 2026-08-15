@@ -44,12 +44,21 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
 
 ## The gate (how we avoid pushing broken/untested code)
 
-1. **Pre-push hook** (`.githooks/pre-push`) runs `run-all.mjs --serve` and blocks the push on red.
-   Enable once per clone: `git config core.hooksPath .githooks`. Emergency bypass: `git push --no-verify`.
-2. **CI** (`.github/workflows/test.yml`) runs the same on every push/PR — the authoritative gate.
+1. **Pre-push hook** (`.githooks/pre-push`) runs `coverage-audit.mjs` and then `run-all.mjs --serve`, and
+   blocks the push on either. Enable once per clone: `git config core.hooksPath .githooks`. Emergency
+   bypass: `git push --no-verify`.
+2. **CI** (`.github/workflows/test.yml`) runs both on every push/PR — the authoritative gate.
 3. **This ledger + `coverage-audit.mjs`**: every exported function and `/api`+`/mcp` route must be
    either referenced by a test OR listed under "Intentionally not auto-tested" below (with a reason).
    The rule: **no new export/endpoint ships without a test or a ledger entry.**
+
+   _This item spent a while claiming to be a gate without being one._ CI ran it as
+   `node test/coverage-audit.mjs || true`, the pre-push hook did not run it at all, and the script's own
+   header called it "a soft nudge, not a hard gate" — three artifacts, two stories, and the rule above
+   enforced by nothing but memory. It is wired for real now, and it fails the build. Note what it can and
+   cannot do: `accounted()` is a substring match, so it never fails falsely but can be satisfied by a
+   coincidental mention. It asks "did anyone account for this name", not "is this exercised" — which is
+   why transitive-coverage entries in the ledger below carry mutation evidence rather than a pointer.
 
 ## Suites
 
@@ -335,6 +344,19 @@ changes — the real corpus has no document long enough to exercise it (largest 
   `hunt-dispatch` deliberately leaves every agent at `budgetUsd: 0` so nothing routes paid. The two
   funnels that fire without money (boot, run start) are both asserted against a booted server.
 - `ragTokens` — trivial tokenizer, exercised transitively by the `rankByRelevance` tests.
+
+**Covered by BEHAVIOUR, not by name.** The audit matches symbol names against test sources, so a function
+that is only ever reached through a caller reads as a gap. These are not gaps, and each line was checked
+the only way such a line can be checked — mutate the function, watch the named suite go red, restore:
+- `jsonSpan` — `safeParse` and `jsonFailure` both walk it, and `jsonFailure`'s four diagnoses (`truncated`,
+  `raw-newline`, `prose`, `syntax`) are read straight off its return. _Control: forcing it to report "no
+  JSON here" turned **12** `units` assertions red, across both callers._
+- `probeAssertsSourceText` — `normalizeFinding` calls it; `finding-gate.test.mjs:260` drives a probe that
+  reads the file it is about and asserts on its text. _Control: forcing `false` turned that assertion red,
+  and the gate CONFIRMED the source-text probe — which is the defect the function exists to stop._
+- `unknownPolicyAction` — both `/api/policies` write paths call it; `api.test.mjs:154-159` asserts 400 on
+  an unknown actionType, that nothing was stored, and that PATCH leaves the old condition intact.
+  _Control: forcing `""` turned **3** `api` assertions red._
 
 **Eval harness internals** (exercised by `eval/run-eval.mjs`, not the unit suite):
 `buildDecomposeMsgs`, `buildCriteriaMsgs`, `buildVerifyMsgs`, `validateCriteria`, `validateVerify`,

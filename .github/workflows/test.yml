@@ -41,5 +41,14 @@ jobs:
           exit $code
         env:
           OPERATOR_TOKEN: ci-operator-token   # shared by the self-hosted server + the test clients
-      - name: Coverage audit (soft — reports untested exports/routes, never fails the build)
-        run: node test/coverage-audit.mjs || true
+      # Gate item 3, and now actually a gate. This ran as `|| true` while TESTING.md stated the rule as
+      # "no new export/endpoint ships without a test or a ledger entry" — so the rule was enforced by
+      # nobody. The escape hatch when something is covered through its caller is writing the ledger line
+      # that says so, not skipping the step. Annotated for the same reason the suite above is: the log
+      # needs a signed-in session with repo admin to read, and an annotation does not.
+      - name: Coverage audit (every export + /api + /mcp route is tested or in the TESTING.md ledger)
+        run: |
+          node test/coverage-audit.mjs || {
+            echo "::error title=Coverage audit failed::An export or route is neither referenced by a test nor listed in TESTING.md. Add a test, or add a ledger entry with the reason."
+            exit 1
+          }

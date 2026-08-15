@@ -1,8 +1,21 @@
-// Coverage audit (soft nudge, not a hard gate). Lists exported functions and /api + /mcp routes in
-// server.mjs that are referenced by NEITHER the test files NOR TESTING.md. TESTING.md is the registry
-// of "accounted for" — a symbol there is either tested (and noted) or deliberately manual-only with a
-// reason. So a gap here means: not tested AND not documented → decide which, then make it disappear.
+// Coverage audit — a GATE. Lists exported functions and /api + /mcp routes in server.mjs that are
+// referenced by NEITHER the test files NOR TESTING.md. TESTING.md is the registry of "accounted for" —
+// a symbol there is either tested (and noted) or deliberately manual-only with a reason. So a gap here
+// means: not tested AND not documented → decide which, then make it disappear.
 //   node test/coverage-audit.mjs
+//
+// It described itself as "a soft nudge, not a hard gate" while TESTING.md listed it as gate item 3 and
+// stated the rule "no new export/endpoint ships without a test or a ledger entry". Both could not be
+// true. CI ran it as `|| true` and the pre-push hook did not run it at all, so the rule was a sentence
+// rather than a mechanism — the exact shape the lens register's own `stale-claim` lens exists to find.
+// It is now run for real by `.githooks/pre-push` and by CI, and a gap fails the build.
+//
+// KNOWN LIMIT, stated because a gate that is over-trusted is worse than one that is read: `accounted()`
+// is a SUBSTRING match over the concatenated test sources and TESTING.md. It cannot produce a false
+// FAILURE — a symbol nobody mentions anywhere is genuinely unaccounted — but it can be satisfied by a
+// coincidental mention, so a short or common export name is weakly checked. It answers "did anyone
+// account for this name", not "is this function exercised". That is why the ledger's transitive-coverage
+// entries carry mutation evidence instead of just a pointer.
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";

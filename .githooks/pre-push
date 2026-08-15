@@ -5,6 +5,19 @@
 #
 # Enabled via:  git config core.hooksPath .githooks   (run once; already set in this clone)
 # Emergency bypass (use sparingly):  git push --no-verify
+#
+# Two gates, cheapest first. The coverage audit is TESTING.md's gate item 3 — "no new export/endpoint
+# ships without a test or a ledger entry" — and it was not run here at all, so the rule held only as
+# long as somebody remembered it. It takes well under a second, and failing on it before spending two
+# minutes on the suite is the whole reason it goes first.
+echo "pre-push: node test/coverage-audit.mjs"
+node test/coverage-audit.mjs || {
+  echo ""
+  echo "✗ pre-push blocked: an export or route is neither referenced by a test nor listed in TESTING.md."
+  echo "  Add a test, or add a ledger entry under 'Intentionally not auto-tested' saying why not."
+  echo "  Bypass with 'git push --no-verify' (not recommended)."
+  exit 1
+}
 echo "pre-push: node test/run-all.mjs --serve"
 node test/run-all.mjs --serve || {
   echo ""
