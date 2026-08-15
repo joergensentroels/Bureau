@@ -6906,18 +6906,31 @@ const server = createServer(async (req, res) => {
     if (p.startsWith("/api/policies/") && req.method === "PATCH") {
       const id = p.split("/")[3];
       const body = await readBody(req);
-      // Checked before the write, not inside it: an unrecognised type sanitizes to an EMPTY clause, which
-      // the guard below then reads as "nothing to change" and leaves the rule's old `when` in place. So an
-      // edit meant to narrow a rule to one action returned 200 with the rule completely unchanged.
+      // Checked before the write, not inside it: an unrecognised type sanitizes AWAY, and an absent
+      // actionType is a wildcard, so the stored rule comes back BROADER than the one asked for. Still
+      // load-bearing after the empty-clause 400 below, which cannot see this: {actionType:"nope",
+      // agentId:"ada"} sanitizes to {agentId:"ada"}, a non-empty clause the length check waves through.
+      // It also names the offending type, which "at least one condition required" cannot.
       const badAct = unknownPolicyAction(body.when);
       if (badAct) return send(res, 400, { error: `unknown actionType "${badAct}" — this rule would match EVERY action, not that one` });
+      // ...and the same shape for every OTHER condition. The actionType fix was scoped to actionType because
+      // that is the only closed enumeration, but the clause empties on anything the sanitizer rejects — a
+      // negative `costOver` is dropped for being negative — and `{}` then took the "nothing to change" branch
+      // and left the OLD `when` standing under a 200. Measured before this line existed: PATCH
+      // {when:{costOver:-3}} on a rule holding {costOver:5} answered 200 with costOver still 5. POST refuses
+      // that identical body with "at least one condition required", so two write paths on one resource
+      // disagreed about whether the same clause was valid, and only the lenient one lied about the outcome.
+      // Sanitize ONCE here and carry the result into the write, so the length guard that caused this cannot
+      // come back: below, `nextWhen` is either a clause worth storing or null, never an empty object.
+      const nextWhen = body.when === undefined ? null : cleanPolicyWhen(body.when);
+      if (nextWhen && !Object.keys(nextWhen).length) return send(res, 400, { error: "at least one condition required" });
       const r = await updateOrg((o) => {
         const rule = (o.policies || []).find((x) => x.id === id);
         if (!rule) return null;
         if (body.enabled !== undefined) rule.enabled = !!body.enabled;
         if (body.then !== undefined && ["block", "require", "allow"].includes(body.then)) rule.then = body.then;
         if (body.note !== undefined) rule.note = String(body.note).slice(0, 120);
-        if (body.when !== undefined) { const w = cleanPolicyWhen(body.when); if (Object.keys(w).length) rule.when = w; }
+        if (nextWhen) rule.when = nextWhen;
         return rule;
       });
       return r ? send(res, 200, r) : send(res, 404, { error: "not_found" });

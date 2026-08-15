@@ -157,6 +157,21 @@ const ok = (c, m) => (c ? pass : fail).push(m);
     { const r = await api("PATCH", "/api/policies/" + pol.j.id, { when: { actionType: "no_such_action" } });
       ok(r.status === 400, "PATCH rejects an unknown actionType (400)");
       ok((await api("GET", "/api/policies")).j.policies[0].when.costOver === 5, "and the rule's old condition is intact"); }
+    // The same silent success for every condition that is NOT actionType. That fix stopped at actionType
+    // because it is the only closed enumeration, but the clause empties on anything cleanPolicyWhen rejects,
+    // and an empty clause took the "nothing to change" branch: measured against the unfixed handler, this
+    // exact PATCH answered 200 with a body still reading costOver 5 — the operator's edit was gone and the
+    // success said otherwise. POST refuses the identical clause two lines up, so the disagreement was
+    // between two write paths on one resource, not between two opinions about what a valid rule is.
+    { const r = await api("PATCH", "/api/policies/" + pol.j.id, { when: { costOver: -3 } });
+      ok(r.status === 400, "PATCH rejects a when that sanitizes to nothing, instead of 200 with the edit silently dropped (400)");
+      ok((await api("GET", "/api/policies")).j.policies[0].when.costOver === 5, "and the rule keeps the condition it already had"); }
+    // CONTROL, because "PATCH refuses every when" would pass both assertions above. A clause that survives
+    // sanitizing must still land — and land in the STORED record, which is what evaluatePolicy reads, not
+    // merely in the object the response echoed back.
+    { const r = await api("PATCH", "/api/policies/" + pol.j.id, { when: { costOver: 12 } });
+      ok(r.status === 200 && r.j.when.costOver === 12, "CONTROL: a when that survives sanitizing is still accepted (200)");
+      ok((await api("GET", "/api/policies")).j.policies[0].when.costOver === 12, "and the stored rule the policy engine reads carries the edit"); }
     // The five GitHub types the editor offers must now actually store. Before this they sanitized to {} and
     // this exact POST answered 400 "at least one condition required" — with any second condition, 201 and a
     // rule matching everything. github_pr is the one an operator is most likely to want to block.
