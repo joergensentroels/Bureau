@@ -309,6 +309,157 @@ ok("the sign-in control is shared, not duplicated per call site", (HTML.match(/f
   ok("a refutation shows what the refuter actually said", near("ev.type===" + Q + "refuted", "d.says", 700));
 }
 
+// ---- THE INSTRUMENT: a class passed to addEv with no rule behind it is an event with no signal -----------
+//
+// addEv sets className = "ev " + cls, so a class the stylesheet never defines is not an error and not a blank
+// row: the element falls back to the base `.ev` border and renders as a neutral informational line. Two had
+// drifted. `blocked` is what the unparsed, retry, scopeRefused, lensRejected and findingRejected renderers all
+// pass — every "the runner refused, or the reply was unusable" event in the feed — and `done` is the
+// investigation summary. Both were painted in the grey of a routine note, which in a scrolling feed is the
+// same picture as the refusal never having happened.
+//
+// Both sides derived from source. The used side is the harder half, because the class is NOT always a literal:
+// five call sites pass a ternary, one passes a local, one indexes a verdict table. A literal-only grep
+// understates the set, and understating it is the failure mode that matters here — a class the parse never
+// saw reads as "not used" rather than as "not styled", so the gap it was built to find is the gap it hides.
+// So each call site's first argument is lifted by a quote- and bracket-aware scan, a conditional is reduced to
+// its BRANCHES (the operands of the condition are not classes: `d.tier==="paid"?…` must not contribute
+// "paid"), and an argument holding no literal at all is resolved through its declaration. Every call site must
+// then yield something: a shape this cannot read is REPORTED, not skipped, because the alternative is a check
+// whose coverage silently shrinks each time someone writes the class a new way.
+{
+  const SQ = String.fromCharCode(39), BS = String.fromCharCode(92);
+  const isQuote = (c) => c === Q || c === SQ || c === BT;
+
+  // Copy source from `i` until an UNNESTED character in `stops`. String bodies are copied verbatim, so a comma,
+  // brace or colon inside a rendered message cannot end the scan; returns the whole remainder if nothing stops it.
+  const scan = (src, i, stops) => {
+    let depth = 0, out = "";
+    for (; i < src.length; i++) {
+      const c = src[i];
+      if (isQuote(c)) {
+        const q = c; out += c;
+        for (i++; i < src.length; i++) {
+          if (src[i] === BS) { out += src[i] + (src[i + 1] || ""); i++; continue; }
+          out += src[i];
+          if (src[i] === q) break;
+        }
+        continue;
+      }
+      if ("([{".indexOf(c) >= 0) { depth++; out += c; continue; }
+      if (")]}".indexOf(c) >= 0) { if (depth === 0 && stops.indexOf(c) >= 0) return out; depth--; out += c; continue; }
+      if (depth === 0 && stops.indexOf(c) >= 0) return out;
+      out += c;
+    }
+    return out;
+  };
+  // Offset of the first unnested `ch`, or -1. `out` is a verbatim copy of what it consumed, so its length IS the offset.
+  const stopAt = (expr, ch) => { const consumed = scan(expr, 0, ch); return consumed.length < expr.length ? consumed.length : -1; };
+  const literals = (s) => {
+    const out = [];
+    for (let i = 0; i < s.length; i++) {
+      if (!isQuote(s[i])) continue;
+      const q = s[i]; let v = "";
+      for (i++; i < s.length; i++) {
+        if (s[i] === BS) { v += s[i + 1] || ""; i++; continue; }
+        if (s[i] === q) break;
+        v += s[i];
+      }
+      out.push(v);
+    }
+    return out;
+  };
+  const word = (s, extra) => {
+    let out = "";
+    for (const ch of s) {
+      if ((ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || (ch >= "0" && ch <= "9") || ch === "_" || extra.indexOf(ch) >= 0) out += ch;
+      else break;
+    }
+    return out;
+  };
+  // A conditional contributes what it can EVALUATE to. `d.ok?"approved":"error"` is two classes; the "paid" in
+  // `d.tier==="paid"?"approved":"plan"` is a comparand and never reaches className.
+  const branches = (expr) => {
+    const q = stopAt(expr, "?");
+    if (q < 0) return [expr];
+    const rest = expr.slice(q + 1);
+    const c = stopAt(rest, ":");
+    return c < 0 ? [rest] : [...branches(rest.slice(0, c)), ...branches(rest.slice(c + 1))];
+  };
+  const classesIn = (expr) => branches(expr).flatMap(literals);
+
+  // ---- the defined side: every `.ev.<name>` rule, from the page's <style> blocks ---------------------------
+  let css = "", k = 0;
+  while ((k = HTML.indexOf("<style", k)) >= 0) {
+    const a = HTML.indexOf(">", k), b = HTML.indexOf("</style>", a);
+    if (a < 0 || b < 0) break;
+    css += HTML.slice(a + 1, b); k = b + 1;
+  }
+  ok("lifted the stylesheet out of the page", css.length > 5000, `${css.length} chars`);
+  const styled = [...new Set(css.split(".ev.").slice(1).map((f) => word(f, "-")).filter(Boolean))].sort();
+  ok("parsed the .ev rules the stylesheet defines", styled.length >= 12, `${styled.length}: ${styled.join(",")}`);
+
+  // ---- the used side: every class handleEvent hands to addEv -----------------------------------------------
+  const CALL = "addEv(";
+  const sites = [];
+  for (let i = 0; (i = HTML.indexOf(CALL, i)) >= 0; i += CALL.length) {
+    if (HTML.slice(0, i).endsWith("function ")) continue;         // the definition, not a call
+    const arg = scan(HTML, i + CALL.length, ",)").trim();
+    let got = classesIn(arg);
+    if (!got.length) {
+      // `addEv(cls, …)` and `addEv(m.c, …)`. Resolved through the declaration rather than skipped: for a plain
+      // local the initialiser IS the class expression, and for a table lookup only the literals under that key
+      // — the rest of the entry is prose, and pulling it in would invent classes instead of finding them.
+      const root = word(arg, "$"), prop = arg[root.length] === "." ? word(arg.slice(root.length + 1), "$") : "";
+      const at = Math.max(HTML.lastIndexOf("const " + root + "=", i), HTML.lastIndexOf("const " + root + " =", i));
+      if (root && at >= 0) {
+        const init = scan(HTML, at, ";");
+        got = prop ? init.split(prop + ":").slice(1).map((f) => literals(f)[0]).filter(Boolean)
+                   : classesIn(init.slice(stopAt(init, "=") + 1));
+      }
+    }
+    sites.push({ line: HTML.slice(0, i).split("\n").length, arg, got });
+  }
+  ok("found the addEv call sites", sites.length >= 40, `${sites.length} found`);
+  // The coverage floor. A call site this cannot read contributes nothing and looks exactly like a call site
+  // with nothing to contribute, so it is named here instead of quietly shrinking the set compared below.
+  const unread = sites.filter((s) => !s.got.length);
+  ok("every addEv call site yielded a class, so none is silently unchecked", unread.length === 0,
+    unread.map((s) => `line ${s.line}: ${s.arg}`).join(" | "));
+  // The empty string is the deliberate no-class call — "objective set", "hush task", "run complete" — which is
+  // base styling on purpose. It is dropped AFTER the floor above, so it still counts as a call site that parsed.
+  const used = [...new Set(sites.flatMap((s) => s.got))].filter(Boolean).sort();
+  ok("parsed the classes handleEvent passes to addEv", used.length >= 12, `${used.length}: ${used.join(",")}`);
+
+  // ---- THE PROPERTY ---------------------------------------------------------------------------------------
+  const unstyled = used.filter((c) => !styled.includes(c));
+  ok(`every class handleEvent passes to addEv has a rule behind it (${used.length} used vs ${styled.length} defined)`,
+    unstyled.length === 0,
+    "carries no visual signal — renders identically to a neutral note: " + unstyled.join(", "));
+
+  // ---- permanent negative controls, re-run on every invocation ---------------------------------------------
+  // The subset test must be able to say no. This voids the empty-set trap in the same assertion: were `styled`
+  // empty — a stylesheet lift that missed, a rule syntax this cannot read — the filter returns every used class
+  // alongside the invented one and the exact comparison fails, instead of reporting green forever.
+  const gaps = (list) => list.filter((c) => !styled.includes(c)).join(",");
+  ok("CONTROL: an invented class is reported unstyled, and nothing else is",
+    gaps([...used, "zzzNotAnEvClass"]) === "zzzNotAnEvClass", "got: " + gaps([...used, "zzzNotAnEvClass"]));
+  // The extractor must read a conditional as its branches and NOT as what its condition compares against.
+  // Without this the parse contributes "paid", which has no rule and never will — a permanent false failure,
+  // and one whose obvious "fix" is to add a `.ev.paid` rule for a class nothing ever sets.
+  const TERNARY = "d.x===" + Q + "zzzCond" + Q + "?" + Q + "zzzA" + Q + ":" + Q + "zzzB" + Q;
+  ok("CONTROL: a conditional contributes both branches and not its condition",
+    classesIn(TERNARY).join(",") === "zzzA,zzzB", classesIn(TERNARY).join(","));
+  ok("CONTROL: a plain literal argument survives the branch reduction unchanged",
+    classesIn(Q + "zzzOnly" + Q).join(",") === "zzzOnly", classesIn(Q + "zzzOnly" + Q).join(","));
+  // ...and the resolution is only worth having if it reaches. dodpass is passed by four call sites and is a
+  // bare literal at none of them — it exists in `used` only through a ternary branch and a declaration lookup.
+  // If it drops out, those paths have stopped working and this has narrowed to the literal call sites without
+  // a single assertion going red.
+  ok("CONTROL: a class reachable only through a ternary or a declaration is still counted",
+    used.includes("dodpass"), used.join(","));
+}
+
 // ---- the declined-check register has a panel, and it reads the shape the endpoint returns ----------------
 // The register shipped with two endpoints and no UI. The failure mode to guard is not "no panel" but a panel
 // reading the WRONG KEY: /api/deliverables returns .files, and a loader reaching for .deliverables would show
