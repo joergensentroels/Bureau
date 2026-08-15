@@ -7,7 +7,7 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { checkDocFigures, FIGURE_DOCS } from "./doc-figures.mjs";
 import { gitSafeEnv } from "../tools/git-env.mjs";
@@ -74,7 +74,18 @@ async function bootServer() {
   if (await serverUp()) return null;   // already running — reuse it, don't double-bind the port
   if (!process.env.OPERATOR_TOKEN) process.env.OPERATOR_TOKEN = "test_" + randomBytes(18).toString("base64url");
   process.env.BUREAU_PORT = String(PORT);
-  const child = spawn(process.execPath, [path.join(ROOT, "server.mjs")], { stdio: ["ignore", "pipe", "pipe"], env: childEnv() });
+  // BUREAU_LOG=off: a throwaway server must not write into the OPERATOR'S log. server.mjs appends to
+  // bureau.log next to itself and the test server shares that directory with the live one, so before this
+  // line 267 of the 272 Bureau boots recorded there were test servers, and 1,949 of its "auth: rejected
+  // credential" warnings were suites deliberately presenting bad tokens (/api/trigger/bogus-token-xyz among
+  // them). That is the exact signal the auth throttle exists to raise, buried 400:1 in its own fixtures.
+  //
+  // On the SERVER spawn only, never in childEnv(): units.test.mjs exercises startLogTee itself, and with the
+  // variable set globally that function correctly returns null and the suite calls .stop() on it. The narrow
+  // fix plus the broad check below is the right pair — a future suite that boots its own server without this
+  // gets caught by the contamination check rather than by someone noticing. Latch's equivalent is LATCH_LOG.
+  const child = spawn(process.execPath, [path.join(ROOT, "server.mjs")],
+    { stdio: ["ignore", "pipe", "pipe"], env: { ...childEnv(), BUREAU_LOG: "off" } });
   let log = ""; child.stdout.on("data", (d) => (log += d)); child.stderr.on("data", (d) => (log += d));
   const deadline = Date.now() + 20000;
   while (Date.now() < deadline) {
@@ -91,6 +102,13 @@ async function bootServer() {
   const results = [];
   console.log("── pure unit suites ──");
   for (const f of PURE) { const r = await run(f); console.log(`  ${r.code === 0 ? "PASS" : "FAIL"}  ${f}  ${r.summary}`); results.push(r); }
+
+  // Where the operator's log ends before this run touches anything. Only the bytes appended AFTER this point
+  // are examined below — the live server on :4173 writes to the same file the whole time, so "did the log
+  // grow" cannot answer the question and "did anything from THIS run appear in it" can.
+  const OPLOG = path.join(ROOT, "bureau.log");
+  let logMark = null;
+  try { logMark = statSync(OPLOG).size; } catch { logMark = null; }
 
   let child = null;
   if (wantServe) { console.log("\n(--serve) booting a throwaway server on :" + PORT + " …"); child = await bootServer(); }
@@ -152,6 +170,51 @@ async function bootServer() {
     for (const p of docProblems) console.log("  ✗ " + p);
     console.log("  (a figure marked <!--fig:KEY--> in the docs must match what a run produces; see test/doc-figures.mjs)");
   }
+  // ---- did this run write into the OPERATOR'S log? ------------------------------------------------
+  // A throwaway server shares a directory with the live one, so without BUREAU_LOG=off it appends to the
+  // same bureau.log. That went unnoticed for weeks and cost the auth alarm its meaning: 267 of 272 recorded
+  // boots and 1,949 "rejected credential" warnings were tests. Checked behaviourally — the marker is this
+  // run's own port in a boot line, which cannot appear unless a server of ours logged there.
+  const logProblems = [];
+  if (wantServe) {
+    const marker = `127.0.0.1:${PORT}`;
+    // CONTROL, asserted first and unconditionally: the detector must find the marker in text that HAS it.
+    // Without this, "no contamination" is what a broken search says too, and this check would be the
+    // eighth entry in this repo's own catalogue of probes that never looked.
+    if (!`Bureau on http://${marker} (3 workspaces, SQLite)`.includes(marker)) {
+      logProblems.push("the contamination detector cannot find its own marker — this check proves nothing");
+    }
+    if (logMark === null) {
+      console.log("\n── operator log: no bureau.log to check (fresh checkout or CI) ──");
+    } else {
+      let appended = "";
+      try {
+        const now = statSync(OPLOG).size;
+        // Rotation (LOG_MAX/LOG_KEEP) can shrink the file mid-run and invalidate the offset. Say so rather
+        // than read a negative slice and report a confident nothing.
+        //
+        // Sliced as BYTES, not characters. statSync().size is a byte count while a utf8 string slices by
+        // character, and this log is dense with ⚠ ✓ ═ — — so the byte offset lands far past the intended
+        // point and the slice comes back EMPTY, i.e. "clean", for any input. That is exactly how the first
+        // version of this check behaved, and its negative control is the only reason anyone found out.
+        if (now < logMark) appended = null;
+        else appended = readFileSync(OPLOG).subarray(logMark).toString("utf8");
+      } catch { appended = null; }
+      if (appended === null) {
+        console.log("\n── operator log: rotated or unreadable mid-run — contamination NOT checked ──");
+      } else if (appended.includes(marker)) {
+        const hits = appended.split("\n").filter((l) => l.includes(marker)).length;
+        logProblems.push(`this run appended ${hits} line(s) mentioning :${PORT} to the operator's bureau.log — a throwaway server is logging over the live one. Whichever process boots it must pass BUREAU_LOG=off, as bootServer() here and hunt-dispatch.test.mjs both do.`);
+      } else {
+        console.log(`\n── operator log: clean — this run added nothing mentioning :${PORT} ──`);
+      }
+    }
+  }
+  if (logProblems.length) {
+    console.log(`\n----- OPERATOR LOG CONTAMINATED: ${logProblems.length} problem(s) -----`);
+    for (const p of logProblems) console.log("  ✗ " + p);
+  }
+
   // Print the FAILING lines, not the last 25. The suites print one line per assertion — units alone prints over
   // eight hundred — so the tail of a failing run is whatever executed last, which is almost never what went wrong.
   // This cost ten days of red CI: the workflow forwarded these 25 lines into a GitHub annotation and the annotation
@@ -166,7 +229,8 @@ async function bootServer() {
   }
   const verdict = failed.length ? failed.length + " SUITE(S) FAILED ✗"
     : docProblems.length ? "ALL SUITES PASS, DOC FIGURES STALE ✗"
+    : logProblems.length ? "ALL SUITES PASS, OPERATOR LOG CONTAMINATED ✗"
     : "ALL SUITES PASS ✓";
   console.log(`\n═══ ${verdict} — ran ${results.length} ═══`);
-  process.exit(failed.length || docProblems.length ? 1 : 0);
+  process.exit(failed.length || docProblems.length || logProblems.length ? 1 : 0);
 })();
