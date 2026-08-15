@@ -10,6 +10,7 @@ import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { checkDocFigures, FIGURE_DOCS } from "./doc-figures.mjs";
+import { gitSafeEnv } from "../tools/git-env.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
@@ -25,9 +26,20 @@ const PURE = ["decision.test.mjs", "units.test.mjs", "scope.test.mjs", "reasonin
 const SERVER = ["api.test.mjs", "workspaces.test.mjs", "endpoints.test.mjs", "robustness.test.mjs", "mcp-floor.test.mjs", "mcp-protocol.test.mjs"];
 const LIVE = ["e2e-autonomy.mjs"];
 
+// The runner boundary. .githooks/pre-push already unsets these before it invokes anything, and every git
+// spawn in the repo routes through gitSafeEnv — this is a third layer over both, covering the entry point
+// neither one owns: `node test/run-all.mjs` run BY HAND from a shell that happens to carry GIT_DIR, which
+// is not the hook and so gets no unset. It also holds for a child that shells out to git without going
+// through a repo .mjs file, which is the one shape units.test.mjs' source-derived check cannot see.
+//
+// Computed per spawn, never hoisted: bootServer() writes OPERATOR_TOKEN and BUREAU_PORT into process.env
+// AFTER the pure suites have run, and a snapshot taken at import time would hand the server suites an env
+// with no token — every one of them would 401 and read as a real failure.
+const childEnv = () => gitSafeEnv(process.env);
+
 function run(file) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [path.join(HERE, file)], { stdio: ["ignore", "pipe", "pipe"], env: process.env });
+    const child = spawn(process.execPath, [path.join(HERE, file)], { stdio: ["ignore", "pipe", "pipe"], env: childEnv() });
     let out = "";
     child.stdout.on("data", (d) => (out += d));
     child.stderr.on("data", (d) => (out += d));
@@ -62,7 +74,7 @@ async function bootServer() {
   if (await serverUp()) return null;   // already running — reuse it, don't double-bind the port
   if (!process.env.OPERATOR_TOKEN) process.env.OPERATOR_TOKEN = "test_" + randomBytes(18).toString("base64url");
   process.env.BUREAU_PORT = String(PORT);
-  const child = spawn(process.execPath, [path.join(ROOT, "server.mjs")], { stdio: ["ignore", "pipe", "pipe"], env: process.env });
+  const child = spawn(process.execPath, [path.join(ROOT, "server.mjs")], { stdio: ["ignore", "pipe", "pipe"], env: childEnv() });
   let log = ""; child.stdout.on("data", (d) => (log += d)); child.stderr.on("data", (d) => (log += d));
   const deadline = Date.now() + 20000;
   while (Date.now() < deadline) {

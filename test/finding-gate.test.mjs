@@ -7,15 +7,20 @@
 //
 //   run:  node test/finding-gate.test.mjs
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withFindingIo, verifyFinding, findingRepo, normalizeFinding } from "../server.mjs";
+import { gitSafeEnv } from "../tools/git-env.mjs";
 
 let pass = 0, fail = 0;
 const chk = (label, cond) => { console.log(`${cond ? "✓" : "✗"} ${label}`); cond ? pass++ : fail++; };
 
-const git = (cwd, ...args) => execFileSync("git", args, { cwd, stdio: "pipe" });
+// env scrubbed: makeRepo() below runs `git init` and `git config user.*` in a throwaway directory, and with an
+// inherited GIT_DIR none of that lands there. `git init` re-inits GIT_DIR as BARE, and the config writes go to
+// the real repository — which is how this suite's own fixture identity, gate@example.invalid, was once found in
+// the operator's .git/config next to a `core.bare = true` that made the repo unusable. See tools/git-env.mjs.
+const git = (cwd, ...args) => execFileSync("git", args, { cwd, stdio: "pipe", env: gitSafeEnv() });
 
 // A repo whose test suite FAILS: src says 10, the test wants 42. The "defect" is the 10.
 function makeRepo() {
@@ -302,5 +307,68 @@ const THE_FIX = { file: 'sum.mjs', find: 'i < xs.length - 1', replace: 'i < xs.l
   chk('  while a well-formed probe is accepted' + (good.ok ? '' : ' — got: ' + good.reason), good.ok === true);
   chk('  and it derives its own check', good.ok && good.finding.check === 'node --test test/p.test.mjs');
 }
+// A SACRIFICIAL repository, named by GIT_DIR, that has to come through untouched.
+//
+// test/units.test.mjs proves every file that spawns git mentions gitSafeEnv. That is a source-text property and
+// it cannot tell whether the scrub actually holds. This runs the exact builder that did the damage — init,
+// config user.*, add, commit — with GIT_DIR pointed at a real repository, and asserts that repository is
+// byte-identical afterwards. Unscrubbed, makeRepo() writes `gate@example.invalid` into it and `git init`
+// re-inits it as bare, which is precisely what was found in the operator's own .git/config.
+//
+// The victim is disposable by construction. Nothing here can name the real repository, which is the only
+// responsible way to exercise a defect whose failure mode is corrupting the repository you are standing in.
+{
+  const victim = mkdtempSync(join(tmpdir(), 'bureau-gate-victim-'));
+  git(victim, 'init', '-q');
+  const victimCfg = join(victim, '.git', 'config');
+  const before = readFileSync(victimCfg, 'utf8');
+  const restore = process.env.GIT_DIR;
+  let built = '', buildErr = '';
+  try {
+    process.env.GIT_DIR = join(victim, '.git');
+    // Caught, not propagated. Unscrubbed, this THROWS rather than returning: `git init` re-inits GIT_DIR as
+    // bare, so the fixture's own `git add -A` dies with "must be run in a work tree" — the identical message
+    // the pre-push run produced. A crashing suite says less than a failing assertion, and this block is the
+    // one that has to explain the defect, so the throw is turned into a red line with the reason on it.
+    try { built = makeRepo(); } catch (e) { buildErr = String((e && e.message) || e).split(String.fromCharCode(10))[0].slice(0, 140); }
+  } finally {
+    if (restore === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = restore;
+  }
+  chk('a fixture still builds while GIT_DIR names another repository' + (buildErr ? ' — ' + buildErr : ''),
+      built !== '' && existsSync(join(built, '.git')));
+  // ...and the commit landed in the FIXTURE. Without this, a builder that silently did nothing would pass.
+  chk('  and the fixture is the repo that got the commit',
+      built !== '' && git(built, 'log', '--format=%s').toString().includes('fixture with a failing test'));
+  if (built) rmSync(built, { recursive: true, force: true });
+  const after = readFileSync(victimCfg, 'utf8');
+  chk('  and the repository named by GIT_DIR is byte-identical afterwards', after === before);
+  // The two specific corruptions, named, because "identical" alone would not say which failure was avoided.
+  chk('  no fixture identity was written into it', !after.includes('gate@example.invalid'));
+  chk('  and it was not re-inited as bare', !/bare = true/.test(after));
+  rmSync(victim, { recursive: true, force: true });
+
+  // CONTROL: the assertions above must be able to FAIL, or they measure nothing. Same shape, second victim,
+  // and one raw execFileSync that inherits the environment — exactly what every call site did before
+  // tools/git-env.mjs existed. The write is expected to LAND on the victim, and if it no longer does then the
+  // mechanism has changed and the four assertions above have quietly stopped being about anything.
+  const control = mkdtempSync(join(tmpdir(), 'bureau-gate-control-'));
+  git(control, 'init', '-q');
+  const controlCfg = join(control, '.git', 'config');
+  const wasControl = readFileSync(controlCfg, 'utf8');
+  const restoreControl = process.env.GIT_DIR;
+  const scratch = mkdtempSync(join(tmpdir(), 'bureau-gate-scratch-'));
+  try {
+    process.env.GIT_DIR = join(control, '.git');
+    execFileSync('git', ['config', 'user.email', 'zzz@example.invalid'], { cwd: scratch, stdio: 'pipe' });
+  } catch { /* the write reaching the victim is the point; a refusal is reported by the assertion below */ }
+  finally {
+    if (restoreControl === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = restoreControl;
+    rmSync(scratch, { recursive: true, force: true });
+  }
+  chk('  CONTROL: unscrubbed, that write DOES reach the repository named by GIT_DIR',
+      readFileSync(controlCfg, 'utf8').includes('zzz@example.invalid'));
+  rmSync(control, { recursive: true, force: true });
+}
+
 console.log(`\n${fail === 0 ? "ALL PASS ✓" : "FAILURES ✗"} — ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
