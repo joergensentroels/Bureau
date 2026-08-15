@@ -8,7 +8,7 @@ import {
   rankByRelevance, recallSharedMemory, makeSemaphore,
   approvalActType, remoteBlocksApproval, REMOTE_MODE,
   packVec, unpackVec, cosine, rrfFuse, memoryKey, memoryText,
-  objectiveSignature, dedupeMemories, ownWorkQuery, rankOwnWork, ownWorkBlock,
+  objectiveSignature, dedupeMemories, recallQuery, rankOwnWork, ownWorkBlock,
   deliverableEmbedText, deliverableTitle,
   chunkDocument, deliverableChunks, modelUnreachable, trimVersions, clientKey, isLoopback,
   startLogTee, webhookBody,
@@ -546,9 +546,9 @@ console.log("# ownWorkBlock — the agent's OWN memory, ranked rather than merel
 
   // --- what the query IS, which is the whole decision ---
   chk("  fixture floor: lens and objective are different strings", lens.prompt !== objective);
-  eq("  on a hunting round the query is the LENS", ownWorkQuery(huntRun, objective), lens.prompt);
-  eq("  off a hunting round it is the objective", ownWorkQuery({ phase: "execute" }, objective), objective);
-  eq("  investigate phase but no lens yet → the objective", ownWorkQuery({ phase: "investigate" }, objective), objective);
+  eq("  on a hunting round the query is the LENS", recallQuery(huntRun, objective), lens.prompt);
+  eq("  off a hunting round it is the objective", recallQuery({ phase: "execute" }, objective), objective);
+  eq("  investigate phase but no lens yet → the objective", recallQuery({ phase: "investigate" }, objective), objective);
 
   // --- "objective AND lens" is a no-op, so it is not a third option. Asserted, not asserted-in-a-comment. ---
   {
@@ -600,6 +600,134 @@ console.log("# ownWorkBlock — the agent's OWN memory, ranked rather than merel
   }
   eq("  an agent with no memory yields no block", ownWorkBlock({}, { memory: [] }, objective), "");
   eq("  tolerates a missing agent entirely", ownWorkBlock({}, null, objective), "");
+}
+
+console.log("# recallQuery governs the CROSS-TEAM block too, not just own work");
+{
+  // The own-work block above got the attention because it had no relevance filter at all. The cross-team
+  // block two lines below it in runAgentTask was already ranked — and was being ranked against the same
+  // 7kB blob. "Ranked" and "ranked against the right thing" are different properties, and only one of
+  // them was established.
+  //
+  // Twenty-four memories across four teammates, four slots: choosing is a real choice. With five entries
+  // and a limit of four, "the block did not change" is arithmetic rather than evidence — the first
+  // version of this measurement made exactly that mistake and reported a constant block from a corpus
+  // too small to vary.
+  const M = (objective, summary) => ({ at: 0, objective, summary });
+  const org = { agents: [
+    { id: "ada", name: "Ada", role: "Analyst", memory: [] },
+    { id: "bo", name: "Bo", role: "Engineer", memory: [
+      M("Harden the approval queue against replayed tokens", "Approval ids are single-use; a replay is refused by the executor."),
+      M("Rate-limit the public heartbeat endpoint", "A token bucket, so a client loop cannot flood the activity log."),
+      M("Make the paid-model ceiling per run rather than per call", "Enforced in one place; every caller reads the same budget."),
+      M("Cache the repository digest between rounds", "Reverted: the digest is recomputed per round because coverage ordering changes."),
+      M("Split the run timeline events from the audit log", "Timeline is ephemeral, audit is durable; they had been one array."),
+    ] },
+    { id: "cy", name: "Cy", role: "QA", memory: [
+      M("Cover the error paths in the finding gate", "A negative control for every refusal branch in normalizeFinding."),
+      M("Check what the workspace switcher accepts", "Workspace names were unvalidated; a traversal name reached the filesystem."),
+      M("Audit the checks that pass over an empty file list", "Three suites globbed a directory and asserted with no count floor."),
+      M("Assert the default guardrail values in the API suite", "Defaults that mean unlimited are asserted rather than assumed."),
+      M("Re-run the setup instructions on a clean machine", "The documented first command failed on a second run; the state directory existed."),
+      M("Verify the rate table matches the configured models", "The table listed four models and the dropdown offered three."),
+    ] },
+    { id: "di", name: "Di", role: "Designer", memory: [
+      M("Make the run timeline readable on a phone", "Entries collapse under 600px; the lens badge stays visible."),
+      M("Give every icon button an accessible name", "Fourteen icon-only buttons had no label for a screen reader."),
+      M("Show the coverage figure beside each round", "A round that opened five files and one that opened all of them looked identical."),
+      M("Redesign the approval card to show the actual command", "The card said the action type; the operator needed the argument."),
+    ] },
+    { id: "eve", name: "Eve", role: "Writer", memory: [
+      M("Bring the README figures in line with the suite", "Assertion counts in prose were stale by four commits; they are derived now."),
+      M("Document the operator token and where it is read from", "One section said env var, another said config file; the env var wins."),
+      M("Write the onboarding walkthrough for a new operator", "Ends at the first successful run rather than at the install step."),
+      M("Record the review subsystem results in TESTING", "Five of five confirmed on a green repository, with the controls named."),
+      M("Explain why embeddings bypass the credential boundary", "A local embedder holds no key, so there is nothing to protect."),
+    ] },
+    { id: "fin", name: "Fin", role: "Ops", memory: [
+      M("Move the state directory out of the repository", "State lived beside the source and was committed twice by accident."),
+      M("Add a pre-push hook that runs the full suite", "Pushing without a green suite is refused locally as well as in CI."),
+      M("Give the scheduler a jitter so runs do not stack", "Every schedule fired on the minute and three runs overlapped."),
+      M("Check the tailnet route reaches the API and the MCP surface", "Both are behind the operator token; the token is the only gate."),
+    ] },
+  ] };
+  const CORPUS = org.agents.reduce((n, a) => n + a.memory.length, 0);
+  chk("  fixture floor: the corpus is big enough that picking four is a choice", CORPUS >= 20);
+
+  // A repository map of the shape investigateObjective really receives. The standing hunt instructions
+  // plus this is the 91% that is identical every round.
+  const digest = "REPOSITORY MAP\n" + [
+    "server.mjs (7000 lines)", "public/app.js (3000 lines)", "public/index.html (400 lines)",
+    "test/units.test.mjs (900 lines)", "test/api.test.mjs (600 lines)", "test/hunt-dispatch.test.mjs (300 lines)",
+    "test/finding-gate.test.mjs (200 lines)", "test/coverage-audit.mjs (250 lines)", "test/run-all.mjs (120 lines)",
+    "README.md (500 lines)", "TESTING.md (1200 lines)", "eval/recall-eval.mjs (150 lines)",
+    "lib/latch.mjs (400 lines)", "lib/store.mjs (300 lines)", "lib/digest.mjs (200 lines)",
+  ].join("\n");
+  const objOf = (l) => investigateObjective({ findings: [], rejectedFindings: [] }, l, {}, digest);
+  const block = (q) => recallSharedMemory(org, q, 4, "ada").map((r) => r.objective);
+  const overlap = (a, b) => { const s = new Set(b); return a.filter((x) => s.has(x)).length; };
+
+  // Floor: recall answers at all, and it answers with a FULL block. Every claim below is about which four
+  // entries are chosen, and all of them pass vacuously against an empty list.
+  const anyLens = LENSES.find((l) => l.id === "stale-claim");
+  chk("  floor: shared recall is non-empty on a hunting round in a multi-agent company",
+      block(objOf(anyLens)).length === 4);
+  chk("  floor: and non-empty ranked against the lens alone", block(anyLens.prompt).length === 4);
+
+  // Two lenses with nothing whatever in common: one hunts stated numbers and dates, the other hunts
+  // checks whose collector can come back empty.
+  const A = LENSES.find((l) => l.id === "stale-claim");
+  const B = LENSES.find((l) => l.id === "collector-blind");
+  chk("  fixture floor: both lenses are real register entries with real prompts",
+      !!A && !!B && A.prompt.length > 80 && B.prompt.length > 80 && A.prompt !== B.prompt);
+
+  // The defect, measured rather than described: ranked against the whole objective these two lenses get
+  // the SAME FOUR memories. Not similar — identical.
+  eq("  ranked against the objective, two unrelated lenses get an IDENTICAL block",
+     overlap(block(objOf(A)), block(objOf(B))), 4);
+  // ...and ranked against the lens they do not. This is the assertion that goes red on a revert.
+  chk("  ranked against the lens they share at most one of four",
+      overlap(block(A.prompt), block(B.prompt)) <= 1);
+
+  // The whole register, not one flattering pair: for EVERY pair of lenses the objective-ranked blocks
+  // overlap at least as much as the lens-ranked ones, and for most pairs strictly more.
+  {
+    let pairs = 0, atLeast = 0, strictly = 0;
+    for (let i = 0; i < LENSES.length; i++) for (let j = i + 1; j < LENSES.length; j++) {
+      const d = overlap(block(objOf(LENSES[i])), block(objOf(LENSES[j])));
+      const p = overlap(block(LENSES[i].prompt), block(LENSES[j].prompt));
+      pairs++; if (d >= p) atLeast++; if (d > p) strictly++;
+    }
+    chk(`  floor: every lens pair was actually compared (${pairs})`, pairs === (LENSES.length * (LENSES.length - 1)) / 2 && pairs >= 20);
+    chk(`  the objective-ranked block is never MORE lens-sensitive: ${atLeast}/${pairs}`, atLeast === pairs);
+    chk(`  and is strictly less sensitive for most pairs: ${strictly}/${pairs}`, strictly >= pairs * 0.75);
+  }
+
+  // What it costs in the block the agent actually reads: the memory the lens itself ranks first.
+  {
+    let lost = 0, displaced = 0, kept = 0;
+    for (const l of LENSES) {
+      const want = block(l.prompt)[0];
+      if (!want) continue;
+      const at = block(objOf(l)).indexOf(want);
+      if (at < 0) lost++; else if (at > 0) displaced++; else kept++;
+    }
+    chk(`  floor: every lens produced a top pick to look for (${lost + displaced + kept})`, lost + displaced + kept === LENSES.length);
+    // Measured 5 of 8 on this fixture — not all 8, because for three lenses the boilerplate happens to
+    // leave the right entry on top anyway. Asserted at half rather than at the measured number: the claim
+    // worth defending is "the objective loses the lens's pick for most lenses", and pinning it to 5 would
+    // turn any unrelated ranker change into a red line that means nothing.
+    chk(`  the lens's own first choice is lost or displaced by the objective for most lenses: ${lost + displaced}/${LENSES.length}`,
+        lost + displaced >= LENSES.length / 2);
+  }
+
+  // recallQuery is what production passes, so assert the composition rather than re-deriving the lens.
+  const huntRun = { phase: "investigate", currentLens: A };
+  const OBJ = objOf(A);
+  eq("  and recallQuery is the seam that produces it", block(recallQuery(huntRun, OBJ)), block(A.prompt));
+  chk("  which is NOT what the objective produces", overlap(block(recallQuery(huntRun, OBJ)), block(OBJ)) < 4);
+  // Off a hunting round nothing changes: the objective IS the work and stays the query.
+  eq("  off a hunting round the objective is still the query", block(recallQuery({ phase: "execute" }, OBJ)), block(OBJ));
 }
 
 console.log("# startLogTee — the log a boot task leaves behind when nobody is watching");

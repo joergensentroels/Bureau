@@ -310,6 +310,126 @@ try {
   }
 
   // -------------------------------------------------------------------------------------------
+  // The CROSS-TEAM block, on a real hunting round. Units establish that recallSharedMemory discriminates
+  // when handed the lens; they establish nothing about which string runAgentTask hands it, and that call
+  // site is the entire defect. Shared recall skips the asking agent, so this needs a SECOND agent — the
+  // reason the single-agent company in TESTING.md saw an empty block and the defect stayed invisible.
+  //
+  // The irrelevant memory is deliberately written in HUNT vocabulary ("register a finding", "probe",
+  // "round"). That is the mechanism rather than a trick: the standing instructions and the digest are
+  // most of the objective's query terms, so a memory sharing their words outscores the one the lens is
+  // about. Verified before this was written down — ranked against the whole objective, the irrelevant
+  // memory comes back FIRST and the relevant one second. An "unrelated work is absent" assertion over a
+  // fixture the old code also passed would have proved nothing.
+  console.log("\n# cross-team memory is ranked against the LENS on a hunting round, not the objective");
+  {
+    const NOTE = (title) => ({ actionType: "note", title, details: "noted", command: "" });
+    const RELEVANT = "Reconcile the stated version numbers across the documentation";
+    const BOILERPLATE = "Register a finding about the probe that never ran in the round";
+    // Six memories for four slots, so the block is a SELECTION. The first draft of this seeded two and
+    // asserted the irrelevant one was absent; it failed, and the reason was the fixture rather than the
+    // code. recallSharedMemoryHybrid fuses BM25 with vector similarity through RRF, and the semantic half
+    // keeps every entry with cosine > 0 — so with fewer candidates than slots BOTH come back whatever the
+    // query, and "absent" was arithmetic the ranker could not have produced. Ordering is asserted instead
+    // of membership for the same reason it holds on both paths: this suite inherits BUREAU_EMBED_URL, so
+    // the hybrid half is live on a machine running the local embedder and silently off on one that is not.
+    const DECOYS = [
+      BOILERPLATE,
+      "Rebuild the approval card so it shows the command",
+      "Give the scheduler a jitter so runs do not stack",
+      "Move the state directory out of the repository",
+      "Add an accessible name to every icon button",
+    ];
+
+    const mate = (await api("POST", "/api/agents", { name: "Mate", role: "Engineer" })).j;
+    ok("floor: a second agent exists — shared recall excludes the asker, so one agent can never populate it",
+      !!mate?.id && mate.id !== agent.id, JSON.stringify(mate).slice(0, 200));
+    await api("PATCH", "/api/agents/" + mate.id, { tier: "trusted", allow: ["note"] });
+    for (const objective of [RELEVANT, ...DECOYS]) {
+      setAction(NOTE("seed"));
+      await runAndWatch({ mode: "single", agentId: mate.id, investigate: false, maxTurns: 2, objective });
+    }
+    const mateMem = ((await api("GET", "/api/org")).j.agents || []).find((a) => a.id === mate.id)?.memory || [];
+    ok("  floor: every seeded subject is really in the teammate's memory",
+      [RELEVANT, ...DECOYS].every((o) => mateMem.some((m) => m.objective === o)),
+      JSON.stringify(mateMem.map((m) => (m.objective || "").slice(0, 40))));
+    ok("  floor: and there are more of them than the block has slots, so recall must CHOOSE",
+      mateMem.length > 4, String(mateMem.length));
+
+    // Company DELIVERABLES get the same query eleven lines further down, and unlike shared recall they are
+    // excluded only by name — so this block is populated even on the single-agent company where the
+    // cross-team one is empty. More documents than slots, same reason as above.
+    //
+    // `probe-register` is the one that makes this assertion mean anything, and it was added because the
+    // negative control said so: with only the three topical documents below, reverting this call site to
+    // the objective changed NOTHING and the check stayed green through the defect it was written for.
+    // A decoy has to be dense in the standing instructions' own vocabulary — probe, finding, round,
+    // register, repository — because that vocabulary IS what the diluted query is mostly made of.
+    for (const [title, body] of [
+      ["version-figures", "# Version figures\n\nEvery stated version number, count and date in the documentation, with the derivation for each. The stated totals were four commits stale before this existed."],
+      ["scheduler-jitter", "# Scheduler jitter\n\nEvery schedule fired on the minute and three runs overlapped. Jitter is applied per schedule so they spread out."],
+      ["approval-card", "# Approval card\n\nThe card showed the action type where the operator needed the actual command and its argument."],
+      ["probe-register", "# Probe register\n\nEvery registered finding from each hunting round, the probe that proved it, and the repository file the defect was found in. A round that opens no repository files is recorded as dry, and the register orders lenses by what they confirm."],
+    ]) {
+      setAction({ actionType: "file_write", title, details: "seeding the company corpus", command: body });
+      await runAndWatch({ mode: "single", agentId: agent.id, investigate: false, maxTurns: 2, objective: `Save ${title} as a document.` });
+    }
+    const docs = (await deliverables()) || [];
+    ok("  floor: the company corpus has more documents than the RAG block has slots",
+      docs.length > 3, JSON.stringify(docs.map((d) => d.name || d)));
+
+    // One lens, chosen by us rather than by the register's rotation, so the round is deterministic.
+    const installed = (await api("GET", "/api/lenses")).j.lenses || [];
+    ok("  floor: the register answered with the built-in lenses", installed.length >= 8, JSON.stringify(installed).slice(0, 150));
+    for (const l of installed) await api("PATCH", "/api/lenses/" + encodeURIComponent(l.id), { off: true });
+    const LENS_ID = "stated-numbers";
+    await api("POST", "/api/lenses", { id: LENS_ID,
+      prompt: "Read every stated version number, count and date in the documentation and derive the true value from the source that would contradict it." });
+    const active = ((await api("GET", "/api/lenses")).j.lenses || []).filter((l) => !l.off);
+    ok("  floor: exactly one lens is active, and it is the one just installed",
+      active.length === 1 && active[0].id === LENS_ID, JSON.stringify(active.map((l) => l.id)));
+
+    prompts = [];
+    setAction({ actionType: "read_repo", title: "sum.mjs", details: "reading the source under review" });
+    const { events, error } = await runAndWatch({ mode: "hunt", agentId: agent.id, objective: "Look for defects.", maxTurns: 2 });
+    ok("  the hunting round ran and reached the provider", !error && prompts.length > 0, error || types(events).join(","));
+    ok("  floor: and it ran under the lens we installed, not one of the built-ins",
+      events.some((e) => e.type === "lens" && e.data?.lens === LENS_ID),
+      JSON.stringify(events.filter((e) => e.type === "lens").map((e) => e.data)));
+
+    const blocks = prompts.flat().map((m) => String(m?.content || "")).filter((c) => /^What the company already knows/.test(c));
+    // The floor that matters most here. Unwiring the call site entirely removes the block, and then
+    // "the boilerplate memory is absent" is true for the wrong reason — absent because nothing was sent.
+    // That is exactly how the own-work version of this check stayed green through a broken call site.
+    ok("  floor: a cross-team block was actually sent to the agent", blocks.length > 0,
+      "no cross-team block among " + prompts.flat().length + " messages");
+    // `|| ""` throughout, and it is not defensive noise: with the block unwired these extractors read off
+    // undefined and the suite THREW, taking every later assertion in the file with it. A missing block has
+    // to make each assertion red on its own terms — an exception reports one problem and hides the rest.
+    const block = blocks[0] || "";
+    ok("  floor: and it names the teammate whose work it is", /Mate/.test(block), block.slice(0, 300));
+    const rows = block.split("\n").filter((l) => l.startsWith("- "));
+    ok("  floor: the block really is a selection — fewer rows than the teammate has memories",
+      rows.length > 0 && rows.length < mateMem.length, `${rows.length} rows from ${mateMem.length} memories`);
+    ok("  it carries the memory the LENS is about", rows.some((r) => r.includes(RELEVANT)), block.slice(0, 500));
+    ok("  and that memory is FIRST — the lens decides the order, not the round's boilerplate",
+      (rows[0] || "").includes(RELEVANT), rows[0] || "(no rows)");
+    ok("  the hunt-vocabulary decoy did not take the top slot",
+      !!rows[0] && !rows[0].includes(BOILERPLATE), rows[0] || "(no rows)");
+
+    // The deliverable block from the SAME prompt, which is the call this suite would otherwise leave
+    // uncovered — and the one that still bites a company of one.
+    const rag = prompts.flat().map((m) => String(m?.content || "")).filter((c) => /^Relevant existing company deliverables/.test(c));
+    ok("  floor: a deliverable block was actually sent to the agent too", rag.length > 0,
+      "no deliverable block among " + prompts.flat().length + " messages");
+    const named = (rag[0] || "").split("\n").filter((l) => l.startsWith("### ")).map((l) => l.slice(4).trim());
+    ok("  floor: it names documents, and fewer than the company holds",
+      named.length > 0 && named.length < docs.length, JSON.stringify(named));
+    ok("  the document the LENS is about is first among them",
+      /version-figures/.test(named[0] || ""), JSON.stringify(named));
+  }
+
+  // -------------------------------------------------------------------------------------------
   // The second of the three rate-table funnels, after the boot one at the top: the model LATCH reports as
   // its paid provider, learned at run start via configuredPaidModel(). Asserted after the runs above have
   // happened, because that is when it is first knowable. (The third funnel — the model that actually served
