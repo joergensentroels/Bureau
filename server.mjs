@@ -5758,7 +5758,13 @@ function cleanTraits(v) {
 // Desktop, other agents) can query and drive the company. JSON-RPC 2.0 over HTTP at POST /mcp — no
 // deps (MCP is just JSON-RPC + JSON Schema). Localhost-only, the SAME trust boundary as the rest of
 // the API (the server binds 127.0.0.1 and is unauthenticated by design), so this adds no new surface.
-const MCP_PROTOCOL = "2025-06-18";
+//
+// Bureau implements ONE revision of MCP and now says so. See MCP-PROTOCOL-SUPPORT.md for what is
+// supported, what is not, and why the two newer revisions (2025-11-25, 2026-07-28) are not. If you
+// change MCP_PROTOCOLS, change that file in the same commit: a version claim with no written scope is
+// exactly how this went wrong the first time.
+const MCP_PROTOCOL = "2025-06-18";      // the revision Bureau answers with
+const MCP_PROTOCOLS = [MCP_PROTOCOL];   // every revision Bureau actually implements — add only what you have verified
 const MCP_TOOLS = [
   { name: "list_agents", description: "List the company's agents (name, role, department, manager, autonomy tier).",
     inputSchema: { type: "object", properties: {} },
@@ -5788,7 +5794,18 @@ async function handleMcp(req, res, role = "operator") {
     const id = m && m.id !== undefined ? m.id : null;
     try {
       if (!m || m.jsonrpc !== "2.0" || typeof m.method !== "string") return { jsonrpc: "2.0", id, error: { code: -32600, message: "invalid request" } };
-      if (m.method === "initialize") return { jsonrpc: "2.0", id, result: { protocolVersion: m.params?.protocolVersion || MCP_PROTOCOL, capabilities: { tools: {} }, serverInfo: { name: "bureau", version: "1.0.0" } } };
+      // Negotiate, do not echo. The lifecycle spec: if the server supports the requested version it MUST
+      // answer with that same version, "otherwise, the server MUST respond with another protocol version
+      // it supports" — and then the CLIENT decides ("if the client does not support the version in the
+      // server's response, it SHOULD disconnect"). This line used to answer with whatever the client
+      // asked for, so a client announcing 2026-07-28 was told Bureau spoke 2026-07-28 and then found no
+      // server/discover, no resultType on results, and no _meta parsing. Answering with our own revision
+      // hands that client an honest choice instead of a silent breakage further in.
+      if (m.method === "initialize") {
+        const asked = m.params?.protocolVersion;
+        const agreed = MCP_PROTOCOLS.includes(asked) ? asked : MCP_PROTOCOL;
+        return { jsonrpc: "2.0", id, result: { protocolVersion: agreed, capabilities: { tools: {} }, serverInfo: { name: "bureau", version: "1.0.0" } } };
+      }
       if (m.method === "ping") return { jsonrpc: "2.0", id, result: {} };
       if (m.method.startsWith("notifications/")) return null;   // notifications (incl. initialized) get no response
       if (m.method === "tools/list") return { jsonrpc: "2.0", id, result: { tools: MCP_TOOLS.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })) } };
@@ -5799,6 +5816,13 @@ async function handleMcp(req, res, role = "operator") {
         try { const out = await tool.handler(m.params?.arguments || {}); return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] } }; }
         catch (e) { return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "Error: " + e.message }], isError: true } }; }
       }
+      // Unknown methods — `server/discover` among them — must fail as a PLAIN -32601, and that is not an
+      // oversight to tidy up later. It is how a dual-era client works out what Bureau is: it probes with
+      // server/discover and falls back to `initialize` on any error that is NOT a recognized modern one.
+      // Answering -32022 (UnsupportedProtocolVersionError) here would look more current and be strictly
+      // worse — a modern error identifies the server as modern, so the client would retry modern requests
+      // instead of falling back, and never reach the handshake Bureau does implement. test/mcp-protocol.test.mjs
+      // pins this, because "make the error code more modern" is a plausible-looking way to break it.
       return { jsonrpc: "2.0", id, error: { code: -32601, message: "method not found: " + m.method } };
     } catch (e) { return { jsonrpc: "2.0", id, error: { code: -32603, message: e.message } }; }
   };
