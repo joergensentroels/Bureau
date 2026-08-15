@@ -16,9 +16,9 @@ node test/run-all.mjs --ui      # holds the throwaway server open so the UI can 
 The runner runs the pure suites always, the server suites only if a server is reachable on
 `BUREAU_PORT` (else it skips them with a note), and the live e2e only with `--e2e`.
 
-Current totals: **<!--fig:pure-assertions-->1,464 pure assertions** across
-**<!--fig:pure-suites-->14 pure suites**, plus **<!--fig:server-assertions-->288 server assertions**
-across **<!--fig:server-suites-->6 server suites** — **<!--fig:assertions-->1,752 headless assertions
+Current totals: **<!--fig:pure-assertions-->1,493 pure assertions** across
+**<!--fig:pure-suites-->14 pure suites**, plus **<!--fig:server-assertions-->292 server assertions**
+across **<!--fig:server-suites-->6 server suites** — **<!--fig:assertions-->1,785 headless assertions
 across <!--fig:suites-->20 suites** in all. The live `--e2e` adds 18 more and is not counted here,
 because it is not part of the pre-push gate.
 
