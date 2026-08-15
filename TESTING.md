@@ -1257,6 +1257,50 @@ memories against a four-slot block, where RRF fusion returns both whatever the q
 absent" was never something the ranker could have falsified. Both now assert ORDER over a corpus larger than the
 block, which is also what survives the hybrid half being live on one machine and absent on another.
 
+#### The same dilution on a NON-hunting run. REFUTED, and the reason is worth more than the result.
+
+`recallQuery` returns the objective off a hunting round, so the obvious next question is whether the objective is
+itself diluted there. It is, by three appends — acceptance criteria (`server.mjs:3903`), the undecided-decisions
+block (`3907`) and the QA remediation preamble (`3837`). The fixed template text is **46-48%** of
+the query on a run with undecided decisions and **30-33%** on a remediation pass, against the hunt's 91%. That
+looked like the same defect at a smaller scale. It is not the same defect at all.
+
+Measured over 20 documents into three slots, three unrelated construction tasks, all five query forms:
+
+| | hunting round | construction run |
+| --- | --- | --- |
+| top slot holds the right item | 1 of 8 | **14 of 15** |
+| mean block overlap across unrelated queries | 0.69 | **0.30** (0.00 on the bare objective) |
+| query vectors across unrelated queries | cos 0.9746 | cos 0.40-0.68 |
+
+**Nothing was fixed, because nothing established a defect.** Three probes had to be voided first, and they are the
+record worth keeping:
+
+- **Query length, refuted by control.** Padding the objective with same-size prose drawn from vocabulary no document
+  uses reproduces none of the effect — the block stays exactly where it was without the padding. So whatever moves
+  the ranking is the boilerplate's WORDS, not the query's size.
+- **Convergence, refuted by corpus size — twice.** Two runs reported unrelated tasks converging on an identical
+  block (overlap 1.00). Both used five documents into three slots, where filling the block is arithmetic. At 20
+  documents it is 0.30. This is the third time in this session that a corpus smaller than the block manufactured a
+  result, after the 5-memory cross-team measurement and the 2-memory end-to-end fixture above.
+- **Slot occupancy, refuted by the fixture's own decoy.** A process document did take slot 2 in 3 of 3 blocks as
+  soon as criteria were appended — but the decoy nearly quoted the remediation sentence back. Re-run with a plainer
+  process document ("how work is signed off here") it is pulled 1 of 3 times; with a mundane one ("our weekly
+  rhythm: standup Monday…") never. The effect was mostly the fixture.
+
+The asymmetry is principled rather than lucky, and the share of the query is the LESS important half of it. On a
+hunt the boilerplate is also the vocabulary every hunt memory is written in — noise and corpus share a dictionary,
+so BM25 adds score for boilerplate matches on every candidate at once. On a construction run the appended text is
+process language and the corpus is ordinary company documents that do not share it. Take that second condition away
+and 91% would not have mattered either.
+
+One residual, narrow and conditional: the fixed remediation sentence alone ranks a near-verbatim delivery-process
+document at **13.97 against 2.30** for the runner-up. A company that keeps a definition-of-done document will see it
+surface in the deliverable block on remediation passes, costing one of three slots — it displaced the top slot once
+in fifteen. Not worth a change, and the change would be a different shape anyway: the offender is text addressed to
+the agent about HOW TO WORK rather than about what the work is, so the fix is stripping the fixed templates, not
+reusing `recallQuery`.
+
 ### Hypothesis 2: the outline was steering them. ALSO REFUTED — but it was a real defect.
 
 `src/server.mjs` is 79,219 characters against a 12,000-character paid read cap, so a turn sees **15%** of it and
