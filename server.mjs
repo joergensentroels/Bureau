@@ -285,6 +285,7 @@ export function callCostUsd(split, model, fallbackTier) {
   return (miss * r.miss + cached * r.cached + split.output * r.out) / 1e6;
 }
 
+
 // ---- Autonomy tiers (per-agent) ----
 // How much an agent may do WITHOUT the CEO approving each action. Everything is clamped by the
 // HARD FLOOR below, which no tier can cross.
@@ -1916,6 +1917,53 @@ export function memoryKey(agentId, m) {
 }
 export const memoryText = (m) => `${m?.objective || ""}\n${m?.summary || ""}`.trim();
 
+// ---- own-work recall: the agent's OWN memory, ranked instead of merely recent -------------------
+//
+// What relevance is measured AGAINST, and why it is not simply "the objective".
+//
+// On a construction task the objective IS the work, and it is the query. On a HUNTING round it is not:
+// `investigateObjective` wraps the lens in the standing hunt instructions plus the repository digest.
+// Measured on the `what-would-it-accept` lens over an 80-file digest: the objective is 7,225 characters
+// yielding 173 BM25 query terms, of which the lens contributes 15 — 8.7%. The other 91% ("register",
+// "finding", "probe", "defect", "round", plus every filename in the map) is IDENTICAL every round, and it
+// is also the exact vocabulary every hunt memory is written in. BM25 ADDS score for each query term a
+// document matches, so ranking hunt memories against the whole objective scores them all on the shared
+// boilerplate and orders them by noise — barely better than the recency it replaced.
+//
+// "Objective AND lens" is not a third option. `ragTerms` de-duplicates the query and
+// `investigateObjective` already contains `lens.prompt` verbatim, so appending the lens yields a
+// byte-identical term list. That is asserted in the unit suite rather than left in this comment, because
+// it is exactly the kind of claim that gets re-litigated.
+export function ownWorkQuery(run, objective) {
+  const lens = run?.phase === "investigate" ? run?.currentLens?.prompt : "";
+  return String(lens || objective || "");
+}
+
+// The agent's own prior work, most RELEVANT first. This was `slice(0, 5)` on raw recency with no relevance
+// filter at all, while the ranker for the cross-team block sat on the next line.
+export function rankOwnWork(memory, query, limit = 5) {
+  const items = dedupeMemories(memory || []);
+  if (!items.length) return [];
+  const ranked = rankByRelevance(query, items, memoryText, limit);
+  if (ranked.length) return ranked.map((r) => r.item);
+  // A ranker declining to HAVE an opinion is not the same as it reporting nothing relevant, and the two
+  // must not collapse into one empty list. `ragTerms` drops words of three characters or fewer, so
+  // "Fix the CI" survives it as no terms at all and BM25 can then rank nothing whatever the corpus holds.
+  // Recency is the honest answer THERE, and only there: when the query has real terms and still nothing
+  // scores, the agent genuinely has no relevant prior work and an empty block is the truth.
+  return ragTerms(query).length ? [] : items.slice(0, limit);
+}
+
+// The block exactly as the agent receives it. Ranking and rendering live in ONE exported function so a test
+// cannot exercise the ranking through a path production does not use — that leaves the call site with
+// nothing to get wrong but its arguments. Returns "" when nothing is relevant, and then nothing is sent.
+export function ownWorkBlock(run, agent, objective, limit = 5) {
+  const items = rankOwnWork(agent?.memory, ownWorkQuery(run, objective), limit);
+  if (!items.length) return "";
+  return "Your own recent work — build on it, don't repeat it. To revise a document you wrote before, use read_file with its filename to get the current content, then file_write the SAME title to overwrite it:\n"
+    + items.map((m) => `- "${m.objective}" → ${m.summary}${(m.files || []).length ? ` [files: ${m.files.join(", ")}]` : ""}`).join("\n");
+}
+
 // Embed one string. Returns number[] or null and NEVER throws: every caller treats null as "no vector"
 // and falls back to BM25, so an embedder that is off, slow or missing degrades recall instead of
 // breaking runs.
@@ -2229,12 +2277,12 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
   if ((agent.lessons || []).length) history.push({ role: "user", content:
     "Coaching from the CEO's past feedback on your work — APPLY these; do not repeat the mistakes they point at:\n" +
     agent.lessons.slice(0, 8).map((l) => `- ${l.text}`).join("\n") });
-  // De-duplicated for the same reason shared recall is: re-runs and QA remediation passes of one task
-  // would otherwise fill all five slots with the same objective.
-  const ownWork = dedupeMemories(agent.memory || []).slice(0, 5);
-  if (ownWork.length) history.push({ role: "user", content:
-    "Your own recent work — build on it, don't repeat it. To revise a document you wrote before, use read_file with its filename to get the current content, then file_write the SAME title to overwrite it:\n" +
-    ownWork.map((m) => `- "${m.objective}" → ${m.summary}${(m.files || []).length ? ` [files: ${m.files.join(", ")}]` : ""}`).join("\n") });
+  // De-duplicated for the same reason shared recall is (re-runs and QA remediation passes of one task would
+  // otherwise fill all five slots with the same objective) and now RANKED for the same reason too — see
+  // ownWorkQuery for what "relevant" is scored against on a hunting round, where it is the lens and not this
+  // objective. Recency-only here is the mechanism that sent three hunting rounds to the same subsystem.
+  const ownWork = ownWorkBlock(run, agent, objective);
+  if (ownWork) history.push({ role: "user", content: ownWork });
   // Shared company memory: the most RELEVANT prior work from ACROSS the team — semantic (vector) and
   // lexical (BM25) recall fused, not just this agent's own recency — so work compounds company-wide
   // instead of siloing per agent. Degrades to BM25 alone when no embedder is available.

@@ -113,6 +113,8 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
 | Vectors: `packVec`/`unpackVec` round-trip, `cosine`, `rrfFuse`, `memoryKey`/`memoryText` | units |
 | Hybrid recall — vector+BM25 fusion and every degrade-to-lexical path | units |
 | Recall de-dup: `objectiveSignature`, `dedupeMemories`, summary-over-recency, per-agent scope | units |
+| Own-work recall `ownWorkQuery` / `rankOwnWork` / `ownWorkBlock` — lens-vs-objective query, both empty cases | units |
+| …and that `runAgentTask` actually INJECTS the ranked block (read off the provider stub) | hunt-dispatch |
 | Deliverable ranking (BM25 over filename+content) + `deliverableEmbedText` | units |
 | `chunkDocument` / `deliverableChunks` — boundaries, overlap, size + count caps, title per passage | units |
 | `/api/rag` deliverable retrieval inspection | api |
@@ -1165,6 +1167,17 @@ So the control: clear Ada's memory, reset the lens so the same one is picked, ch
 to authorization again.** Memory was not the cause, and without that run this would have been written up as a
 finding. (`rounds` is not stored either — it is derived as `found + dry`. Resetting the field I first reached for
 would have done nothing.)
+
+**The mechanism it named is now closed, even though it was not the cause.** `ownWork` is ranked rather than sliced:
+`ownWorkBlock` → `rankOwnWork` → the same `rankByRelevance` the cross-team block was already using one line below.
+What it ranks AGAINST is the part worth stating, because "the objective" is the wrong answer on a hunting round —
+`investigateObjective` is 7,225 characters of standing instructions and repository digest yielding 173 BM25 query
+terms, of which the lens contributes 15 (**8.7%**), and the other 91% is identical every round AND is the vocabulary
+every hunt memory is written in. So the query is the LENS on a hunting round and the objective everywhere else.
+"Objective **and** lens" is not a third option: `ragTerms` de-duplicates the query and the objective already contains
+`lens.prompt` verbatim, so appending it yields a byte-identical term list — asserted in units, not just claimed here.
+The lens can now influence own-work recall, which is exactly the thing this paragraph said it could not do even in
+principle.
 
 ### Hypothesis 2: the outline was steering them. ALSO REFUTED — but it was a real defect.
 

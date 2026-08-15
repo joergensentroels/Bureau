@@ -45,6 +45,7 @@ const done = (code) => { try { child?.kill(); } catch {} try { latch.close(); } 
 // `reply` is what the model says next. Set before each run; runs are strictly sequential so there is no interleaving.
 let reply = null;
 const approvals = [];          // every approval Bureau FILED, with the act: tag it stamped on
+let prompts = [];              // every message list Bureau SENT to the provider, newest run last
 const setAction = (a) => { reply = JSON.stringify({ thought: "t", speak: "s", next: { type: "propose_action", ...a } }); };
 
 const latch = createServer((req, res) => {
@@ -55,7 +56,12 @@ const latch = createServer((req, res) => {
     const j = (o) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(o)); };
     if (url === "/api/llm/config") return j({ ok: true, model: "stub-model", provider: "stub", enabled: true });
     if (url === "/api/state") return j({ approvals: [] });
-    if (url === "/api/llm/chat") return j({ ok: true, text: reply, routing: { mode: "local" }, usage: { input: 10, output: 10, total: 20 } });
+    if (url === "/api/llm/chat") {
+      // Every prompt Bureau actually SENT. The own-work section below reads these: what an agent was told is
+      // only checkable from the provider's side, and this stub is the provider.
+      try { prompts.push(JSON.parse(body)?.messages || []); } catch {}
+      return j({ ok: true, text: reply, routing: { mode: "local" }, usage: { input: 10, output: 10, total: 20 } });
+    }
     if (url === "/api/approvals" && req.method === "POST") {
       let b = {}; try { b = JSON.parse(body); } catch {}
       const id = "appr_" + (approvals.length + 1);
@@ -230,6 +236,61 @@ try {
     ok("  it is NOT short-circuited: the unattended reason belongs to hunting rounds only",
       blocked(events).every((x) => !/unattended/.test(x.reason || "")), JSON.stringify(blocked(events)));
   }
+
+  // -------------------------------------------------------------------------------------------
+  // ownWorkQuery/rankOwnWork/ownWorkBlock are unit-tested, and that establishes nothing about whether
+  // runAgentTask CALLS them — the failure this repo keeps meeting. So: seed two memories on one agent,
+  // then run a third task relevant to only ONE of them and read what the agent was actually told.
+  //
+  // The discriminating assertion is the ABSENCE of the irrelevant memory. Under the recency-only code
+  // this replaced, both memories sat inside the same five-slot window and both were injected.
+  console.log("\n# own-work memory reaches the agent RANKED, not merely recent");
+  {
+    const NOTE = (title) => ({ actionType: "note", title, details: "noted", command: "" });
+    // Two runs on the same agent, two unrelated subjects. A completed run always leaves one memory entry
+    // whose objective is the run's objective (persistRun prepends it), so this is how memory gets seeded.
+    setAction(NOTE("checks"));
+    await runAndWatch({ mode: "single", agentId: agent.id, investigate: false, maxTurns: 2,
+      objective: "Review what the existing checks would accept as a passing result." });
+    setAction(NOTE("hiring"));
+    await runAndWatch({ mode: "single", agentId: agent.id, investigate: false, maxTurns: 2,
+      objective: "Draft the quarterly hiring plan for the engineering department." });
+
+    // Floor: the seeding really happened. Without this, every assertion below is about an empty corpus.
+    // Read through /api/org — there is no GET /api/agents, and the first version of this floor asked for
+    // one, got `{}`, and reported an empty memory for an agent that had two entries.
+    const org = (await api("GET", "/api/org")).j;
+    ok("  floor: the org read answered with a roster at all", Array.isArray(org.agents) && org.agents.length > 0,
+      JSON.stringify(org).slice(0, 200));
+    const mem = (org.agents || []).find((a) => a.id === agent.id)?.memory || [];
+    ok("  floor: both subjects are really in the agent's memory now",
+      mem.some((m) => /existing checks would accept/.test(m.objective || ""))
+      && mem.some((m) => /quarterly hiring plan/.test(m.objective || "")),
+      JSON.stringify(mem.map((m) => (m.objective || "").slice(0, 50))));
+    ok("  floor: and they are inside the window the old code would have injected — both, not one",
+      mem.slice(0, 5).filter((m) => /existing checks would accept|quarterly hiring plan/.test(m.objective || "")).length === 2,
+      JSON.stringify(mem.slice(0, 5).map((m) => (m.objective || "").slice(0, 50))));
+
+    // A third task that is about the checks and has nothing to do with hiring.
+    prompts = [];
+    setAction(NOTE("adversary"));
+    const { error } = await runAndWatch({ mode: "single", agentId: agent.id, investigate: false, maxTurns: 2,
+      objective: "Re-read the existing checks and say what a passing result would accept." });
+    ok("  the third run reached the provider", !error && prompts.length > 0, error || "no prompt captured");
+
+    const blocks = prompts.flat().map((m) => String(m?.content || "")).filter((c) => /^Your own recent work/.test(c));
+    // Floor: the block exists at all. "hiring is absent" is trivially true of a prompt with no block in it,
+    // which is exactly how this assertion would go vacuous.
+    ok("  floor: the agent was given an own-work block", blocks.length > 0,
+      "no own-work block in " + prompts.flat().length + " messages");
+    const block = blocks.join("\n");
+    ok("  it carries the memory the objective is about", /existing checks would accept/.test(block),
+      block.slice(0, 400));
+    ok("  and NOT the unrelated one recency would have included", !/quarterly hiring plan/.test(block),
+      block.slice(0, 400));
+  }
+
+  // -------------------------------------------------------------------------------------------
 } catch (e) {
   fail++;
   console.log("✗ the suite threw — " + (e?.stack || e));

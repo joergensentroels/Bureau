@@ -8,7 +8,8 @@ import {
   rankByRelevance, recallSharedMemory, makeSemaphore,
   approvalActType, remoteBlocksApproval, REMOTE_MODE,
   packVec, unpackVec, cosine, rrfFuse, memoryKey, memoryText,
-  objectiveSignature, dedupeMemories, deliverableEmbedText, deliverableTitle,
+  objectiveSignature, dedupeMemories, ownWorkQuery, rankOwnWork, ownWorkBlock,
+  deliverableEmbedText, deliverableTitle,
   chunkDocument, deliverableChunks, modelUnreachable, trimVersions, clientKey, isLoopback,
   startLogTee, webhookBody,
   normalizeFinding, verifyFinding, findingCheckAllowed, npmArgv, agentMayRun, usageSplit, addUsage, tierModelToSend, callCostUsd, repoReadCap, blankReplyReason, NO_THINKING, TURN_TOKENS, TURN_TOKENS_RETRY, usagesForTurn, jsonFailure, JSON_REPLY, checkOutTail, refusalMessage,
@@ -525,6 +526,80 @@ chk("  different objectives keep different signatures", objectiveSignature("Writ
   // Never fuse things we can't identify.
   eq("  entries with no signature are never merged", dedupeMemories([{ objective: "" }, { objective: "" }]).length, 2);
   eq("  tolerates null and empty input", dedupeMemories(null).length, 0);
+}
+
+console.log("# ownWorkBlock — the agent's OWN memory, ranked rather than merely recent");
+{
+  // The real lens from the register, not an invented one: this is the lens that ran the three rounds.
+  const lens = LENSES.find((l) => l.id === "what-would-it-accept");
+  chk("  fixture floor: the real lens is in the register", !!lens && lens.prompt.length > 80);
+  // Ada's memory in STORED order — index 0 is the most recent, which is all the old code looked at.
+  const agent = { id: "ada", memory: [
+    { at: 300, objective: "Audit the authorization guards in test/authz-audit.test.mjs",
+      summary: "Confirmed a missing role guard on the admin route", files: ["notes/authz.md"] },
+    { at: 200, objective: "Write the quarterly hiring plan", summary: "Saved drafts/hiring.md" },
+    { at: 100, objective: "Review what the existing checks would accept as a passing result",
+      summary: "Found a check that an empty match satisfies, so it passes over nothing" },
+  ] };
+  const objective = "Draft the quarterly hiring plan for the engineering department";
+  const huntRun = { phase: "investigate", currentLens: lens };
+
+  // --- what the query IS, which is the whole decision ---
+  chk("  fixture floor: lens and objective are different strings", lens.prompt !== objective);
+  eq("  on a hunting round the query is the LENS", ownWorkQuery(huntRun, objective), lens.prompt);
+  eq("  off a hunting round it is the objective", ownWorkQuery({ phase: "execute" }, objective), objective);
+  eq("  investigate phase but no lens yet → the objective", ownWorkQuery({ phase: "investigate" }, objective), objective);
+
+  // --- "objective AND lens" is a no-op, so it is not a third option. Asserted, not asserted-in-a-comment. ---
+  {
+    const obj = investigateObjective({ findings: [], rejectedFindings: [] }, lens, {},
+      "REPOSITORY MAP\nsrc/roster.mjs (300 lines)\nsrc/server.mjs (2000 lines)");
+    const objTerms = ragTerms(obj), lensTerms = ragTerms(lens.prompt);
+    // Floors first: an empty term list would make every claim below vacuously true.
+    chk("  floor: the lens yields real query terms", lensTerms.length >= 8);
+    chk("  floor: the objective yields strictly more", objTerms.length > lensTerms.length + 20);
+    chk("  the lens's terms really are inside the objective's",
+        lensTerms.every((t) => objTerms.includes(t)));
+    eq("  so terms(objective) === terms(objective + lens) — appending it changes nothing",
+       ragTerms(obj + "\n" + lens.prompt), objTerms);
+    chk("  and the lens is a small minority of them (dilution, measured)",
+        lensTerms.length / objTerms.length < 0.25);
+  }
+
+  // --- the behaviour, through the function production calls, with production's argument shape ---
+  const recencyFirst = dedupeMemories(agent.memory).slice(0, 5)[0];   // exactly the code this replaced
+  chk("  floor: the old recency pick is the authorization memory", /authorization guards/.test(recencyFirst.objective));
+  const block = ownWorkBlock(huntRun, agent, objective);              // production passes no limit
+  chk("  floor: a block was actually produced", block.length > 100 && /^Your own recent work/.test(block));
+  const firstLine = block.split("\n").find((l) => l.startsWith("- "));
+  chk("  the lens picks the memory about what checks ACCEPT: " + firstLine,
+      /existing checks would accept/.test(firstLine));
+  // The negative control, baked in: if this ever reverts to recency, this line goes red.
+  chk("  and NOT the recency pick the old code injected", !/authorization guards/.test(firstLine));
+  chk("  the irrelevant hiring memory is dropped entirely", !/hiring plan/.test(block));
+
+  // Same agent, same memory, a construction objective: now the hiring memory is the relevant one.
+  const built = ownWorkBlock({ phase: "execute" }, agent, objective);
+  chk("  off a hunting round the objective decides instead", /hiring plan/.test(built)
+      && !/authorization guards/.test(built.split("\n").find((l) => l.startsWith("- "))));
+
+  // --- the two ways of having nothing to say, which must not collapse into one ---
+  {
+    // ragTerms drops words of <= 3 characters, so this query yields NO terms at all and BM25 cannot rank.
+    const q = "Fix the CI";
+    eq("  floor: that query really does yield no query terms", ragTerms(q).length, 0);
+    const out = rankOwnWork(agent.memory, q, 5);
+    eq("  a query the ranker cannot express an opinion on falls back to recency", out.length, 3);
+    chk("  and that fallback is recency order", out[0] === agent.memory[0]);
+  }
+  {
+    const q = "photosynthesis chlorophyll wavelengths";
+    chk("  floor: that query does yield real terms", ragTerms(q).length >= 3);
+    eq("  real terms that match nothing → no block, rather than five irrelevant memories",
+       ownWorkBlock({ phase: "execute" }, { memory: agent.memory }, q), "");
+  }
+  eq("  an agent with no memory yields no block", ownWorkBlock({}, { memory: [] }, objective), "");
+  eq("  tolerates a missing agent entirely", ownWorkBlock({}, null, objective), "");
 }
 
 console.log("# startLogTee — the log a boot task leaves behind when nobody is watching");
