@@ -141,6 +141,8 @@ needed) and tears it down after. Exits non-zero on any failure — it's the pre-
 | Approval seam validation (unknown id → 404, bad decision → 400) | api |
 | Role introspection `/api/whoami` (operator + readonly) | api |
 | Per-run paid cap (`maxPaidUsdPerRun`) | api |
+| Unrated paid model: `unratedModelWarning` names model + consequence, `unratedTierModels`, warn-once | units |
+| …and both wirings fire in a booted server — at BOOT (`kimi-k3`) and at RUN START (Latch's model) | hunt-dispatch |
 | Steer endpoint routing+auth | api |
 | SSRF guard (`fetchUrl`, `apiCall`, incl. DNS-pin refusals) | net |
 
@@ -325,7 +327,13 @@ changes — the real corpus has no document long enough to exercise it (largest 
 **Need a live model / Latch (covered by `--e2e`, or manually verified):**
 - Parallel `delegate` end-to-end, `ask_peer` / `consultPeer`, `mcp_call` end-to-end (needs a real MCP
   server in Latch's `data/mcp.json`).
-- `askLlm`, `paidProviderAvailable`, `initLatchAuth` — thin wrappers over the model/Latch.
+- `askLlm`, `paidProviderAvailable`, `initLatchAuth`, `configuredPaidModel` — thin wrappers over the
+  model/Latch. `configuredPaidModel` now also warns when Latch's model has no `MODEL_RATES` entry, and
+  THAT half is covered end-to-end in `hunt-dispatch` (the stub advertises an unrated `fallback`).
+- The **third** rate-table funnel — `warnUnratedModel(meta.model)` on a real paid call — is units-only.
+  It needs `meta.paid`, which needs a funded agent and genuine external routing; the stub in
+  `hunt-dispatch` deliberately leaves every agent at `budgetUsd: 0` so nothing routes paid. The two
+  funnels that fire without money (boot, run start) are both asserted against a booted server.
 - `ragTokens` — trivial tokenizer, exercised transitively by the `rankByRelevance` tests.
 
 **Eval harness internals** (exercised by `eval/run-eval.mjs`, not the unit suite):

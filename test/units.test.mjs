@@ -12,7 +12,7 @@ import {
   deliverableEmbedText, deliverableTitle,
   chunkDocument, deliverableChunks, modelUnreachable, trimVersions, clientKey, isLoopback,
   startLogTee, webhookBody,
-  normalizeFinding, verifyFinding, findingCheckAllowed, npmArgv, agentMayRun, usageSplit, addUsage, tierModelToSend, callCostUsd, repoReadCap, blankReplyReason, NO_THINKING, TURN_TOKENS, TURN_TOKENS_RETRY, usagesForTurn, jsonFailure, JSON_REPLY, checkOutTail, refusalMessage,
+  normalizeFinding, verifyFinding, findingCheckAllowed, npmArgv, agentMayRun, usageSplit, addUsage, tierModelToSend, callCostUsd, unratedModelWarning, warnUnratedModel, unratedTierModels, repoReadCap, blankReplyReason, NO_THINKING, TURN_TOKENS, TURN_TOKENS_RETRY, usagesForTurn, jsonFailure, JSON_REPLY, checkOutTail, refusalMessage,
   LENSES, pickLens, investigateObjective, investigate, seedLenses, activeLenses, bookLensRound,
   normalizeLens, lensParaphrase, addProposedLens, lensProposalObjective, sigWords, postReadGuidance,
   turnBudgetWarning,
@@ -1588,6 +1588,40 @@ console.log("# a paid call is priced by its token split, not by one blended rate
      callCostUsd({ total: 10000, input: null, output: null, estimated: true }, "deepseek-v4-flash", tier), 0.02);
   chk('  cached tokens exceeding input never produce a negative charge',
       callCostUsd({ total: 100, input: 10, cached: 999, output: 0 }, "deepseek-v4-flash", tier) >= 0);
+}
+console.log("# …and an unrated model SAYS SO, instead of failing silently into that flat rate");
+{
+  // The assertion directly above uses "kimi-k3" as its example of an unlisted model. kimi-k3 is not
+  // hypothetical: it is the "heavy" entry in PAID_TIERS, offered in the agent editor's own dropdown. So the
+  // degrade that test documents is reachable today, through the UI, with nothing said about it anywhere.
+  eq('  a rated model warns about nothing', unratedModelWarning("kimi-k2.6"), "");
+  eq('  neither does a blank one', unratedModelWarning(""), "");
+  eq('  nor undefined, which is what a provider reporting no model gives', unratedModelWarning(undefined), "");
+  const w = unratedModelWarning("gpt-5-turbo-imaginary");
+  chk('  floor: an unrated model produces a real warning', w.length > 200);
+  chk('  it NAMES the model', w.includes("gpt-5-turbo-imaginary"));
+  // The consequence is the half that makes it actionable — "unknown model" alone tells an operator nothing.
+  chk('  it names the estimate as flat/blended', /flat blended/i.test(w));
+  chk('  it names the budget cap as wrong, which is the part that costs money', /budgetUsd caps/i.test(w) && /cut off at the wrong spend/i.test(w));
+  chk('  and it says where to fix it', /MODEL_RATES/.test(w));
+
+  // The static, boot-time half: what this build OFFERS vs what it can PRICE. No Latch, no provider, no run.
+  const gaps = unratedTierModels();
+  chk('  floor: the check returns a list at all', Array.isArray(gaps));
+  chk('  kimi-k3 is offered as the "heavy" tier and CANNOT be priced — live, today', gaps.includes("kimi-k3"));
+  // Without this the assertion above would also pass for a function that simply returns every tier model.
+  chk('  and it is discriminating: the rated tiers are absent',
+      !gaps.includes("kimi-k2.6") && !gaps.includes("kimi-k2.7-code"), JSON.stringify(gaps));
+  eq('  a build whose tiers are all rated reports nothing',
+     unratedTierModels({ a: { model: "x" } }, { x: { miss: 1, cached: 1, out: 1 } }), []);
+  eq('  and one whose tiers are all unrated reports each of them once',
+     unratedTierModels({ a: { model: "x" }, b: { model: "x" }, c: { model: "y" } }, {}), ["x", "y"]);
+
+  // Warned once per model per process: a per-call warning is a per-turn warning, and that is not readable.
+  const M = "unrated-fixture-model-" + Date.now();
+  chk('  the first sighting warns', warnUnratedModel(M).includes(M));
+  eq('  the second stays quiet', warnUnratedModel(M), "");
+  eq('  a rated model never warns at all', warnUnratedModel("deepseek-v4-pro"), "");
 }
 console.log("# a hunt refuses at the START if its agent cannot read the repository");
 {

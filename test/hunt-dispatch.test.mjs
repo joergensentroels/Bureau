@@ -54,7 +54,11 @@ const latch = createServer((req, res) => {
   req.on("end", () => {
     const url = req.url.split("?")[0];
     const j = (o) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(o)); };
-    if (url === "/api/llm/config") return j({ ok: true, model: "stub-model", provider: "stub", enabled: true });
+    // `fallback` is what latchHealth reads as the PAID provider. It is advertised here so the run-start
+    // rate-table check has something to look at; no agent in this file is funded, so canUsePaid() is still
+    // false everywhere and nothing actually routes paid.
+    if (url === "/api/llm/config") return j({ ok: true, model: "stub-model", provider: "stub", enabled: true,
+      fallback: { model: "stub-unrated-paid", provider: "stub" } });
     if (url === "/api/state") return j({ approvals: [] });
     if (url === "/api/llm/chat") {
       // Every prompt Bureau actually SENT. The own-work section below reads these: what an agent was told is
@@ -155,7 +159,22 @@ const deliverables = async () => {
 
 try {
   // -------------------------------------------------------------------------------------------
-  console.log("# a hunting round refuses what the review phase says it cannot do");
+  // Lives here because this is the only suite that SPAWNS a real Bureau and keeps its log. units asserts
+  // what unratedTierModels computes; only a booted process can establish that anything calls it, and a
+  // pure function nobody invokes is the same silence it was written to break.
+  console.log("# a model the build offers but cannot price is announced at BOOT");
+  {
+    ok("floor: the server log was captured at all", serverLog.length > 0, "empty server log");
+    ok("boot warned about the unrated paid model, by name", /PAID MODEL "kimi-k3" HAS NO RATE TABLE/.test(serverLog),
+      serverLog.split("\n").slice(0, 12).join("\n"));
+    ok("  and the warning carries the consequence, not just the name",
+      /budgetUsd caps/.test(serverLog) && /flat blended/i.test(serverLog));
+    ok("  the rated tier models are NOT warned about — it discriminates",
+      !/PAID MODEL "kimi-k2\.6"/.test(serverLog) && !/PAID MODEL "kimi-k2\.7-code"/.test(serverLog));
+  }
+
+  // -------------------------------------------------------------------------------------------
+  console.log("\n# a hunting round refuses what the review phase says it cannot do");
   {
     approvals.length = 0;
     setAction({ actionType: "file_write", title: "review-notes", details: "writing up the round",
@@ -291,6 +310,21 @@ try {
   }
 
   // -------------------------------------------------------------------------------------------
+  // The second of the three rate-table funnels, after the boot one at the top: the model LATCH reports as
+  // its paid provider, learned at run start via configuredPaidModel(). Asserted after the runs above have
+  // happened, because that is when it is first knowable. (The third funnel — the model that actually served
+  // a paid call — needs a funded agent and real paid routing, and is covered in units only.)
+  console.log("\n# and a Latch-configured model with no rate table is announced at RUN START");
+  {
+    ok("floor: runs really happened on this server", /Bureau on http/.test(serverLog));
+    ok("the model the stub advertises as its paid provider was warned about, by name",
+      /PAID MODEL "stub-unrated-paid" HAS NO RATE TABLE/.test(serverLog),
+      serverLog.split("\n").filter((l) => /PAID MODEL/.test(l)).join("\n") || "no PAID MODEL line in the log");
+    // Once per model per process, across every run above — not once per run and not once per turn.
+    ok("  and exactly once, across every run in this file",
+      serverLog.split(/PAID MODEL "stub-unrated-paid"/).length - 1 === 1,
+      String(serverLog.split(/PAID MODEL "stub-unrated-paid"/).length - 1) + " occurrences");
+  }
 } catch (e) {
   fail++;
   console.log("✗ the suite threw — " + (e?.stack || e));

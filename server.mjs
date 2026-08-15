@@ -285,6 +285,46 @@ export function callCostUsd(split, model, fallbackTier) {
   return (miss * r.miss + cached * r.cached + split.output * r.out) / 1e6;
 }
 
+// ---- and SAYING SO when a model is not in that table ---------------------------------------------
+//
+// The table above is four hand-entered models. The fallback it degrades to is the flat blended rate the
+// comment above measures as 34x wrong for deepseek-v4-flash — and canUsePaid() gates the per-agent
+// budgetUsd on that number, so an unlisted model does not merely misreport, it enforces the wrong cap.
+// Until now that degrade was completely silent: configure a fifth model in Latch and everything keeps
+// working, wrongly, with nothing anywhere saying so.
+//
+// It is not hypothetical and it does not need a new provider. `kimi-k3` is the "heavy" tier in
+// PAID_TIERS — offered in the agent editor's own dropdown — and it has no MODEL_RATES entry, so every
+// heavy-tier agent is already being billed against the flat rate today. The boot check below names it.
+//
+// Deliberately NOT fixed by inventing a rate: k3's published $3.00/$15.00 per 1M is in the PAID_TIERS
+// comment, but MODEL_RATES needs the CACHED price too and that is not something to guess — a made-up
+// rate would be the same silence with more decimal places. Warn, and let whoever knows the number add it.
+export function unratedModelWarning(model) {
+  const m = String(model || "").trim();
+  if (!m || MODEL_RATES[m]) return "";
+  return `⚠  PAID MODEL "${m}" HAS NO RATE TABLE. Bureau has no published per-token rates for it, so its costs are `
+    + `estimated at a FLAT BLENDED $/1K rate that cannot express the cache-miss / cached / output split. That error is `
+    + `not small: measured at 34x for deepseek-v4-flash. Per-agent budgetUsd caps are enforced against this estimate, `
+    + `so agents on "${m}" will be cut off at the wrong spend — in either direction — and every cost shown for it is `
+    + `wrong by an unknown factor. Add "${m}" to MODEL_RATES in server.mjs (cache-miss, cached and output $/1M).`;
+}
+// Once per model per process. A per-call warning would be a per-turn warning, and a warning nobody can
+// read past is one nobody reads. Returns what it warned, "" when it stayed quiet — so a test can tell
+// "already warned" from "nothing to warn about" instead of watching stderr.
+const _unratedWarned = new Set();
+export function warnUnratedModel(model) {
+  const text = unratedModelWarning(model);
+  if (!text || _unratedWarned.has(String(model).trim())) return "";
+  _unratedWarned.add(String(model).trim());
+  console.warn(text);
+  return text;
+}
+// Every model this build OFFERS, checked against every model it can PRICE, with no I/O and no provider.
+// This is the half that is knowable at boot, and it is the half that is wrong right now.
+export function unratedTierModels(tiers = PAID_TIERS, rates = MODEL_RATES) {
+  return [...new Set(Object.values(tiers).map((t) => t?.model).filter(Boolean))].filter((m) => !rates[m]);
+}
 
 // ---- Autonomy tiers (per-agent) ----
 // How much an agent may do WITHOUT the CEO approving each action. Everything is clamped by the
@@ -2422,6 +2462,10 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
       // meta.usage is overwritten each time, so booking it once charged only the retry and made the failed call
       // free. Measured: a round reported $0.003336 while the eleven uncounted first calls had really cost
       // $0.004372, so the true spend was 2.3x the figure the budget cap was being enforced against.
+      // The last and least escapable of the three checks: whatever Latch REPORTS as having served this call,
+      // which can differ from both the tier's model and the one /api/llm/config announced. This is the exact
+      // line where an unrated model becomes a wrong dollar figure, and paidThisRun is what canUsePaid() caps.
+      warnUnratedModel(meta.model);
       for (const split of usagesForTurn(meta, callTokens)) {
         paidTokensThisRun += split.total;
         paidThisRun += callCostUsd(split, meta.model, paidTier);
@@ -3233,9 +3277,16 @@ export async function paidProviderAvailable() {
 export const tierModelToSend = (tierModel, configuredModel) =>
   (tierModel && configuredModel && tierModel !== configuredModel) ? "" : (tierModel || "");
 
-// What the configured paid provider actually serves, or "" if Latch reports none.
+// What the configured paid provider actually serves, or "" if Latch reports none. Warns here rather than at
+// each of the three run-start call sites: this is the one funnel through which a Latch-configured model
+// becomes known, so a fourth caller added later cannot forget to ask the question.
 export async function configuredPaidModel() {
-  try { const h = await latchHealth(); return (h.ok && h.paid && h.paid.model) || ""; } catch { return ""; }
+  try {
+    const h = await latchHealth();
+    const model = (h.ok && h.paid && h.paid.model) || "";
+    warnUnratedModel(model);
+    return model;
+  } catch { return ""; }
 }
 
 // mode "hunt": the investigate phase on its own. No criteria, no construction, no deliverable — one agent, the
@@ -7053,6 +7104,11 @@ if (isMain) {
   // Safe to add: 'exit' cannot prevent the exit, so this changes no semantics — it only records the
   // code. Distinguishing "stopped cleanly" from "died" is the whole question when you find it restarted.
   process.on("exit", (code) => console.log(`=== Bureau exiting — pid ${process.pid}, code ${code}`));
+  // Needs no Latch, no provider and no run: a model this build offers in its own tier dropdown but cannot
+  // price is knowable here, and saying it at boot is the difference between an operator choosing the heavy
+  // tier informed and finding out from an invoice. The Latch-configured model is checked separately, at run
+  // start (configuredPaidModel) and again on the first paid call that a model actually serves.
+  for (const m of unratedTierModels()) warnUnratedModel(m);
   initDb();
   migrateJsonToDb()                       // one-time import of legacy JSON files → SQLite (reads data-bureau.json or the legacy data-foreman.json)
     .catch((e) => console.error("JSON→SQLite migration:", e.message))
