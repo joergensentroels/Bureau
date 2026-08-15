@@ -22,7 +22,7 @@ const wantUI = process.argv.includes("--ui");
 // hunt-dispatch belongs here rather than in SERVER, and that is not an oversight: it brings its OWN Bureau and its own
 // stub Latch on their own ports, because the shared server below talks to the real Latch and cannot be scripted. Like
 // heartbeat, it spawns rather than imports — "pure" here means "needs nothing already running", not "no subprocesses".
-const PURE = ["decision.test.mjs", "units.test.mjs", "scope.test.mjs", "reasoning-cap.test.mjs", "probe-doctor.test.mjs", "finding-gate.test.mjs", "net.test.mjs", "heartbeat.test.mjs", "readme-demo.test.mjs", "docs.test.mjs", "ui.test.mjs", "action-surface.test.mjs", "hunt-scope.test.mjs", "hunt-dispatch.test.mjs"];
+const PURE = ["decision.test.mjs", "units.test.mjs", "scope.test.mjs", "reasoning-cap.test.mjs", "probe-doctor.test.mjs", "finding-gate.test.mjs", "net.test.mjs", "heartbeat.test.mjs", "readme-demo.test.mjs", "docs.test.mjs", "searchable-source.test.mjs", "ui.test.mjs", "action-surface.test.mjs", "hunt-scope.test.mjs", "hunt-dispatch.test.mjs"];
 const SERVER = ["api.test.mjs", "workspaces.test.mjs", "endpoints.test.mjs", "robustness.test.mjs", "mcp-floor.test.mjs", "mcp-protocol.test.mjs"];
 const LIVE = ["e2e-autonomy.mjs"];
 

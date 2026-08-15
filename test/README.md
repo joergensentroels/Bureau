@@ -16,10 +16,10 @@ node test/run-all.mjs --ui      # holds the throwaway server open so the UI can 
 The runner runs the pure suites always, the server suites only if a server is reachable on
 `BUREAU_PORT` (else it skips them with a note), and the live e2e only with `--e2e`.
 
-Current totals: **<!--fig:pure-assertions-->1,494 pure assertions** across
-**<!--fig:pure-suites-->14 pure suites**, plus **<!--fig:server-assertions-->292 server assertions**
-across **<!--fig:server-suites-->6 server suites** — **<!--fig:assertions-->1,786 headless assertions
-across <!--fig:suites-->20 suites** in all. The live `--e2e` adds 18 more and is not counted here,
+Current totals: **<!--fig:pure-assertions-->1,501 pure assertions** across
+**<!--fig:pure-suites-->15 pure suites**, plus **<!--fig:server-assertions-->292 server assertions**
+across **<!--fig:server-suites-->6 server suites** — **<!--fig:assertions-->1,793 headless assertions
+across <!--fig:suites-->21 suites** in all. The live `--e2e` adds 18 more and is not counted here,
 because it is not part of the pre-push gate.
 
 > Those figures are **checked, not maintained**. `run-all.mjs` compares every number marked
@@ -51,6 +51,7 @@ asserts that every suite there is described below and that nothing described bel
 | `heartbeat.test.mjs` | `tools/heartbeat.mjs`'s four failure paths and its exit-code contract, always against a **local sink**, never a real watcher |
 | `readme-demo.test.mjs` | that the README's pasted `demo-floor` transcript still matches what the tool prints |
 | `docs.test.mjs` | this file and the other docs: the figure checker itself, the suite counts, and the suite list above |
+| `searchable-source.test.mjs` | that no source file contains a raw NUL byte. Ripgrep treats such a file as binary and stops searching at that point, so one invisible character can hide the rest of a file from every grep — including the greps an audit relies on to establish that something has no callers. The sibling repo lost 238 lines of `server.js` this way |
 | `ui.test.mjs` | the browser UI statically — the inline `<script>` parses, and every literal `#id` lookup resolves to an id that exists |
 | `action-surface.test.mjs` | that every action the model can reach has somewhere to land: the schema enum, the prompt catalogue, the synonym table and the dispatcher, derived from `server.mjs` and compared. The four parses live in `test/action-surface.mjs` so `docs.test.mjs` can read the counts TESTING.md pins without importing a suite that asserts at import time |
 | `hunt-scope.test.mjs` | what `huntRefusal` answers — a review round may not write, buy, send or commit |
