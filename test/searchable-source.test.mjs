@@ -19,9 +19,11 @@
 // Checked on raw bytes rather than by asking ripgrep, so the gate holds wherever the suite runs and does
 // not depend on rg being installed. On this machine rg is not even a binary — it is a shell function the
 // tooling injects — so no spawned process can reach it.
-import { readFile, readdir } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { gitSafeEnv } from "../tools/git-env.mjs";
 
 let pass = 0, fail = 0;
 const chk = (name, cond, extra = "") => {
@@ -39,27 +41,33 @@ const NUL = 0x00;
 const TEXT = new Set([".mjs", ".js", ".cjs", ".json", ".md", ".html", ".css", ".txt",
                       ".yml", ".yaml", ".ps1", ".sh", ".sql", ".toml", ".ini", ".xml", ".svg"]);
 
-// Runtime state is not source and is not walked. This file OPENS every path it enumerates, so the skip
-// list is a rule about what the instrument may read, not merely a speed optimisation.
-const SKIP = new Set(["node_modules", ".git", "data", "workspaces", "drafts", "agent-profiles",
-                      "logs", "backups", "dist", "coverage"]);
+// ASK GIT what this repository's source is, rather than walking the directory and hoping a skip list keeps
+// runtime state out. Tracked files plus untracked ones git would track (--others --exclude-standard), so a
+// source file written a minute ago is still checked while everything .gitignore covers is not.
+//
+// The walk this replaces enumerated 458 text files here and 54 in a fresh checkout of the same commit, and
+// the floor below was set at >100 — so it passed on this machine ONLY, and failed in CI and in every clean
+// clone. Both numbers measured 2026-08-16. The gap was not drafts/ being large; it was that the skip list
+// matched directory names EXACTLY while the runtime ones are `drafts-hunt-enforcement-<hex>` — about 120 of
+// them, none matching "drafts". So the instrument was reading ~400 files its own comment declared out of
+// bounds, and the floor was being cleared by exactly those files. It is git that knows which paths are
+// state and which are source, and it does not need a second list kept by hand to say so.
+//
+// Environment-independent by construction: this returns the same set in a fresh clone, in CI and here.
+const listed = (() => {
+  const out = execFileSync("git", ["-C", ROOT, "ls-files", "--cached", "--others", "--exclude-standard"],
+                           { encoding: "utf8", env: gitSafeEnv(), maxBuffer: 8e6 });
+  return out.split("\n").map((l) => l.trim()).filter(Boolean);
+})();
+const files = listed.filter((rel) => TEXT.has(path.extname(rel).toLowerCase()))
+                    .map((rel) => path.join(ROOT, rel));
 
-async function* walk(dir) {
-  for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
-    if (entry.isDirectory() && (entry.name.startsWith(".") || entry.name.startsWith("_backup"))) continue;
-    if (SKIP.has(entry.name)) continue;
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) yield* walk(full);
-    else if (TEXT.has(path.extname(entry.name).toLowerCase())) yield full;
-  }
-}
-
-const files = [];
-for await (const f of walk(ROOT)) files.push(f);
-
-// A non-vacuity floor. Without it, a walk that silently returned nothing would report "no file contains a
-// NUL" — the emptiest possible pass, and the exact shape this repo's notes catalogue repeatedly.
-chk("the walk found source files to check", files.length > 100, `${files.length} text files`);
+// A non-vacuity floor. Without it, a listing that silently returned nothing would report "no file contains
+// a NUL" — the emptiest possible pass, and the exact shape this repo's notes catalogue repeatedly. Set well
+// under the 56 this commit actually carries, because the number it has to survive is a real deletion, not a
+// change of machine: a floor that tracks the true count would fail the next time a file is removed, and a
+// floor calibrated to one directory's contents is what put this suite in CI-red to begin with.
+chk("git named source files to check", files.length > 40, `${files.length} text files`);
 chk("  and reached server.mjs, the file every audit greps",
     files.some((f) => path.basename(f) === "server.mjs"));
 
