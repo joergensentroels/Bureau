@@ -21,9 +21,9 @@ server it did **not** start is probed on an authenticated route first and refuse
 credential does not work there, rather than handed to the suites to fail as 401s (see TESTING.md).
 
 Current totals: **<!--fig:pure-assertions-->1,501 pure assertions** across
-**<!--fig:pure-suites-->15 pure suites**, plus **<!--fig:server-assertions-->292 server assertions**
+**<!--fig:pure-suites-->16 pure suites**, plus **<!--fig:server-assertions-->292 server assertions**
 across **<!--fig:server-suites-->6 server suites** — **<!--fig:assertions-->1,793 headless assertions
-across <!--fig:suites-->21 suites** in all. The live `--e2e` adds 18 more and is not counted here,
+across <!--fig:suites-->22 suites** in all. The live `--e2e` adds 18 more and is not counted here,
 because it is not part of the pre-push gate.
 
 > Those figures are **checked, not maintained**. `run-all.mjs` compares every number marked
@@ -60,6 +60,7 @@ asserts that every suite there is described below and that nothing described bel
 | `action-surface.test.mjs` | that every action the model can reach has somewhere to land: the schema enum, the prompt catalogue, the synonym table and the dispatcher, derived from `server.mjs` and compared. The four parses live in `test/action-surface.mjs` so `docs.test.mjs` can read the counts TESTING.md pins without importing a suite that asserts at import time |
 | `hunt-scope.test.mjs` | what `huntRefusal` answers — a review round may not write, buy, send or commit |
 | `hunt-dispatch.test.mjs` | that the **runner** enforces that scope rather than the prompt merely asking. Brings its own Bureau and its own stub Latch, which is why it is pure despite spawning |
+| `gate-harness.test.mjs` | the runner's own decisions, as pure functions: which port a run picks, and whether a server it did NOT start may be reused — `reuseDiagnosis` is exercised against every status a real server answers with, not just the one that happened to occur |
 
 ### Server — need a running server, no model
 

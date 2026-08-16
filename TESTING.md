@@ -15,7 +15,7 @@ node tools/restore-drill.mjs      # restore the newest snapshot and boot a REAL 
 ```
 
 **Where the suite stands right now: <!--fig:assertions-->1,793 headless assertions across
-<!--fig:suites-->21 suites** (<!--fig:pure-suites-->15 pure, <!--fig:server-suites-->6 server), plus the
+<!--fig:suites-->22 suites** (<!--fig:pure-suites-->16 pure, <!--fig:server-suites-->6 server), plus the
 live `--e2e` at 18/18 and the scripted verifications written up below.
 
 _That figure is an instrument, not a note-to-self._ Every number the docs mark with `<!--fig:…-->` is
