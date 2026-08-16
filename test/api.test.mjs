@@ -326,7 +326,12 @@ const ok = (c, m) => (c ? pass : fail).push(m);
     ok((await api("GET", "/api/memory?q=anything")).j.mode === "hybrid", "memory: defaults to hybrid recall");
 
     // ---- auth gate + role separation ----
-    const RTOK = (() => { try { const dir = process.env.LATCH_DATA || path.join(os.homedir(), "Documents", "LLM server", "openclaw-command-center", "data"); return JSON.parse(readFileSync(path.join(dir, "auth.json"), "utf8")).agentToken || ""; } catch { return ""; } })();
+    // Environment FIRST, Latch's auth.json second. run-all.mjs generates BUREAU_READ_TOKEN when it boots the
+    // server, so these checks run with no Latch beside the repo — they used to be skipped exactly there, which
+    // is CI, so the read-only boundary was verified only on the machine that did not need convincing. The
+    // fallback keeps them working against a server started by hand from a real Latch install.
+    const RTOK = process.env.BUREAU_READ_TOKEN
+      || (() => { try { const dir = process.env.LATCH_DATA || path.join(os.homedir(), "Documents", "LLM server", "openclaw-command-center", "data"); return JSON.parse(readFileSync(path.join(dir, "auth.json"), "utf8")).agentToken || ""; } catch { return ""; } })();
     const bare = (m, p, hdr = {}) => fetch(B + p, { method: m, headers: { "x-workspace": WS, ...hdr } });
     ok((await bare("GET", "/api/org")).status === 401, "auth: no token → 401");
     ok((await bare("GET", "/api/org", { authorization: "Bearer wrong-xyz" })).status === 401, "auth: wrong token → 401");

@@ -188,6 +188,16 @@ async function assertReusable() {
 async function bootServer() {
   if (await serverUp()) { await assertReusable(); return null; }   // vetted reuse — don't double-bind the port
   if (!process.env.OPERATOR_TOKEN) process.env.OPERATOR_TOKEN = "test_" + randomBytes(18).toString("base64url");
+  // And a READ-ONLY token, for the same reason: so the role-separation checks run with no Latch beside the repo.
+  // Without this they were skipped wherever auth.json has no agentToken — which is CI, the one environment that
+  // gates merges. Four assertions, and all four are the boundary that stops a leaked read token from writing:
+  // GET allowed, POST 403, whoami reporting readonly, and an MCP write refused. They ran only on the machine
+  // where nobody needed convincing, and their absence also made the assertion count environment-dependent, which
+  // is what has kept CI red on the doc-figure check since 2026-08-15.
+  //
+  // Set only when we BOOT the server. Against a reused server we did not start, this variable would name a token
+  // that server has never heard of, and the checks would fail for a reason that has nothing to do with the code.
+  if (!process.env.BUREAU_READ_TOKEN) process.env.BUREAU_READ_TOKEN = "readtest_" + randomBytes(18).toString("base64url");
   for (let attempt = 1; ; attempt++) {
     process.env.BUREAU_PORT = String(PORT);
     // BUREAU_LOG=off: a throwaway server must not write into the OPERATOR'S log — server.mjs appends to
