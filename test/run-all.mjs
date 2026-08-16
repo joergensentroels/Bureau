@@ -58,11 +58,17 @@ function run(file) {
       const summary = lines.find((l) => /^(ALL PASS|FAILURES)/.test(l))
         || lines.find((l) => /\d+ passed/.test(l))
         || lines.find((l) => /passed|PASS|FAIL/.test(l)) || "";
+      // A suite may DECLARE that it did not run, which is not the same as a count that could not be read.
+      // The declaration must be explicit — a line beginning SKIPPED, on a clean exit — so a suite that dies
+      // quietly still falls through to the `null` below instead of being excused as a skip.
+      const skipped = code === 0 && /^SKIPPED\b/m.test(out);
       // The assertion count, for the doc-figure check below. `null` — never 0 — when the summary cannot be
       // read: a readout that invents a zero is worse than one that errors, because a zero looks like an
-      // answer. This document records three separate defects of exactly that shape.
+      // answer. This document records three separate defects of exactly that shape. A declared skip is the
+      // one case where 0 is an answer rather than a guess, because the suite said so in its own output.
       const m = summary.match(/(\d+) passed/);
-      resolve({ file, code, summary, out, passed: m ? Number(m[1]) : null });
+      resolve({ file, code, out, skipped, passed: skipped ? 0 : m ? Number(m[1]) : null,
+                summary: summary || (skipped ? "SKIPPED — nothing verified" : "") });
     });
   });
 }
@@ -272,12 +278,28 @@ async function main() {
   const pure = results.filter((r) => PURE.includes(r.file));
   const srv = results.filter((r) => SERVER.includes(r.file));
   const unreadable = results.filter((r) => r.passed === null);
-  const sum = (rs) => rs.reduce((a, r) => a + r.passed, 0);
+  // Suites whose assertion COUNT depends on what is installed beside this repo, and which therefore cannot
+  // appear in a figure the docs pin. They still run, and they can still fail the gate — only their numbers
+  // are left out of the totals.
+  //
+  // reasoning-cap needs the openclaw-command-center checkout as a sibling directory: it exercises the real
+  // Bureau -> Latch -> provider chain, and skips loudly when Latch is absent. So it contributes 11
+  // assertions in a clone that has Latch beside it and 0 in CI, in a linked worktree, or in any fresh
+  // checkout — measured both ways on 2026-08-16. Counting it made `assertions` a number only this machine
+  // could reproduce: CI could not even total the run, because the skip path prints no "N passed" line at
+  // all, so the figure check reported "could not read an assertion count" and the gate was red in every
+  // clean clone. TESTING.md already excludes the live `--e2e` for exactly this reason; this is the same
+  // rule applied to the same kind of suite.
+  const FIGURE_EXCLUDED = new Set(["reasoning-cap.test.mjs"]);
+  const counted = (rs) => rs.filter((r) => !FIGURE_EXCLUDED.has(r.file));
+  const sum = (rs) => counted(rs).reduce((a, r) => a + r.passed, 0);
   if (unreadable.length) {
-    docProblems.push(`could not read an assertion count from: ${unreadable.map((r) => r.file).join(", ")} — the doc-figure check needs every suite to report "N passed"`);
+    docProblems.push(`could not read an assertion count from: ${unreadable.map((r) => r.file).join(", ")} — the doc-figure check needs every suite to report "N passed", or to say SKIPPED`);
   } else if (failed.length) {
     console.log(`\n── doc figures: not checked (a suite failed, so the counts describe a broken run) ──`);
   } else {
+    // Suite COUNTS stay whole — every suite is always attempted, so those figures are the same everywhere.
+    // It is only the assertion sums that drop the environment-dependent ones.
     const observed = { "pure-assertions": sum(pure), "pure-suites": pure.length, "suites": pure.length + srv.length };
     if (up) { observed["server-assertions"] = sum(srv); observed["server-suites"] = srv.length; observed.assertions = sum(pure) + sum(srv); }
     const sources = FIGURE_DOCS.map((f) => {
@@ -287,6 +309,11 @@ async function main() {
     const scope = up ? "" : "  (server suites skipped — full-run figures NOT checked)";
     console.log(`\n── doc figures vs this run${scope} ──`);
     if (!docProblems.length) console.log(`  OK  ${Object.entries(observed).map(([k, v]) => `${k}=${v.toLocaleString("en-US")}`).join("  ")}`);
+    // Named, never silent: a total that quietly leaves suites out is the shape this whole file exists to
+    // stop. Says which ran-but-uncounted and which declared a skip, so the two are told apart on sight.
+    for (const r of results.filter((r) => FIGURE_EXCLUDED.has(r.file)))
+      console.log(`  not counted: ${r.file} — ${r.skipped ? "declared SKIPPED here" : `ran and passed ${r.passed}`}`
+                + `, excluded because its count depends on Latch being beside this repo`);
   }
   if (docProblems.length) {
     console.log(`\n----- DOC FIGURES ARE STALE: ${docProblems.length} problem(s) -----`);
