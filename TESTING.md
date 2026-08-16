@@ -14,8 +14,8 @@ node tools/restore-drill.mjs      # restore the newest snapshot and boot a REAL 
 .\Install-Heartbeat.ps1 -Verify   # the dead-man's switch, against the REAL Bureau/Ollama/watcher
 ```
 
-**Where the suite stands right now: <!--fig:assertions-->1,870 headless assertions across
-<!--fig:suites-->22 suites** (<!--fig:pure-suites-->16 pure, <!--fig:server-suites-->6 server), plus the
+**Where the suite stands right now: <!--fig:assertions-->1,880 headless assertions across
+<!--fig:suites-->23 suites** (<!--fig:pure-suites-->17 pure, <!--fig:server-suites-->6 server), plus the
 live `--e2e` at 18/18 and the scripted verifications written up below.
 
 _That figure is an instrument, not a note-to-self._ Every number the docs mark with `<!--fig:…-->` is
