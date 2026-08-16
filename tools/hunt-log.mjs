@@ -45,14 +45,46 @@ const rows = db.prepare(
   `SELECT ws, at, run_id, json FROM audit WHERE kind = 'run' ${where} ORDER BY at DESC LIMIT ?`
 ).all(...(ws ? [ws, limit] : [limit]));
 
+// When was this database last touched at all? "No new run" and "the server is not writing" are different
+// facts, and the second one is the more urgent of the two.
+const newest = db.prepare("SELECT MAX(at) t FROM audit").get().t || 0;
+
 if (!rows.length) {
-  console.log(ws ? `No runs recorded for workspace "${ws}".` : "No runs recorded at all.");
+  console.log(ws ? `No completed runs recorded for workspace "${ws}".` : "No runs recorded at all.");
   console.log("(This reads the audit table. bureau.log never contains runs, so an empty log proves nothing.)");
+  if (newest) console.log(`Newest audit row anywhere: ${new Date(newest).toISOString().slice(0, 16).replace("T", " ")}`);
   process.exit(0);
 }
 
 const when = (ms) => new Date(ms).toISOString().replace("T", " ").slice(0, 16);
-console.log(`${rows.length} most recent run(s)${ws ? ` in ${ws}` : ""}:\n`);
+// Minutes are the right unit for "did the run I just started write anything" and useless past a day or so —
+// "36010 min ago" is a number nobody reads as five weeks.
+const age = (min) => min < 90 ? `${min} min` : min < 2880 ? `${Math.round(min / 60)} h` : `${Math.round(min / 1440)} days`;
+
+// IN-FLIGHT RUNS FIRST. The kind='run' row is written when a run ENDS, so a hunt that is still working has
+// action rows and no summary — and the listing below, which selects on kind='run', cannot see it. That made
+// "nothing has started" and "it is running right now" print identically, and cost three rounds of re-running
+// this tool at a hunt that had never been triggered. A tool built to answer "what did the hunts do" has to be
+// able to say "one is happening".
+const live = db.prepare(
+  `SELECT a.run_id, MAX(a.at) last, COUNT(*) n FROM audit a
+    WHERE a.run_id IS NOT NULL AND a.run_id <> '' ${ws ? "AND a.ws = ?" : ""}
+      AND NOT EXISTS (SELECT 1 FROM audit b WHERE b.run_id = a.run_id AND b.kind = 'run')
+    GROUP BY a.run_id ORDER BY last DESC LIMIT 5`
+).all(...(ws ? [ws] : []));
+if (live.length) {
+  console.log("IN FLIGHT — activity recorded with no completion row yet:\n");
+  for (const r of live) {
+    const idleMin = Math.round((Date.now() - r.last) / 60000);
+    console.log(`  ${when(r.last)}  ${r.run_id}  ${r.n} action(s), last activity ${age(idleMin)} ago`);
+    // A run that died leaves exactly the same trace as one still working, so this reports the age and lets the
+    // reader judge rather than asserting "running" about a process it never looked at.
+    if (idleMin > 30) console.log("      (quiet for a while — this may have died rather than still be working)");
+  }
+  console.log("");
+}
+
+console.log(`${rows.length} most recent COMPLETED run(s)${ws ? ` in ${ws}` : ""}:\n`);
 
 let ungated = 0;
 for (const r of rows) {
@@ -99,4 +131,13 @@ if (ungated) {
   console.log(`${ungated} of these run(s) were UNGATED — the finding gate could not be built, so no finding could`);
   console.log("be confirmed regardless of what was in the code. Check that the account running Bureau can build a");
   console.log("git worktree of the target repo:  node tools/probe-doctor.mjs <repo>");
+  console.log("");
+}
+
+// Said last because it is what a reader waiting on a run actually needs, and because an unchanged listing is
+// the same picture whether nothing was triggered or the server stopped recording.
+const ageMin = newest ? Math.round((Date.now() - newest) / 60000) : null;
+if (ageMin !== null) {
+  console.log(`Newest audit row anywhere: ${when(newest)} (${age(ageMin)} ago). Nothing has been recorded since,`);
+  console.log("so if you are waiting on a run you just started, it has not written anything yet.");
 }
