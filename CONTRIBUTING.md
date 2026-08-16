@@ -65,9 +65,12 @@ is what makes the rule load-bearing rather than decorative:
 node test/run-all.mjs --serve
 ```
 
-That is **the** command: it self-hosts a throwaway server on :4174 (generating its
-own operator token, so no Latch needed), runs the pure and server suites, and tears
-down. It's what the pre-push hook and CI run.
+That is **the** command: it self-hosts a throwaway server on a free port of its own
+(generating its own operator token, so no Latch needed), runs the pure and server
+suites, and tears down. It's what the pre-push hook and CI run. Set `BUREAU_PORT` if
+you want a known port; otherwise two concurrent runs — several worktrees off one
+clone, each with a pre-push hook — deliberately never share one. See
+[TESTING.md](./TESTING.md) for what sharing one cost.
 
 ```bash
 node test/coverage-audit.mjs   # every exported fn + route must be tested or documented

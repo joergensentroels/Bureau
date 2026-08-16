@@ -14,7 +14,11 @@ node test/run-all.mjs --ui      # holds the throwaway server open so the UI can 
 ```
 
 The runner runs the pure suites always, the server suites only if a server is reachable on
-`BUREAU_PORT` (else it skips them with a note), and the live e2e only with `--e2e`.
+`BUREAU_PORT` (else it skips them with a note), and the live e2e only with `--e2e`. `--serve`
+boots one itself, on **a free port of its own** so that two concurrent runs — several worktrees
+off one clone, each with a pre-push hook — never share a server; set `BUREAU_PORT` to pin it. A
+server it did **not** start is probed on an authenticated route first and refused if that
+credential does not work there, rather than handed to the suites to fail as 401s (see TESTING.md).
 
 Current totals: **<!--fig:pure-assertions-->1,501 pure assertions** across
 **<!--fig:pure-suites-->15 pure suites**, plus **<!--fig:server-assertions-->292 server assertions**
