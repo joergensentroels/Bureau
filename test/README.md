@@ -20,9 +20,9 @@ off one clone, each with a pre-push hook — never share a server; set `BUREAU_P
 server it did **not** start is probed on an authenticated route first and refused if that
 credential does not work there, rather than handed to the suites to fail as 401s (see TESTING.md).
 
-Current totals: **<!--fig:pure-assertions-->1,569 pure assertions** across
+Current totals: **<!--fig:pure-assertions-->1,579 pure assertions** across
 **<!--fig:pure-suites-->17 pure suites**, plus **<!--fig:server-assertions-->311 server assertions**
-across **<!--fig:server-suites-->6 server suites** — **<!--fig:assertions-->1,880 headless assertions
+across **<!--fig:server-suites-->6 server suites** — **<!--fig:assertions-->1,890 headless assertions
 across <!--fig:suites-->23 suites** in all. The live `--e2e` adds 18 more and is not counted here,
 because it is not part of the pre-push gate.
 
