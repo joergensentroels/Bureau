@@ -12,7 +12,8 @@ import {
   deliverableEmbedText, deliverableTitle,
   chunkDocument, deliverableChunks, modelUnreachable, trimVersions, clientKey, isLoopback,
   startLogTee, webhookBody,
-  normalizeFinding, verifyFinding, findingCheckAllowed, withFindingIo, huntVerdict, gateNeverRan, npmArgv, agentMayRun, usageSplit, addUsage, tierModelToSend, callCostUsd, unratedModelWarning, warnUnratedModel, unratedTierModels, repoReadCap, blankReplyReason, NO_THINKING, TURN_TOKENS, TURN_TOKENS_RETRY, usagesForTurn, jsonFailure, JSON_REPLY, checkOutTail, refusalMessage,
+  normalizeFinding, verifyFinding, findingCheckAllowed, withFindingIo, huntVerdict, gateNeverRan,
+  mcpDecodeHeader, mcpHeaderProblem, mcpMetaProblem, mcpIsModern, npmArgv, agentMayRun, usageSplit, addUsage, tierModelToSend, callCostUsd, unratedModelWarning, warnUnratedModel, unratedTierModels, repoReadCap, blankReplyReason, NO_THINKING, TURN_TOKENS, TURN_TOKENS_RETRY, usagesForTurn, jsonFailure, JSON_REPLY, checkOutTail, refusalMessage,
   LENSES, pickLens, investigateObjective, investigate, seedLenses, activeLenses, bookLensRound,
   normalizeLens, lensParaphrase, addProposedLens, lensProposalObjective, sigWords, postReadGuidance,
   turnBudgetWarning,
@@ -2762,6 +2763,81 @@ console.log("# git-env — no spawned git inherits the caller's repository");
       !codeOf('  // sh(' + DQ + 'git' + DQ + ', ["init"])').includes(SPAWNS));
   chk("  CONTROL: and this file, which describes the pattern, is not itself listed as a spawner",
       !names.includes("test/units.test.mjs"), names.join(", "));
+}
+
+console.log("# MCP modern era — the per-request validation, at the edges the wire tests do not reach");
+{
+  const NS = "io.modelcontextprotocol/";
+  const b64 = (s) => "=?base64?" + Buffer.from(s, "utf8").toString("base64") + "?=";
+
+  // mcpDecodeHeader. The sentinel exists because a header value must be visible ASCII, so a tool named
+  // with anything outside that set arrives wrapped. Decoding before comparison is what stops such a name
+  // from reading as a header/body mismatch and being refused.
+  chk("a plain header value passes through untouched", mcpDecodeHeader("list_agents") === "list_agents");
+  chk("a base64 sentinel is decoded", mcpDecodeHeader(b64("list_agents")) === "list_agents");
+  chk("  including a value that is not ASCII at all", mcpDecodeHeader(b64("verden 世界")) === "verden 世界");
+  chk("  and a value that merely CONTAINS the marker is not decoded",
+      mcpDecodeHeader("x=?base64?zzz?=y") === "x=?base64?zzz?=y");
+  chk("  and a malformed sentinel is returned as-is rather than throwing",
+      mcpDecodeHeader("=?base64?not-valid-base64!!?=").length > 0);
+  chk("  and a missing value becomes the empty string, not 'undefined'", mcpDecodeHeader(undefined) === "");
+
+  // mcpHeaderProblem. Returns the reason, or "" when consistent — so "" is the passing state and any
+  // non-empty string is a refusal. Header NAMES are case-insensitive, which is the part a wire test using
+  // node's already-lowercased headers cannot exercise.
+  const call = { method: "tools/call", params: { name: "list_agents" } };
+  const list = { method: "tools/list", params: {} };
+  const good = { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "list_agents" };
+  chk("consistent headers give no problem", mcpHeaderProblem(good, call, "2026-07-28") === "");
+  chk("  and the lookup is case-insensitive on NAMES",
+      mcpHeaderProblem({ "mcp-protocol-version": "2026-07-28", "MCP-METHOD": "tools/call", "mCp-NaMe": "list_agents" },
+                       call, "2026-07-28") === "");
+  chk("  while VALUES stay case-sensitive",
+      mcpHeaderProblem({ ...good, "Mcp-Method": "TOOLS/CALL" }, call, "2026-07-28") !== "");
+  chk("a version header disagreeing with _meta is refused",
+      mcpHeaderProblem({ ...good, "MCP-Protocol-Version": "2025-06-18" }, call, "2026-07-28") !== "");
+  chk("a missing version header is refused", mcpHeaderProblem({ "Mcp-Method": "tools/call" }, call, "2026-07-28") !== "");
+  chk("a missing method header is refused",
+      mcpHeaderProblem({ "MCP-Protocol-Version": "2026-07-28" }, call, "2026-07-28") !== "");
+  chk("tools/call without Mcp-Name is refused",
+      mcpHeaderProblem({ "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call" }, call, "2026-07-28") !== "");
+  chk("  and a base64 Mcp-Name is accepted once decoded",
+      mcpHeaderProblem({ ...good, "Mcp-Name": b64("list_agents") }, call, "2026-07-28") === "");
+  chk("  while a base64 name for a DIFFERENT tool is still refused",
+      mcpHeaderProblem({ ...good, "Mcp-Name": b64("list_sops") }, call, "2026-07-28") !== "");
+  chk("a method that carries no name does not require Mcp-Name",
+      mcpHeaderProblem({ "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" }, list, "2026-07-28") === "");
+
+  // mcpMetaProblem. protocolVersion and clientCapabilities are required on EVERY request; clientInfo is
+  // only SHOULD. An empty capabilities object is a legitimate declaration of "none" and must be accepted —
+  // a truthiness check would reject it and turn a conforming client away.
+  chk("complete _meta gives no problem",
+      mcpMetaProblem({ _meta: { [NS + "protocolVersion"]: "2026-07-28", [NS + "clientCapabilities"]: {} } }) === "");
+  chk("  an EMPTY capabilities object is valid, not falsy-rejected",
+      mcpMetaProblem({ _meta: { [NS + "protocolVersion"]: "2026-07-28", [NS + "clientCapabilities"]: {} } }) === "");
+  chk("missing protocolVersion is a problem",
+      mcpMetaProblem({ _meta: { [NS + "clientCapabilities"]: {} } }) !== "");
+  chk("missing clientCapabilities is a problem",
+      mcpMetaProblem({ _meta: { [NS + "protocolVersion"]: "2026-07-28" } }) !== "");
+  chk("  and null capabilities counts as missing",
+      mcpMetaProblem({ _meta: { [NS + "protocolVersion"]: "2026-07-28", [NS + "clientCapabilities"]: null } }) !== "");
+  chk("clientInfo is optional — SHOULD, not MUST",
+      mcpMetaProblem({ _meta: { [NS + "protocolVersion"]: "2026-07-28", [NS + "clientCapabilities"]: {} } }) === "");
+  chk("no params at all is a problem rather than a throw", mcpMetaProblem(undefined) !== "");
+
+  // mcpIsModern. This is the routing decision, so a wrong answer sends a request to the wrong era rather
+  // than failing loudly — which is why it is tested directly and not only through the wire.
+  chk("a modern version header marks the request modern",
+      mcpIsModern({ method: "tools/list" }, { "mcp-protocol-version": "2026-07-28" }) === true);
+  chk("_meta alone marks it modern, with no header at all",
+      mcpIsModern({ method: "tools/list", params: { _meta: { [NS + "protocolVersion"]: "2026-07-28" } } }, {}) === true);
+  chk("server/discover is modern even with neither", mcpIsModern({ method: "server/discover" }, {}) === true);
+  chk("CONTROL: a legacy initialize is NOT modern — this is what keeps existing clients working",
+      mcpIsModern({ method: "initialize", params: { protocolVersion: "2025-06-18" } }, {}) === false);
+  chk("CONTROL: a legacy version header is NOT modern",
+      mcpIsModern({ method: "tools/list" }, { "mcp-protocol-version": "2025-06-18" }) === false);
+  chk("CONTROL: and a bare tools/call with nothing modern about it is legacy",
+      mcpIsModern({ method: "tools/call", params: { name: "list_agents" } }, {}) === false);
 }
 
 console.log("# huntVerdict — a hunt whose gate never ran must not report the code clean");

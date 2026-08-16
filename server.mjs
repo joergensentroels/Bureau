@@ -5803,8 +5803,88 @@ function cleanTraits(v) {
 // supported, what is not, and why the two newer revisions (2025-11-25, 2026-07-28) are not. If you
 // change MCP_PROTOCOLS, change that file in the same commit: a version claim with no written scope is
 // exactly how this went wrong the first time.
-const MCP_PROTOCOL = "2025-06-18";      // the revision Bureau answers with
-const MCP_PROTOCOLS = [MCP_PROTOCOL];   // every revision Bureau actually implements — add only what you have verified
+const MCP_MODERN = "2026-07-28";        // per-request metadata, no handshake
+const MCP_PROTOCOL = "2025-06-18";      // the legacy revision, kept for clients that open with `initialize`
+const MCP_PROTOCOLS = [MCP_MODERN, MCP_PROTOCOL];   // every revision Bureau actually implements
+const MCP_LEGACY_PROTOCOLS = [MCP_PROTOCOL];        // the subset reachable through the `initialize` handshake
+const MCP_SERVER_INFO = { name: "bureau", version: "1.0.0" };
+const MCP_NS = "io.modelcontextprotocol/";
+
+// A header value may arrive base64-wrapped when it cannot be sent as plain ASCII. The sentinel markers are
+// case-sensitive and the spec requires servers to decode before comparing against the body — so a tool named
+// with a non-ASCII character is not a header mismatch.
+export function mcpDecodeHeader(value) {
+  const s = String(value ?? "");
+  if (!s.startsWith("=?base64?") || !s.endsWith("?=")) return s;
+  try { return Buffer.from(s.slice(9, -2), "base64").toString("utf8"); } catch { return s; }
+}
+
+// The transport mirrors selected body fields into headers so intermediaries can route without parsing the
+// body. That only works if the two agree, so a mismatch is a security control rather than pedantry: a load
+// balancer routing on `Mcp-Name` while the server executes `params.name` is the bug this prevents. Returns
+// the reason, or "" when the headers are consistent with the body.
+export function mcpHeaderProblem(headers, msg, wantVersion) {
+  const h = (name) => {
+    // Header NAMES are case-insensitive; node lowercases them, but a caller may pass a plain object.
+    const key = Object.keys(headers || {}).find((k) => k.toLowerCase() === name);
+    return key === undefined ? undefined : headers[key];
+  };
+  const ver = h("mcp-protocol-version");
+  if (ver === undefined) return "MCP-Protocol-Version header is required";
+  if (String(ver) !== String(wantVersion)) {
+    return `MCP-Protocol-Version header '${ver}' does not match the _meta protocolVersion '${wantVersion}'`;
+  }
+  const method = h("mcp-method");
+  if (method === undefined) return "Mcp-Method header is required";
+  if (String(method) !== String(msg.method)) {
+    return `Mcp-Method header '${method}' does not match body method '${msg.method}'`;
+  }
+  // Mcp-Name mirrors params.name (tools/call, prompts/get) or params.uri (resources/read). Bureau serves
+  // tools only, so tools/call is the one that carries it.
+  if (msg.method === "tools/call") {
+    const name = h("mcp-name");
+    if (name === undefined) return "Mcp-Name header is required for tools/call";
+    if (mcpDecodeHeader(name) !== String(msg.params?.name ?? "")) {
+      return `Mcp-Name header '${mcpDecodeHeader(name)}' does not match body name '${msg.params?.name ?? ""}'`;
+    }
+  }
+  return "";
+}
+
+// Modern requests carry version, identity and capabilities per request — there is no session to remember them
+// in. protocolVersion and clientCapabilities are required on EVERY request; clientInfo is only SHOULD, so its
+// absence is not an error. A missing required field is malformed, not unsupported: -32602, and HTTP 400.
+export function mcpMetaProblem(params) {
+  const meta = params?._meta || {};
+  if (typeof meta[MCP_NS + "protocolVersion"] !== "string") {
+    return `_meta.${MCP_NS}protocolVersion is required on every request`;
+  }
+  if (meta[MCP_NS + "clientCapabilities"] === undefined || meta[MCP_NS + "clientCapabilities"] === null) {
+    return `_meta.${MCP_NS}clientCapabilities is required on every request`;
+  }
+  return "";
+}
+
+// Which era a request belongs to, decided by how the client opened rather than by anything remembered.
+// `server/discover` counts even without _meta so that a discover call missing its metadata is answered as a
+// malformed MODERN request (-32602) rather than as an unknown legacy method (-32601) — the first tells the
+// client what to fix, the second tells it Bureau is legacy, which would no longer be true.
+export function mcpIsModern(msg, headers = {}) {
+  const key = Object.keys(headers).find((k) => k.toLowerCase() === "mcp-protocol-version");
+  const hdr = key === undefined ? "" : String(headers[key]);
+  if (hdr && hdr >= MCP_MODERN) return true;                       // ISO dates compare lexicographically
+  if (typeof msg?.params?._meta?.[MCP_NS + "protocolVersion"] === "string") return true;
+  return msg?.method === "server/discover";
+}
+
+// Every modern result carries resultType, and SHOULD carry serverInfo. Legacy results are left alone: clients
+// of earlier revisions are told to treat an absent resultType as "complete", so adding it there would be noise
+// at best and a surprise to a strict legacy client at worst.
+const mcpResult = (payload) => ({
+  resultType: "complete",
+  ...payload,
+  _meta: { ...(payload._meta || {}), [MCP_NS + "serverInfo"]: MCP_SERVER_INFO },
+});
 const MCP_TOOLS = [
   { name: "list_agents", description: "List the company's agents (name, role, department, manager, autonomy tier).",
     inputSchema: { type: "object", properties: {} },
@@ -5842,8 +5922,13 @@ async function handleMcp(req, res, role = "operator") {
       // server/discover, no resultType on results, and no _meta parsing. Answering with our own revision
       // hands that client an honest choice instead of a silent breakage further in.
       if (m.method === "initialize") {
+        // Negotiated from the LEGACY list, never from MCP_PROTOCOLS. `initialize` is how a client selects
+        // legacy semantics, so answering it with a modern revision would name one that has no handshake at
+        // all — the client would believe it had agreed 2026-07-28 and then keep using a session the modern
+        // revision does not have. A dual-era server picks its behaviour from how the client opened, and this
+        // client opened legacy.
         const asked = m.params?.protocolVersion;
-        const agreed = MCP_PROTOCOLS.includes(asked) ? asked : MCP_PROTOCOL;
+        const agreed = MCP_LEGACY_PROTOCOLS.includes(asked) ? asked : MCP_PROTOCOL;
         return { jsonrpc: "2.0", id, result: { protocolVersion: agreed, capabilities: { tools: {} }, serverInfo: { name: "bureau", version: "1.0.0" } } };
       }
       if (m.method === "ping") return { jsonrpc: "2.0", id, result: {} };
@@ -5856,17 +5941,81 @@ async function handleMcp(req, res, role = "operator") {
         try { const out = await tool.handler(m.params?.arguments || {}); return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] } }; }
         catch (e) { return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "Error: " + e.message }], isError: true } }; }
       }
-      // Unknown methods — `server/discover` among them — must fail as a PLAIN -32601, and that is not an
-      // oversight to tidy up later. It is how a dual-era client works out what Bureau is: it probes with
-      // server/discover and falls back to `initialize` on any error that is NOT a recognized modern one.
-      // Answering -32022 (UnsupportedProtocolVersionError) here would look more current and be strictly
-      // worse — a modern error identifies the server as modern, so the client would retry modern requests
-      // instead of falling back, and never reach the handshake Bureau does implement. test/mcp-protocol.test.mjs
-      // pins this, because "make the error code more modern" is a plausible-looking way to break it.
+      // On the LEGACY path an unknown method is a plain -32601. Modern methods never reach here: mcpIsModern
+      // routes them away, including `server/discover`.
       return { jsonrpc: "2.0", id, error: { code: -32601, message: "method not found: " + m.method } };
     } catch (e) { return { jsonrpc: "2.0", id, error: { code: -32603, message: e.message } }; }
   };
+
+  // ---- the MODERN path (2026-07-28) --------------------------------------------------------------------
+  // Stateless: nothing is remembered between requests, so every one of them is validated on its own terms.
+  // Returns [httpStatus, body] because modern errors are carried by BOTH layers — a client detecting the
+  // server's era inspects the body of a 400, so answering 200 with an error would read as a legacy server.
+  const modern = async (m) => {
+    const id = m && m.id !== undefined ? m.id : null;
+    const err = (status, code, message, data) =>
+      [status, { jsonrpc: "2.0", id, error: { code, message, ...(data ? { data } : {}) } }];
+    if (!m || m.jsonrpc !== "2.0" || typeof m.method !== "string") return err(400, -32600, "invalid request");
+
+    const metaBad = mcpMetaProblem(m.params);
+    if (metaBad) return err(400, -32602, metaBad);
+    const asked = m.params._meta[MCP_NS + "protocolVersion"];
+
+    // Headers before dispatch: a mirrored value that disagrees with the body must never be acted on.
+    const headerBad = mcpHeaderProblem(req.headers, m, asked);
+    if (headerBad) return err(400, -32020, "Header mismatch: " + headerBad);
+
+    if (!MCP_PROTOCOLS.includes(asked)) {
+      return err(400, -32022, "Unsupported protocol version",
+                 { supported: MCP_PROTOCOLS, requested: asked });
+    }
+
+    if (m.method === "server/discover") {
+      return [200, { jsonrpc: "2.0", id, result: mcpResult({
+        supportedVersions: MCP_PROTOCOLS,
+        capabilities: { tools: {} },
+        instructions: "Bureau runs a small company of agents. Tools list and start runs; every action an agent "
+          + "proposes is gated by an approval floor this surface cannot influence.",
+      }) }];
+    }
+    if (m.method === "ping") return [200, { jsonrpc: "2.0", id, result: mcpResult({}) }];
+    if (m.method === "tools/list") {
+      return [200, { jsonrpc: "2.0", id, result: mcpResult({
+        tools: MCP_TOOLS.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
+      }) }];
+    }
+    if (m.method === "tools/call") {
+      const tool = MCP_TOOLS.find((t) => t.name === m.params?.name);
+      if (!tool) return err(400, -32602, "unknown tool: " + (m.params?.name || ""));
+      // Unchanged from the legacy path and deliberately so: the role gate is what keeps this surface from
+      // starting runs on a read-only token, and it is pinned by test/mcp-floor.test.mjs.
+      if (tool.writes && role !== "operator") return err(400, -32602, "operator token required for " + tool.name);
+      try {
+        const out = await tool.handler(m.params?.arguments || {});
+        return [200, { jsonrpc: "2.0", id, result: mcpResult({ content: [{ type: "text", text: JSON.stringify(out, null, 2) }] }) }];
+      } catch (e) {
+        // A tool that throws is a tool result, not a protocol error — the call itself completed.
+        return [200, { jsonrpc: "2.0", id, result: mcpResult({ content: [{ type: "text", text: "Error: " + e.message }], isError: true }) }];
+      }
+    }
+    // 404, not 200. The transport requires the status to distinguish an unimplemented method from a legacy
+    // HTTP+SSE server that does not host this endpoint at all; the JSON-RPC body is what separates them.
+    return err(404, -32601, "method not found: " + m.method);
+  };
+
+  // Arrays are a legacy shape. 2025-06-18 removed batching and 2026-07-28 requires the body to be a single
+  // request or notification, so a batch is answered on the legacy path only and never mixed with modern.
   if (Array.isArray(msg)) { const out = []; for (const m of msg) { const r = await one(m); if (r) out.push(r); } return out.length ? send(res, 200, out) : send(res, 202, ""); }
+
+  if (mcpIsModern(msg, req.headers)) {
+    // A notification is one-way in both eras; the transport wants 202 and no body.
+    if (msg && typeof msg.method === "string" && msg.method.startsWith("notifications/") && msg.id === undefined) {
+      return send(res, 202, "");
+    }
+    const [status, body] = await modern(msg);
+    return send(res, status, body);
+  }
+
   const r = await one(msg);
   return r ? send(res, 200, r) : send(res, 202, "");
 }

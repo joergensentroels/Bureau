@@ -83,21 +83,119 @@ ok(`initialize with no protocolVersion is answered ${EXPECT}`,
   `got ${JSON.stringify(bare.body?.result?.protocolVersion)}`);
 
 // ---------------------------------------------------------------------------
-// Era detection. This is the load-bearing accident.
+// The modern era (2026-07-28), served beside the handshake above.
 // ---------------------------------------------------------------------------
-// A dual-era client probes `server/discover` and "falls back on any error that is not a recognized
-// modern error". Bureau answering a plain -32601 is what makes that fallback fire and land on the
-// `initialize` handshake it does implement. Answering -32022 (UnsupportedProtocolVersionError) would
-// look more up-to-date and be strictly worse: a recognized modern error identifies the server as
-// MODERN, so the client would retry modern requests forever instead of falling back. That is a
-// plausible-looking "improvement", which is why it is pinned rather than left to the comment.
-const disc = await rpc("server/discover", {});
-ok("server/discover fails as a plain -32601, marking Bureau a legacy-era server",
-  disc.body?.error?.code === -32601,
-  `got ${JSON.stringify(disc.body?.error)}`);
-ok("server/discover does NOT return a modern error code (that would misidentify Bureau as modern)",
-  disc.body?.error?.code === -32601 && disc.body?.error?.code !== -32022,
-  `got ${JSON.stringify(disc.body?.error?.code)}`);
+// Bureau is now DUAL-ERA. The spec's compatibility matrix gives Legacy+Dual-era = Works and
+// Modern+Dual-era = Works, and a dual-era server picks its behaviour from how the client opened: a
+// request carrying per-request `_meta` is served statelessly; an `initialize` request selects legacy
+// semantics. Everything above this line is the legacy half and must keep passing unchanged — that is
+// the half a client already talking to Bureau depends on.
+const MODERN = "2026-07-28";
+const NS = "io.modelcontextprotocol/";
+const meta = (version = MODERN) => ({
+  [NS + "protocolVersion"]: version,
+  [NS + "clientInfo"]: { name: "pin", version: "1" },
+  [NS + "clientCapabilities"]: {},
+});
+// Sends the mirrored headers the transport requires, so the happy path here is a CONFORMING client.
+const modern = async (method, params = {}, { version = MODERN, headers = {}, name } = {}) => {
+  const body = { jsonrpc: "2.0", id: 1, method, params: { ...params, _meta: meta(version) } };
+  const h = {
+    "content-type": "application/json",
+    "mcp-protocol-version": version,
+    "mcp-method": method,
+    ...(name !== undefined ? { "mcp-name": name } : {}),
+    ...(TOKEN ? { authorization: `Bearer ${TOKEN}` } : {}),
+    ...headers,
+  };
+  for (const k of Object.keys(h)) if (h[k] === undefined) delete h[k];
+  const r = await fetch(`${B}/mcp`, { method: "POST", headers: h, body: JSON.stringify(body) });
+  return { status: r.status, body: await r.json().catch(() => null) };
+};
+
+const disc = await modern("server/discover");
+ok("server/discover is implemented — the spec says servers MUST implement it",
+  disc.status === 200 && !disc.body?.error, `status ${disc.status} ${JSON.stringify(disc.body).slice(0, 160)}`);
+ok("  and its result carries resultType 'complete'", disc.body?.result?.resultType === "complete",
+  `got ${JSON.stringify(disc.body?.result?.resultType)}`);
+ok("  and names both eras in supportedVersions",
+  (disc.body?.result?.supportedVersions || []).includes(MODERN)
+  && (disc.body?.result?.supportedVersions || []).includes(EXPECT),
+  `got ${JSON.stringify(disc.body?.result?.supportedVersions)}`);
+ok("  and reports serverInfo in _meta, which servers SHOULD do",
+  typeof disc.body?.result?._meta?.[NS + "serverInfo"]?.name === "string",
+  `got ${JSON.stringify(disc.body?.result?._meta)}`);
+
+// resultType is required on EVERY result, not just discover's.
+const mlist = await modern("tools/list");
+ok("tools/list over the modern path carries resultType", mlist.body?.result?.resultType === "complete",
+  `got ${JSON.stringify(mlist.body?.result?.resultType)}`);
+ok("  and still returns the tools", Array.isArray(mlist.body?.result?.tools) && mlist.body.result.tools.length > 0);
+
+// A missing required _meta field is MALFORMED (-32602 + HTTP 400), not unsupported. This is also what
+// makes the era routing safe: a modern method arriving without its metadata is answered as a broken
+// modern request rather than as an unknown legacy method, which would misreport Bureau as legacy-only.
+const noMeta = await fetch(`${B}/mcp`, {
+  method: "POST",
+  headers: { "content-type": "application/json", "mcp-protocol-version": MODERN, "mcp-method": "server/discover", ...(TOKEN ? { authorization: `Bearer ${TOKEN}` } : {}) },
+  body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "server/discover", params: {} }),
+});
+const noMetaBody = await noMeta.json().catch(() => null);
+ok("server/discover without _meta is -32602 AND HTTP 400",
+  noMeta.status === 400 && noMetaBody?.error?.code === -32602,
+  `status ${noMeta.status} ${JSON.stringify(noMetaBody?.error)}`);
+
+// An unsupported version names what IS supported, so the client can retry rather than guess.
+const badVer = await modern("tools/list", {}, { version: "1900-01-01" });
+ok("an unsupported version is -32022 AND HTTP 400", badVer.status === 400 && badVer.body?.error?.code === -32022,
+  `status ${badVer.status} ${JSON.stringify(badVer.body?.error)}`);
+ok("  and lists the versions the server does support",
+  (badVer.body?.error?.data?.supported || []).includes(MODERN)
+  && badVer.body?.error?.data?.requested === "1900-01-01",
+  `got ${JSON.stringify(badVer.body?.error?.data)}`);
+
+// Header/body agreement. The point is not tidiness: an intermediary may route on the header while the
+// server executes the body, so a disagreement must never be acted on.
+const hdrWrong = await modern("tools/list", {}, { headers: { "mcp-method": "tools/call" } });
+ok("a Mcp-Method header disagreeing with the body is -32020 AND HTTP 400",
+  hdrWrong.status === 400 && hdrWrong.body?.error?.code === -32020,
+  `status ${hdrWrong.status} ${JSON.stringify(hdrWrong.body?.error)}`);
+const verWrong = await modern("tools/list", {}, { headers: { "mcp-protocol-version": EXPECT } });
+ok("a MCP-Protocol-Version header disagreeing with _meta is -32020",
+  verWrong.status === 400 && verWrong.body?.error?.code === -32020,
+  `got ${JSON.stringify(verWrong.body?.error)}`);
+const noHdr = await modern("tools/list", {}, { headers: { "mcp-method": undefined } });
+ok("a missing Mcp-Method header is -32020", noHdr.status === 400 && noHdr.body?.error?.code === -32020,
+  `got ${JSON.stringify(noHdr.body?.error)}`);
+
+// tools/call mirrors params.name into Mcp-Name, and the base64 sentinel must be decoded before comparing.
+const callOk = await modern("tools/call", { name: "list_agents", arguments: {} }, { name: "list_agents" });
+ok("tools/call with a matching Mcp-Name succeeds", callOk.status === 200 && !callOk.body?.error,
+  `status ${callOk.status} ${JSON.stringify(callOk.body?.error)}`);
+const callB64 = await modern("tools/call", { name: "list_agents", arguments: {} },
+  { name: "=?base64?" + Buffer.from("list_agents", "utf8").toString("base64") + "?=" });
+ok("  and a base64-sentinel Mcp-Name is decoded before comparison, not rejected",
+  callB64.status === 200 && !callB64.body?.error, `status ${callB64.status} ${JSON.stringify(callB64.body?.error)}`);
+const callBad = await modern("tools/call", { name: "list_agents", arguments: {} }, { name: "list_sops" });
+ok("  while a Mcp-Name naming a DIFFERENT tool is refused -32020", callBad.body?.error?.code === -32020,
+  `got ${JSON.stringify(callBad.body?.error)}`);
+
+// An unimplemented method is 404 on this transport, so a client can tell it apart from an endpoint that
+// is not an MCP endpoint at all. The JSON-RPC body is what separates those two 404s.
+const gone = await modern("resources/read", { uri: "x" });
+ok("an unimplemented modern method is -32601 AND HTTP 404",
+  gone.status === 404 && gone.body?.error?.code === -32601,
+  `status ${gone.status} ${JSON.stringify(gone.body?.error)}`);
+
+// PERMANENT CONTROL, and the one that protects everything a current client relies on: adding the modern
+// era must not have moved the legacy handshake. If this ever fails, the dual-era claim is void.
+const stillLegacy = await initialize(EXPECT);
+ok("CONTROL: the legacy handshake still answers after the modern path was added",
+  stillLegacy.status === 200 && stillLegacy.body?.result?.protocolVersion === EXPECT,
+  `got ${JSON.stringify(stillLegacy.body?.result)}`);
+ok("CONTROL: and a legacy result carries NO resultType (absent means 'complete' to those clients)",
+  stillLegacy.body?.result?.resultType === undefined,
+  `got ${JSON.stringify(stillLegacy.body?.result?.resultType)}`);
 
 // ---------------------------------------------------------------------------
 // The claim and the written scope must not drift apart.
@@ -114,9 +212,20 @@ ok("MCP-PROTOCOL-SUPPORT.md exists (the version claim has a written scope)", doc
 ok(`MCP-PROTOCOL-SUPPORT.md names the revision the server actually answers (${EXPECT})`,
   doc.includes(EXPECT),
   `doc is ${doc.length} bytes and does not contain ${EXPECT}`);
-ok("MCP-PROTOCOL-SUPPORT.md states the newer revisions are NOT implemented",
-  doc.includes("2026-07-28") && doc.includes("2025-11-25"),
-  "both newer revisions should be named and disclaimed");
+// Derived from what the SERVER just said it supports, not from a list kept here by hand. This assertion
+// used to read "states the newer revisions are NOT implemented" and checked only that two strings appeared
+// somewhere in the file — which stayed green through the change that made one of them true, and would have
+// stayed green through a change that made it false again. What has to hold is that the document names every
+// revision the server serves.
+for (const v of disc.body?.result?.supportedVersions || []) {
+  ok(`MCP-PROTOCOL-SUPPORT.md names ${v}, which server/discover reports as supported`, doc.includes(v),
+    `doc is ${doc.length} bytes and does not mention ${v}`);
+}
+ok("  and still names 2025-11-25, the revision between them that Bureau does not implement",
+  doc.includes("2025-11-25"));
+ok("  and the doc does not still claim the modern revision is unimplemented",
+  !/2026-07-28[^\n]*\|\s*not implemented/.test(doc),
+  "the revision table still marks 2026-07-28 as not implemented");
 
 console.log(fail ? `\nFAILURES — ${pass} passed, ${fail} failed` : `\nALL PASS ✓ — ${pass} passed, 0 failed`);
 process.exitCode = fail ? 1 : 0;
