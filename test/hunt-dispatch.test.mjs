@@ -37,9 +37,21 @@ const ok = (name, cond, detail = "") => {
   if (cond) { pass++; console.log("✓ " + name); }
   else { fail++; console.log("✗ " + name + (detail ? "  — " + detail : "")); }
 };
-const done = (code) => { try { child?.kill(); } catch {} try { latch.close(); } catch {} try { rmSync(repo, { recursive: true, force: true }); } catch {}
+const done = async (code) => {
+  // The workspace below calls itself a THROWAWAY and nothing ever threw it away: 128 of them had piled up in
+  // the live datastore, against 6 real ones, because this suite runs on every pre-push. Deleted here rather
+  // than at the end of the happy path, so a failed assertion or an early exit cleans up too — the leak was
+  // invisible precisely because it left no failure behind.
+  //
+  // BEFORE child.kill(): the only way to remove a workspace is through the server's own API, so killing first
+  // makes the delete unsendable. That ordering is the whole reason this is here and not two lines lower.
+  if (typeof WS === "string" && WS && WS !== "default") {
+    try { await api("DELETE", "/api/workspaces/" + WS); } catch {}
+  }
+  try { child?.kill(); } catch {} try { latch.close(); } catch {} try { rmSync(repo, { recursive: true, force: true }); } catch {}
   console.log(fail ? `\nFAILURES — ${pass} passed, ${fail} failed` : `\nALL PASS ✓ — ${pass} passed, 0 failed`);
-  process.exit(code ?? (fail ? 1 : 0)); };
+  process.exit(code ?? (fail ? 1 : 0));
+};
 
 // ---- the stub Latch: provider + approval queue + executor -------------------------------------
 // `reply` is what the model says next. Set before each run; runs are strictly sequential so there is no interleaving.
@@ -111,15 +123,15 @@ const api = async (m, p, body) => {
   let up = false;
   while (Date.now() < deadline && !up) {
     await new Promise((r) => setTimeout(r, 300));
-    if (child.exitCode !== null) { console.error("the test server exited early:\n" + serverLog); done(2); }
+    if (child.exitCode !== null) { console.error("the test server exited early:\n" + serverLog); await done(2); }
     try { up = (await fetch(B + "/")).ok; } catch {}
   }
-  if (!up) { console.error("the test server never came up:\n" + serverLog); done(2); }
+  if (!up) { console.error("the test server never came up:\n" + serverLog); await done(2); }
 }
 
 // Everything runs in a THROWAWAY workspace: these runs write real company state (agents, deliverables, audit rows).
 WS = (await api("POST", "/api/workspaces", { name: "Hunt Enforcement" })).j.id;
-if (!WS) { console.error("could not create a throwaway workspace"); done(2); }
+if (!WS) { console.error("could not create a throwaway workspace"); await done(2); }
 
 // One agent, TRUSTED, allowed everything this file proposes. The tier is the point: file_write is in
 // SAFE_TIER_ACTIONS, so a trusted agent auto-approves it with no human — which is what made an unenforced
@@ -451,4 +463,4 @@ try {
   console.log("server log tail:\n" + serverLog.split("\n").slice(-20).join("\n"));
 }
 
-done();
+await done();

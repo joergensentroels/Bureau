@@ -8,6 +8,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { randomBytes } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -223,6 +224,28 @@ async function main() {
   // pure suites resolve their own ports and must keep seeing the environment they saw before.
   if (await serverUp()) await assertReusable();
 
+  // Which workspaces exist before ANY suite runs. Suites create throwaway workspaces in the LIVE datastore —
+  // they share one data-bureau.db with the running server — and one called its workspace a throwaway for weeks
+  // while never deleting it: 128 accumulated against 6 real ones, and nothing ever failed, because a leak that
+  // only grows a table leaves no red anywhere.
+  //
+  // Taken HERE, before the pure suites, not before the server ones. The first version of this sat after the
+  // pure loop, and its negative control came back "none left behind" while the leak was running — because
+  // hunt-dispatch, the suite that leaks, is PURE (it brings its own Bureau) and had already leaked before the
+  // mark was taken. A check placed after the thing it measures reports clean forever.
+  //
+  // Compared as a SET, not a count: a count says "one more than before" and leaves the reader to find which,
+  // and it reads a concurrent session's deletion as this run being tidy.
+  const wsIds = () => {
+    try {
+      const db = new DatabaseSync(path.join(ROOT, "data-bureau.db"), { readOnly: true });
+      const ids = db.prepare("SELECT id FROM workspaces").all().map((r) => r.id);
+      db.close();
+      return new Set(ids);
+    } catch { return null; }
+  };
+  const wsBefore = wsIds();
+
   const results = [];
   console.log("── pure unit suites ──");
   for (const f of PURE) { const r = await run(f); console.log(`  ${r.code === 0 ? "PASS" : "FAIL"}  ${f}  ${r.summary}`); results.push(r); }
@@ -365,6 +388,39 @@ async function main() {
     for (const p of logProblems) console.log("  ✗ " + p);
   }
 
+  // ---- did this run leave workspaces behind in the live datastore? ---------------------------------
+  // Only ids that are NEW since the mark are reported, so a workspace someone else created before this run
+  // started is not blamed on it. Concurrent sessions can still add one; the message names the ids so the
+  // reader can tell which run they belong to, rather than asserting they are ours.
+  // Not gated on --serve: the suite that leaked is PURE and runs either way, so gating this on the server
+  // suites would have excused exactly the case it exists for.
+  const wsProblems = [];
+  if (wsBefore) {
+    // CONTROL, asserted first: the reader must be able to see a difference at all. If the two snapshots were
+    // taken from something that always returns the same set, "nothing leaked" would be what it says forever.
+    const probe = new Set([...wsBefore, "ws_control_not_real"]);
+    if ([...probe].filter((id) => !wsBefore.has(id)).length !== 1) {
+      wsProblems.push("the leak detector cannot spot an added workspace — this check proves nothing");
+    }
+    const after = wsIds();
+    if (!after) {
+      console.log("\n── workspaces: datastore unreadable after the run — leak NOT checked ──");
+    } else {
+      const leaked = [...after].filter((id) => !wsBefore.has(id));
+      if (leaked.length) {
+        wsProblems.push(`${leaked.length} workspace(s) left in the live datastore: ${leaked.slice(0, 6).join(", ")}`
+          + `${leaked.length > 6 ? ` (+${leaked.length - 6} more)` : ""} — a suite that creates one must delete it, `
+          + `before it kills the server it would have to delete it through.`);
+      } else {
+        console.log(`\n── workspaces: clean — ${wsBefore.size} before, ${after.size} after, none left behind ──`);
+      }
+    }
+  }
+  if (wsProblems.length) {
+    console.log(`\n----- WORKSPACES LEAKED: ${wsProblems.length} problem(s) -----`);
+    for (const p of wsProblems) console.log("  ✗ " + p);
+  }
+
   // Print the FAILING lines, not the last 25. The suites print one line per assertion — units alone prints over
   // eight hundred — so the tail of a failing run is whatever executed last, which is almost never what went wrong.
   // This cost ten days of red CI: the workflow forwarded these 25 lines into a GitHub annotation and the annotation
@@ -380,9 +436,10 @@ async function main() {
   const verdict = failed.length ? failed.length + " SUITE(S) FAILED ✗"
     : docProblems.length ? "ALL SUITES PASS, DOC FIGURES STALE ✗"
     : logProblems.length ? "ALL SUITES PASS, OPERATOR LOG CONTAMINATED ✗"
+    : wsProblems.length ? "ALL SUITES PASS, WORKSPACES LEAKED ✗"
     : "ALL SUITES PASS ✓";
   console.log(`\n═══ ${verdict} — ran ${results.length} ═══`);
-  process.exit(failed.length || docProblems.length || logProblems.length ? 1 : 0);
+  process.exit(failed.length || docProblems.length || logProblems.length || wsProblems.length ? 1 : 0);
 }
 
 // Guarded so gate-harness.test.mjs can import the decision helpers above without running the whole gate
