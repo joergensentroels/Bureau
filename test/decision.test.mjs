@@ -19,8 +19,16 @@ console.log("# autonomy tiers + hard floor");
 for (const a of ["web_search", "file_write", "note", "purchase", "shell", "api_call", "email_draft"])
   chk(`supervised ${a} stays gated`, decideApproval("supervised", a, {}, gr, false), { auto: false, approver: "" });
 // trusted: safe/reversible actions auto; everything else gated
-for (const a of ["web_search", "web_research", "read_file", "file_write", "note"])
+for (const a of ["web_search", "web_research", "read_file", "note"])
   chk(`trusted ${a} auto`, decideApproval("trusted", a, {}, gr, false), { auto: true, approver: "tier:trusted" });
+// file_write was on that list and is deliberately off it now. The PATH is sandboxed — validDeliverableName
+// refuses traversal — but the CONTENT is not, and an agent reads untrusted material by design: repository
+// text, web results, issues. A deliverable is read back into shared memory and the RAG corpus, so a poisoned
+// one reaches later runs. What is gone is the STANDING grant; the operator can still say yes for one run.
+chk("trusted file_write is NOT a standing grant — a deliverable needs the operator",
+  decideApproval("trusted", "file_write", {}, gr, false), { auto: false, approver: "" });
+chk("  but the operator can still auto-approve it for a single run",
+  decideApproval("trusted", "file_write", {}, gr, true), { auto: true, approver: "run" });
 chk("trusted purchase stays gated", decideApproval("trusted", "purchase", cheap, gr, false), { auto: false, approver: "" });
 chk("trusted shell floored", decideApproval("trusted", "shell", {}, gr, false), { auto: false, approver: "" });
 chk("trusted api_call floored", decideApproval("trusted", "api_call", {}, gr, false), { auto: false, approver: "" });

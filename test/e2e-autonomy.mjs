@@ -152,8 +152,16 @@ const deliverableNames = async () => new Set((((await api("GET", "/api/deliverab
   });
   if (!s1) inconclusive("S1: the agent never proposed a file_write in 3 attempts (model choice, not a product failure)");
   else {
-    ok(s1.fw.autoApprove === true, `S1: file_write auto-approved by tier (auto=${s1.fw.autoApprove})`);
-    ok(s1.fw.approver === "tier:trusted", `S1: approver = tier:trusted (got "${s1.fw.approver}")`);
+    // INVERTED 2026-08-16, and the inversion IS the scenario now. file_write left SAFE_TIER_ACTIONS: a
+    // deliverable's PATH is sandboxed (validDeliverableName refuses traversal) but its CONTENT is not, an
+    // agent reads untrusted material by design, and deliverables are read back into shared memory and the
+    // RAG corpus — so a poisoned one reaches later runs. This verifies live what decision.test.mjs asserts
+    // in isolation: the trusted tier alone does not buy an unattended write.
+    //
+    // NOT RUN since the change — this suite needs Latch and a real model and sits outside the pre-push gate,
+    // so treat it as updated-but-unverified until someone runs `--e2e`.
+    ok(s1.fw.autoApprove === false, `S1: file_write is NOT auto-approved by tier alone (auto=${s1.fw.autoApprove})`);
+    ok(s1.fw.approver === "", `S1: no approver — it waits for the operator (got "${s1.fw.approver}")`);
   }
 
   console.log("\n=== S2: policy 'require' overrides tier; approve via the in-app seam → DoD ===");

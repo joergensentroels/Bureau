@@ -191,7 +191,7 @@ try {
     approvals.length = 0;
     setAction({ actionType: "file_write", title: "review-notes", details: "writing up the round",
       command: "# Review notes\n\nA complete finished document, long enough that nothing rewrites it into something else on the way to the dispatcher." });
-    const { events, error } = await runAndWatch({ mode: "hunt", agentId: agent.id, objective: "Look for defects.", maxTurns: 2 });
+    const { events, error } = await runAndWatch({ mode: "hunt", agentId: agent.id, objective: "Look for defects.", maxTurns: 2, autoApprove: true });
     ok("the hunting run started and produced events", !error && events.length > 0, error || types(events).join(","));
     const b = blocked(events);
     ok("file_write was BLOCKED by the runner during the round", b.some((x) => x.actionType === "file_write"),
@@ -212,7 +212,7 @@ try {
                               ["shell", { title: "run the suite", command: "npm test" }]]) {
     approvals.length = 0;
     setAction({ actionType: act, details: "worth doing", ...extra });
-    const { events, error } = await runAndWatch({ mode: "hunt", agentId: agent.id, objective: "Look for defects.", maxTurns: 2 });
+    const { events, error } = await runAndWatch({ mode: "hunt", agentId: agent.id, objective: "Look for defects.", maxTurns: 2, autoApprove: true });
     const b = blocked(events);
     ok(`${act} was blocked, with the unattended reason`, !error && b.some((x) => x.actionType === act && /unattended/.test(x.reason || "")),
       error || JSON.stringify(b) || types(events).join(","));
@@ -225,7 +225,7 @@ try {
   {
     approvals.length = 0;
     setAction({ actionType: "read_repo", title: "sum.mjs", details: "reading the source under review" });
-    const { events, error } = await runAndWatch({ mode: "hunt", agentId: agent.id, objective: "Look for defects.", maxTurns: 2 });
+    const { events, error } = await runAndWatch({ mode: "hunt", agentId: agent.id, objective: "Look for defects.", maxTurns: 2, autoApprove: true });
     ok("read_repo ran: the round still does its own work", !error && results(events).some((r) => r.actionType === "read_repo" && r.ok),
       error || JSON.stringify(results(events)) || types(events).join(","));
     ok("  and nothing in the round was blocked", blocked(events).length === 0, JSON.stringify(blocked(events)));
@@ -238,8 +238,12 @@ try {
     approvals.length = 0;
     setAction({ actionType: "file_write", title: "welcome-note", details: "the deliverable",
       command: "# Welcome\n\nA complete finished document, long enough that nothing rewrites it into something else on the way to the dispatcher." });
+    // autoApprove, because file_write is no longer a STANDING tier grant: a deliverable's path is sandboxed
+    // but its CONTENT is not, and an agent reads untrusted material by design. The run-level flag is the
+    // operator saying so for this run, which is what this control needs — the comparison below is still
+    // hunt-vs-not with everything else equal, since the hunting runs above carry the same flag.
     const { events, error } = await runAndWatch({ mode: "single", agentId: agent.id, investigate: false,
-      objective: "Save a short welcome note as a document.", maxTurns: 2 });
+      autoApprove: true, objective: "Save a short welcome note as a document.", maxTurns: 2 });
     ok("the single run started and produced events", !error && events.length > 0, error || types(events).join(","));
     ok("file_write EXECUTED — the file was really written to disk",
       results(events).some((r) => r.actionType === "file_write" && r.ok && /^drafts\//.test(r.url || "")),
@@ -384,7 +388,7 @@ try {
       ["probe-register", "# Probe register\n\nEvery registered finding from each hunting round, the probe that proved it, and the repository file the defect was found in. A round that opens no repository files is recorded as dry, and the register orders lenses by what they confirm."],
     ]) {
       setAction({ actionType: "file_write", title, details: "seeding the company corpus", command: body });
-      await runAndWatch({ mode: "single", agentId: agent.id, investigate: false, maxTurns: 2, objective: `Save ${title} as a document.` });
+      await runAndWatch({ mode: "single", agentId: agent.id, investigate: false, autoApprove: true, maxTurns: 2, objective: `Save ${title} as a document.` });
     }
     const docs = (await deliverables()) || [];
     ok("  floor: the company corpus has more documents than the RAG block has slots",
@@ -403,7 +407,7 @@ try {
 
     prompts = [];
     setAction({ actionType: "read_repo", title: "sum.mjs", details: "reading the source under review" });
-    const { events, error } = await runAndWatch({ mode: "hunt", agentId: agent.id, objective: "Look for defects.", maxTurns: 2 });
+    const { events, error } = await runAndWatch({ mode: "hunt", agentId: agent.id, objective: "Look for defects.", maxTurns: 2, autoApprove: true });
     ok("  the hunting round ran and reached the provider", !error && prompts.length > 0, error || types(events).join(","));
     ok("  floor: and it ran under the lens we installed, not one of the built-ins",
       events.some((e) => e.type === "lens" && e.data?.lens === LENS_ID),

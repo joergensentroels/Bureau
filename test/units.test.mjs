@@ -379,8 +379,15 @@ const tagged = (act, extra = {}) => ({ contextTags: ["bureau", `act-${act}`, "ag
 for (const act of ["shell", "api_call", "email_draft", "github_repo", "mcp_call"])
   chk(`  blocks ${act}`, remoteBlocksApproval(tagged(act), { autoApproveUnderUsd: 100 }) === true);
 // Safe, reversible, in-sandbox: still approvable remotely (only pending because of the agent's tier).
-for (const act of ["web_search", "web_research", "read_file", "file_write", "note", "ask_peer"])
+for (const act of ["web_search", "web_research", "read_file", "note", "ask_peer"])
   chk(`  allows ${act}`, remoteBlocksApproval(tagged(act), { autoApproveUnderUsd: 100 }) === false);
+// file_write moved WITH SAFE_TIER_ACTIONS, and that coupling is worth stating rather than leaving to be
+// discovered: remoteBlocksApproval is literally `!SAFE_TIER_ACTIONS.has(actType)`, so taking file_write off
+// the tier grant also stopped a REMOTE browser approving it. Kept rather than decoupled, because both point
+// the same way — remote mode exists for browsers trusted less than the host, and a deliverable now wants the
+// operator. If the two ever need to differ, remoteBlocksApproval needs its own list, not a special case.
+chk("  blocks file_write remotely too — it left SAFE_TIER_ACTIONS, and this derives from that set",
+    remoteBlocksApproval(tagged("file_write"), { autoApproveUnderUsd: 100 }) === true);
 // Stricter than the hard floor on purpose: a repo commit is reversible, but it writes outward with
 // Latch's credential, and remote mode is for browsers trusted less than the host.
 chk("  blocks github_file (stricter than the hard floor, deliberately)", remoteBlocksApproval(tagged("github_file"), {}) === true);

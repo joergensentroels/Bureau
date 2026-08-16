@@ -342,7 +342,16 @@ const TIERS = ["supervised", "trusted", "autonomous"];
 // allowlist: a browser holding the operator token can approve a repo-issues read from off-host. That is a
 // read of a repo the OPERATOR configured, not arbitrary reach, and remote mode is documented as defence in
 // depth rather than a boundary — but it is a widening, so it is written down here and in SECURITY.md.
-const SAFE_TIER_ACTIONS = new Set(["web_search", "web_research", "read_file", "read_issues", "file_write", "note", "ask_peer", "register_finding", "ask_stakeholder", "propose_lens", "read_repo", "declined_check"]);
+// file_write is NOT here, and its absence is the deliberate part. It used to be, on the reading that a
+// deliverable is a sandboxed write — true of the FILE (validDeliverableName confines it to drafts/, refusing
+// traversal), and not true of the CONTENT. An agent reads untrusted material by design: repository text, web
+// results, GitHub issues. Those are all marked untrusted now, but marking is advice to a model, not a control.
+// A deliverable is read back into shared memory and the RAG corpus, so a poisoned one reaches later runs —
+// which made "sandboxed" a claim about the path while the payload travelled anyway.
+//
+// The operator can still auto-approve it per run: `autoApprove` on a run is an explicit act with a person
+// behind it. What is gone is the STANDING grant, where a tier alone let it happen unattended.
+const SAFE_TIER_ACTIONS = new Set(["web_search", "web_research", "read_file", "read_issues", "note", "ask_peer", "register_finding", "ask_stakeholder", "propose_lens", "read_repo", "declined_check"]);
 // register_finding is safe-tier deliberately: it takes no real-world action, runs only commands the project itself
 // ships (FINDING_CHECK_ALLOW), and does it in a throwaway worktree. Autonomy is the entire point of the action — a
 // gate that needs the CEO for every claim is a gate nobody runs.
