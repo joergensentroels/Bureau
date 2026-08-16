@@ -10,7 +10,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { withFindingIo, verifyFinding, findingRepo, normalizeFinding } from "../server.mjs";
+import { withFindingIo, verifyFinding, findingRepo, normalizeFinding, gateNeverRan } from "../server.mjs";
 import { gitSafeEnv } from "../tools/git-env.mjs";
 
 let pass = 0, fail = 0;
@@ -143,7 +143,13 @@ try {
     // A repo that is not a repo: the gate must say so rather than throw or silently confirm.
     const notRepo = mkdtempSync(join(tmpdir(), "bureau-gate-norepo-"));
     const out = await withFindingIo(notRepo, async () => "should not run");
-    chk("  a path that is not a git repo is refused with a reason", out.ok === false && /could not make a worktree/.test(out.reason));
+    // Classified by the exported predicate rather than by a copy of the message. This line used to match
+    // /could not make a worktree/ as a literal, and renaming that string on the producing side turned it red
+    // while the behaviour was unchanged — the reason the classifier is shared code now. It also asserts the
+    // stronger property: not merely that SOME reason came back, but that the gate reports this as the machine
+    // failing rather than as a judgement about the finding, which is what keeps a hunt from calling it clean.
+    chk("  a path that is not a git repo is refused, and reported as the gate not running",
+        out.ok === false && gateNeverRan(out.reason));
     chk("  and nothing was left behind", existsSync(notRepo));
     rmSync(notRepo, { recursive: true, force: true });
   }
