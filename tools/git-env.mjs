@@ -21,6 +21,11 @@
 export const GIT_ENV_VARS = [
   "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX", "GIT_COMMON_DIR",
   "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES",
+  // Set by receive-pack, so it reaches a SERVER-side hook rather than pre-push. Named here anyway: the
+  // cost of listing a variable that is usually absent is nothing, and the cost of missing one is a suite
+  // writing into a real repository. Carried over from the superseded practical-pasteur fix, whose list
+  // had this and lacked GIT_CEILING_DIRECTORIES — the union is what neither branch had alone.
+  "GIT_QUARANTINE_PATH",
 ];
 
 // A COPY of `env` with those removed, shaped for execFile/spawn's `env` option.
