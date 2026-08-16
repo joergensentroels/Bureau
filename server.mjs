@@ -1184,6 +1184,32 @@ function emit(run, type, data) {
 // commit — and noise is not free when the context window is 4,096 tokens and the prompt is clipped from the front.
 const HUNT_ACTIONS = new Set(["read_repo", "register_finding", "ask_stakeholder", "note", "propose_lens", "ask_peer", "declined_check"]);
 
+// The one refusal that is NOT a verdict about the finding. Every other reason the gate produces — no claim, no
+// location, a probe that asserts on file text, a probe path escaping the repo — says the finding did not hold.
+// This one says the gate never ran, which is a statement about the machine and about nothing else.
+//
+// It is a shared constant rather than a string matched in two places because the two places must not drift: the
+// producer is withFindingIo and the consumer is huntVerdict below, and a classifier that silently stopped
+// matching would send every gate failure back to reading as "clean".
+//
+// This is not hypothetical. The nightly scheduled hunt ran on 2026-08-14 and 2026-08-15, opened 45 files, formed
+// four findings, and lost all four to `fatal: detected dubious ownership` — git refusing a repository owned by a
+// different user than the service account the run executes as. Both nights reported verdict "clean", which is the
+// same word a run uses when it verified everything and found nothing. ~868,000 tokens a night to be told nothing,
+// in the language of good news.
+const GATE_SETUP_FAILED = "the finding gate could not run against";
+
+// True when the gate never got to judge — the gate broke, so the finding is unproven rather than disproven.
+export const gateNeverRan = (reason) => String(reason || "").startsWith(GATE_SETUP_FAILED);
+
+// A hunt's verdict. "clean" is a claim that the code was examined and nothing survived the gate, so it may only be
+// said when the gate actually ran. If every refusal was a setup failure there is no evidence either way, and the
+// honest word is "ungated" — which the UI renders with its neutral badge, because that is exactly what it is.
+export function huntVerdict(findings = [], rejected = []) {
+  if (findings.length) return "found";
+  return rejected.some((r) => gateNeverRan(r && r.reason)) ? "ungated" : "clean";
+}
+
 // May a hunting round take this action, and if not, what does the agent get told? Returns null when it may — including
 // for every action of every run that is NOT hunting, which is the property this must not break: it narrows one phase,
 // never ordinary company/single work.
@@ -3185,7 +3211,11 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
           } else {
             (run.rejectedFindings || (run.rejectedFindings = [])).push({ ...rec, reason: v.reason });
             emit(run, "findingRejected", { by: who, depth, claim: rec.claim, reason: v.reason, checkOut: v.checkOut || "" });
-            emitAct({ agent: who, depth, actionType: "register_finding", url: rec.where, ok: false, bytes: 0, error: String(v.reason).slice(0, 80) });
+            // 400, not 80. At 80 this read "could not make a worktree of <path>: fatal: detecte" — cut off mid-word,
+            // one character before the diagnosis and nowhere near git's own remedy line, which names the exact
+            // command that fixes it. The audit row is the only surviving record of a scheduled run, so an error
+            // capped below the length of its own cause costs a night's work every time it fires.
+            emitAct({ agent: who, depth, actionType: "register_finding", url: rec.where, ok: false, bytes: 0, error: String(v.reason).slice(0, 400) });
             history.push({ role: "user", content: refusalMessage(v.reason, v.checkOut) });
           }
         }
@@ -3373,15 +3403,20 @@ async function runHunt(run) {
   } catch (e) { return failRun(run, "the hunt failed: " + e.message, { agent: agent.name }); }
   run.tokensSoFar = tokens;
   // A hunt's verdict is what it FOUND. "passed" would be a lie either way: finding nothing is not success, and finding
-  // something is not failure — so it reports the count and lets the operator read it.
-  const verdict = (run.findings || []).length ? "found" : "clean";
+  // something is not failure — so it reports the count and lets the operator read it. And when the GATE could not run,
+  // neither word applies: see huntVerdict, which reports "ungated" rather than letting a broken machine read as clean.
+  const verdict = huntVerdict(run.findings || [], run.rejectedFindings || []);
   const b = await persistRun(run.objective || `hunt: ${repo}`, tokens,
     { agent: agent.name, hush: run.hush, hunt: true, verdict, findings: (run.findings || []).length, refused: (run.rejectedFindings || []).length, rounds: (run.rounds || []).length },
     tally, run.memoryEntries, run.paidTally);
   const paidSpentUsd = Math.round(Object.values(run.paidTally || {}).reduce((s, v) => s + v, 0) * 1e6) / 1e6;
   emit(run, "budget", { runTokens: tokens, totalTokens: b.tokens, ranPaid: !!run.ranPaid, paidTokens: run.paidTokens || 0, orchPaidTokens: run.orchPaidTokens || 0, paidSpentUsd, usage: run.paidUsage || null });
   logAudit({ kind: "run", runId: run.id, agent: agent.name, objective: run.objective || `hunt: ${repo}`,
-    tokens, costUsd: paidSpentUsd || 0, verdict, met: (run.findings || []).length, unmet: 0, total: (run.rounds || []).length,
+    // unmet carries the REFUSED count, not a hardcoded zero. The audit row is the only durable trace a scheduled
+    // run leaves — bureau.log records boots and warnings, never runs — so a literal 0 here erased the fact that
+    // four findings had been formed and thrown away, and left "met 0 / unmet 0" reading as a quiet night.
+    tokens, costUsd: paidSpentUsd || 0, verdict, met: (run.findings || []).length,
+    unmet: (run.rejectedFindings || []).length, total: (run.rounds || []).length,
     decision: run.autoApprove ? "auto" : "you" });
   emit(run, "done", { verdict, findings: (run.findings || []).length, refused: (run.rejectedFindings || []).length });
   run.done = true;
@@ -5276,7 +5311,7 @@ export async function withFindingIo(repo, fn) {
   const base = await mkdtemp(path.join(os.tmpdir(), "bureau-finding-"));
   const wt = path.join(base, "wt");
   const added = await run1("git", ["-C", repo, "worktree", "add", "-q", "--detach", wt, "HEAD"]);
-  if (!added.ok) { await rm(base, { recursive: true, force: true }); return { ok: false, reason: `could not make a worktree of ${repo}: ${added.out.slice(0, 200)}` }; }
+  if (!added.ok) { await rm(base, { recursive: true, force: true }); return { ok: false, reason: `${GATE_SETUP_FAILED} ${repo}: ${added.out.slice(0, 400)}` }; }
 
   // A worktree has no node_modules, and for a project with devDependencies that makes the whole suite red for a
   // reason that has nothing to do with the finding. Measured against 4water: a fresh worktree at HEAD fails

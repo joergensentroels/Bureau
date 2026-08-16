@@ -12,7 +12,7 @@ import {
   deliverableEmbedText, deliverableTitle,
   chunkDocument, deliverableChunks, modelUnreachable, trimVersions, clientKey, isLoopback,
   startLogTee, webhookBody,
-  normalizeFinding, verifyFinding, findingCheckAllowed, npmArgv, agentMayRun, usageSplit, addUsage, tierModelToSend, callCostUsd, unratedModelWarning, warnUnratedModel, unratedTierModels, repoReadCap, blankReplyReason, NO_THINKING, TURN_TOKENS, TURN_TOKENS_RETRY, usagesForTurn, jsonFailure, JSON_REPLY, checkOutTail, refusalMessage,
+  normalizeFinding, verifyFinding, findingCheckAllowed, withFindingIo, huntVerdict, gateNeverRan, npmArgv, agentMayRun, usageSplit, addUsage, tierModelToSend, callCostUsd, unratedModelWarning, warnUnratedModel, unratedTierModels, repoReadCap, blankReplyReason, NO_THINKING, TURN_TOKENS, TURN_TOKENS_RETRY, usagesForTurn, jsonFailure, JSON_REPLY, checkOutTail, refusalMessage,
   LENSES, pickLens, investigateObjective, investigate, seedLenses, activeLenses, bookLensRound,
   normalizeLens, lensParaphrase, addProposedLens, lensProposalObjective, sigWords, postReadGuidance,
   turnBudgetWarning,
@@ -2762,6 +2762,55 @@ console.log("# git-env — no spawned git inherits the caller's repository");
       !codeOf('  // sh(' + DQ + 'git' + DQ + ', ["init"])').includes(SPAWNS));
   chk("  CONTROL: and this file, which describes the pattern, is not itself listed as a spawner",
       !names.includes("test/units.test.mjs"), names.join(", "));
+}
+
+console.log("# huntVerdict — a hunt whose gate never ran must not report the code clean");
+{
+  // WHY. The nightly scheduled hunt ran on 2026-08-14 and 2026-08-15, opened 45 files, formed four findings,
+  // and lost every one to `fatal: detected dubious ownership` — git refusing a repository owned by a different
+  // user than the service account the scheduler runs as. Both nights recorded verdict "clean": the same word a
+  // run uses when the gate DID run and nothing survived it. ~868,000 tokens a night, reported as good news.
+  const judged = { reason: "a finding needs a claim: one sentence naming what is wrong" };
+  const broke  = { reason: "the finding gate could not run against C:/x: fatal: detected dubious ownership" };
+
+  // PERMANENT NEGATIVE CONTROL, asserted FIRST. If the classifier ever widened to match everything, every
+  // assertion below would still pass while the verdict became "ungated" for ordinary refusals — so the property
+  // that has to hold before any other is that a REAL refusal about the finding still reads as clean.
+  chk("CONTROL: a refusal that judged the finding still reports clean", huntVerdict([], [judged]) === "clean");
+  chk("CONTROL: and gateNeverRan says no to it", gateNeverRan(judged.reason) === false);
+  chk("CONTROL: gateNeverRan says no to an empty or missing reason",
+      !gateNeverRan("") && !gateNeverRan(undefined) && !gateNeverRan(null));
+
+  chk("a setup failure reports ungated, not clean", huntVerdict([], [broke]) === "ungated");
+  chk("  one broken gate among judged refusals is enough to withhold clean",
+      huntVerdict([], [judged, broke, judged]) === "ungated");
+  chk("no refusals at all is genuinely clean", huntVerdict([], []) === "clean");
+  chk("a confirmed finding reports found regardless of a broken gate",
+      huntVerdict([{ claim: "x" }], [broke]) === "found");
+}
+
+console.log("# huntVerdict — the classifier is wired to the string production actually emits");
+{
+  // The two halves of this could drift: withFindingIo writes the reason, huntVerdict reads it. Matching a
+  // retyped literal here would keep passing after a rename on the producing side, which is the failure this
+  // pair exists to prevent. So CALL the producer and classify what it really returned.
+  //
+  // A directory that is not a git repository makes `git worktree add` fail, which is the same branch the
+  // dubious-ownership refusal takes — the gate cannot be built, for a reason that is about the machine.
+  const notARepo = mkdtempSync(join(tmpdir(), "bureau-nogit-"));
+  try {
+    const r = await withFindingIo(notARepo, async () => ({ ok: true }));
+    chk("withFindingIo refuses a directory that is not a git repository", r && r.ok === false);
+    chk("  and gateNeverRan classifies the reason IT produced, not one retyped here",
+        gateNeverRan(r && r.reason), String((r || {}).reason || "").slice(0, 90));
+    chk("  so a hunt refused only that way reports ungated",
+        huntVerdict([], [{ reason: (r || {}).reason }]) === "ungated");
+    // The cap that cost the diagnosis: at 80 characters the stored error read
+    // "could not make a worktree of <path>: fatal: detecte" — cut off one character before the word that
+    // names the cause, and nowhere near git's own remedy line.
+    chk("  and the reason is long enough to carry the cause, not just its first word",
+        String((r || {}).reason || "").length > 80);
+  } finally { rmSync(notARepo, { recursive: true, force: true }); }
 }
 
 console.log(`\n${fail === 0 ? "ALL PASS ✓" : "FAILURES ✗"} — ${pass} passed, ${fail} failed`);
