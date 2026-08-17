@@ -696,7 +696,11 @@ function emitResult(run, data) {
   emit(run, "result", data);
   logAudit({ kind: "action", runId: run.id, agentId: run.agentId || "", agent: data.agent || "",
     actionType: data.actionType || "", url: data.url || "", ok: !!data.ok, bytes: data.bytes || 0,
-    error: data.error || "", decision: data.decidedBy || (run.autoApprove ? "auto" : "you") });
+    error: data.error || "", decision: data.decidedBy || (run.autoApprove ? "auto" : "you"),
+    // Opt-in, bounded evidence for the operator who reads this row later. Deliberately NOT `...data`: an
+    // action's payload can be a whole file's contents or an API response body, and the audit is not the place
+    // for either. A caller that wants something to survive names it.
+    ...(data.triage ? { triage: data.triage } : {}) });
 }
 
 // ---------- Latch client (server-side only) ---------------------------------
@@ -3196,7 +3200,13 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
           emitAct({ agent: who, depth, actionType: "register_finding", url: "", ok: false, bytes: 0, error: "no repo configured" });
           history.push({ role: "user", content: "No repository is configured for findings (guardrails.findingRepo), so no claim can be verified here. Mention what you saw in your summary, and do NOT state it as confirmed." });
         } else if (!shape.ok) {
-          emitAct({ agent: who, depth, actionType: "register_finding", url: "", ok: false, bytes: 0, error: "shape" });
+          // The reason, not the bare word "shape". Stored as one indistinguishable token, every malformed finding
+          // in a run collapsed to a single "refused x6: shape" line in hunt-log — six different malformations
+          // reported as one, with the diagnosis available right here and discarded. The wording matches what goes
+          // into rejectedFindings on the next line so the two records read the same.
+          emitAct({ agent: who, depth, actionType: "register_finding", url: "", ok: false, bytes: 0,
+                    error: ("shape: " + shape.reason).slice(0, 400),
+                    triage: findingTriage(body || {}, null) });
           // Counted as a refusal, which it had not been. A malformed finding emitted an audit row and told the
           // agent, but never reached rejectedFindings — so the run summary's `refused` was short by every shape
           // rejection, and a run that proposed seven findings and registered none reported six. The first run
@@ -3233,7 +3243,18 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
             // one character before the diagnosis and nowhere near git's own remedy line, which names the exact
             // command that fixes it. The audit row is the only surviving record of a scheduled run, so an error
             // capped below the length of its own cause costs a night's work every time it fires.
-            emitAct({ agent: who, depth, actionType: "register_finding", url: rec.where, ok: false, bytes: 0, error: String(v.reason).slice(0, 400) });
+            // The reason alone cannot be triaged. "the fix does not make the check pass" is reachable ONLY after
+            // the check failed against the current code AND the fix's anchor was found exactly once — so it means
+            // the agent detected something real and could not repair it, OR its probe was broken in a way that
+            // fails identically before and after. Those two demand opposite responses from a human, and the one
+            // piece of evidence that separates them is the check's own output.
+            //
+            // That output existed here: it went to the model (refusalMessage) and to the live stream (above), and
+            // was dropped from the audit — the only record that outlives a scheduled 3 a.m. run. Measured on
+            // run_b9we0ha_1: seven refusals, five of them at one location, ~1M tokens spent, and every stored row
+            // carrying the same twelve keys with no claim, no check and no output. Nothing was triageable.
+            emitAct({ agent: who, depth, actionType: "register_finding", url: rec.where, ok: false, bytes: 0, error: String(v.reason).slice(0, 400),
+                      triage: findingTriage(rec, v) });
             history.push({ role: "user", content: refusalMessage(v.reason, v.checkOut) });
           }
         }
@@ -5519,6 +5540,32 @@ export const checkOutTail = (out, cap = 700) => {
   const s = String(out == null ? "" : out).trim();
   return s.length > cap ? "…" + s.slice(-cap) : s;
 };
+
+// What has to survive a refusal for a human to act on it, bounded so the audit row stays a row.
+//
+// A refusal's reason names the VERDICT; these name the SUBJECT. Without the claim there is nothing to look up,
+// and without the check's output "the fix does not make the check pass" cannot be told apart from a probe that
+// never ran — the same sentence covers a real defect the agent could not repair and a check with a typo in an
+// import. Both were being written to the same twelve-key row.
+//
+// Returns undefined when there is nothing worth storing, so the caller's `...(data.triage ? …)` spreads nothing
+// and rows that gain no evidence do not gain a key either.
+export function findingTriage(rec, v, caps = {}) {
+  const { claim = 400, check = 400, out = 700 } = caps;
+  const cut = (s, n) => { s = String(s == null ? "" : s).trim(); return s.length > n ? s.slice(0, n) + "…" : s; };
+  const t = {};
+  if (rec && rec.claim) t.claim = cut(rec.claim, claim);
+  if (rec && rec.check) t.check = cut(rec.check, check);
+  if (rec && rec.cls) t.cls = cut(rec.cls, 40);
+  // Already tailed at the source, but capped again here rather than trusted: this is the one field whose size is
+  // set by a subprocess in someone else's repository.
+  if (v && v.checkOut) t.out = checkOutTail(v.checkOut, out);
+  // The three observations are what make the verdict reconstructible — before/after/again as actually measured,
+  // plus the anchor count that decides whether "did not apply" meant absent or ambiguous.
+  if (v && v.obs && typeof v.obs === "object") t.obs = { ...v.obs };
+  else if (rec && rec.obs && typeof rec.obs === "object") t.obs = { ...rec.obs };
+  return Object.keys(t).length ? t : undefined;
+}
 
 // What a refused finding tells the agent. A FUNCTION, not an inline template, for an instrument reason: the first
 // control for "the agent is not shown the output" mutated the inline guard to `false ?` and the suite stayed green,

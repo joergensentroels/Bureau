@@ -103,14 +103,49 @@ for (const r of rows) {
   ).all(r.run_id || "");
   const seen = new Map();
   let broken = 0;
+  const triage = [];
   for (const e of errs) {
     let ej = {}; try { ej = JSON.parse(e.json); } catch {}
     const msg = String(ej.error || "").trim();
     if (!msg) continue;
     seen.set(msg, (seen.get(msg) || 0) + 1);
     if (gateNeverRan(msg) || /^could not make a worktree/.test(msg)) broken++;
+    if (ej.triage) triage.push({ where: ej.url || "", reason: msg, ...ej.triage });
   }
   for (const [msg, n] of seen) console.log(`      ↩ refused x${n}: ${msg}`);
+
+  // The refusals in full, one block each. The deduplicated list above is the right summary and the wrong thing to
+  // act on: five refusals reading "the fix does not make the check pass" at one location collapse to a single line
+  // that names neither what was alleged nor why the check still failed. This prints what the run actually saw.
+  //
+  // Only rows that carry it. Refusals recorded before the triage field existed have nothing to print, and saying
+  // so beats printing an empty block that reads like a refusal with no evidence behind it.
+  if (triage.length) {
+    console.log(`\n      ── ${triage.length} refusal(s) with evidence ──`);
+    for (const t of triage) {
+      console.log(`      ${t.where || "(no location)"} — ${t.reason}`);
+      if (t.claim) console.log(`          claim: ${t.claim}`);
+      if (t.check) console.log(`          check: ${t.check}`);
+      if (t.obs) {
+        // Spelled out, because the field names are only meaningful next to the sequence they record: the check
+        // against current code, then against the fix, then against the reverted fix.
+        const o = t.obs;
+        const bits = [];
+        if (o.before !== undefined) bits.push(`check on current code ${o.before ? "PASSED (so it does not see the defect)" : "failed (it detects something)"}`);
+        if (o.anchor !== undefined) bits.push(`fix anchor matched ${o.anchor}x`);
+        if (o.after !== undefined) bits.push(`check with the fix applied ${o.after ? "passed" : "STILL FAILED"}`);
+        if (o.again !== undefined) bits.push(`check with the fix reverted ${o.again ? "passed (so it is not reading the code)" : "failed"}`);
+        for (const b of bits) console.log(`          · ${b}`);
+      }
+      if (t.out) {
+        console.log(`          the check said:`);
+        for (const line of String(t.out).split("\n")) console.log(`            ${line}`);
+      }
+    }
+  } else if (errs.length) {
+    console.log(`      (no evidence stored with these refusals — recorded before the triage field, so the claim`);
+    console.log(`       and the check's output are gone and this cluster cannot be adjudicated)`);
+  }
 
   // The refusal count is DERIVED from the action rows, not read from the run summary. Runs recorded before the
   // ungated fix stored a hardcoded unmet:0, so trusting the summary would report "refused=0" directly above the

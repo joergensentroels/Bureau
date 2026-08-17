@@ -260,6 +260,48 @@ try {
   }
 
   // -------------------------------------------------------------------------------------------
+  // A refusal has to leave something a human can act on, and only a booted server can establish that it does.
+  //
+  // finding-gate.test.mjs proves findingTriage extracts the right evidence from a REAL refusal object. It cannot
+  // prove anything reads it: the field travels call site -> emitResult -> logAudit -> auditInsert's json column ->
+  // auditQuery's parse -> this endpoint, and a break anywhere in that chain writes a row that looks exactly like
+  // the ones that cost a night's hunting. Measured on run_b9we0ha_1: seven refusals, five at one location, ~1M
+  // tokens, and every stored row carrying twelve keys with no claim and no output. Nothing was triageable.
+  //
+  // A SHAPE rejection is used deliberately: it is refused before any git operation, so this needs no worktree and
+  // no model — while exercising the identical wiring the gate refusals use.
+  console.log("\n# a refused finding is written to the audit with enough evidence to triage it");
+  {
+    const CLAIM = "invitesWithDetail caps the list at 50 rows and says nothing about the rest";
+    // A claim with NO location. normalizeFinding refuses that on shape, and `where` is read from url||details, so
+    // both are left empty. The claim still arrives, which is the point: the evidence must survive a refusal that
+    // happened before the finding was ever run.
+    setAction({ actionType: "register_finding", title: CLAIM, url: "", details: "" });
+    const { events, error } = await runAndWatch({ mode: "hunt", agentId: agent.id,
+      autoApprove: true, objective: "Look for silent truncation in the admin queries.", maxTurns: 2 });
+    ok("the run produced events", !error && events.length > 0, error || types(events).join(","));
+
+    const rows = (await api("GET", "/api/audit?type=register_finding&limit=50")).j.audit || [];
+    const refused = rows.filter((r) => r.ok === false);
+    ok("the refusal reached the audit table at all", refused.length >= 1, JSON.stringify(rows).slice(0, 300));
+    // The reason, not the bare word. Stored as "shape", every malformation in a run collapsed to one
+    // indistinguishable line in tools/hunt-log.mjs — six different defects reported as one.
+    ok("  and it names WHY the shape was refused, not just that it was",
+      refused.some((r) => /^shape: .*location/.test(String(r.error || ""))),
+      JSON.stringify(refused.map((r) => r.error)));
+    ok("  and it carries the claim, so the row says what was alleged",
+      refused.some((r) => r.triage && r.triage.claim === CLAIM),
+      JSON.stringify(refused.map((r) => r.triage)));
+    // The negative control for that assertion. A row is only evidence of forwarding if some OTHER row on the same
+    // server, through the same emitResult, has no triage key — otherwise `triage` might be something every row
+    // gets. file_write above was refused by nothing and passed no triage.
+    const others = ((await api("GET", "/api/audit?type=file_write&limit=50")).j.audit || []);
+    ok("  control: rows that pass no evidence have no triage key, so the field is not free",
+      others.length >= 1 && others.every((r) => !("triage" in r)),
+      `${others.length} file_write rows: ` + JSON.stringify(others.map((r) => Object.keys(r))).slice(0, 200));
+  }
+
+  // -------------------------------------------------------------------------------------------
   console.log("\n# nor is the hard floor's ordinary behaviour changed outside a hunting round");
   {
     approvals.length = 0;

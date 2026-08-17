@@ -10,7 +10,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { withFindingIo, verifyFinding, findingRepo, normalizeFinding, gateNeverRan } from "../server.mjs";
+import { withFindingIo, verifyFinding, findingRepo, normalizeFinding, gateNeverRan, findingTriage } from "../server.mjs";
 import { gitSafeEnv } from "../tools/git-env.mjs";
 
 let pass = 0, fail = 0;
@@ -135,9 +135,50 @@ try {
   {
     // A fix that changes the wrong thing: applies cleanly, check still fails.
     const out = await withFindingIo(repo, (io) => verifyFinding(
-      { claim: "c", class: "B", where: "value.mjs:1", check: CHECK,
+      { claim: "the value is 10 where the suite wants 42", class: "B", where: "value.mjs:1", check: CHECK,
         fix: { file: "value.mjs", find: "export const value = 10;", replace: "export const value = 11;" } }, io));
     chk("  a fix that does not make the check pass is refused", out.result?.ok === false && /does not make the check pass/.test(out.result.reason));
+
+    // ---- what survives the refusal ----------------------------------------------------------------------
+    //
+    // This refusal is the one that cost a night. Five of the seven in run_b9we0ha_1 carried this exact sentence
+    // at one location, and it is REACHABLE ONLY after the check failed against the current code and the fix's
+    // anchor matched exactly once — so it means either a real defect the agent could not repair, or a probe
+    // broken in a way that fails identically before and after. A human needs opposite responses to those two,
+    // and the audit row stored neither the claim nor the check's output, so the cluster could not be judged.
+    //
+    // Fed the REAL refusal object, not a hand-made one. That is the whole point of asserting it here rather than
+    // in units.test.mjs: findingTriage reads named fields off `v`, and a builder looking for a field the gate
+    // does not actually produce returns undefined, writes no key, and leaves every suite green. The failure mode
+    // being guarded is silence, so the assertions below demand specific CONTENT that only a real run supplies.
+    const v = out.result;
+    const t = findingTriage({ claim: "the value is 10 where the suite wants 42", cls: "B", check: CHECK }, v);
+    chk("  the refusal carries triage evidence at all", !!t);
+    chk("  it carries the claim, so the row names what was alleged", t?.claim === "the value is 10 where the suite wants 42");
+    chk("  and the check, so a human can re-run it", t?.check === CHECK);
+    // The fixture's test prints "value is 11, wanted 42" once the wrong fix is applied. Asserting that string
+    // proves the stored output came from the process that ran AFTER the fix — not from the earlier run, and not
+    // from an empty string that would satisfy a mere truthiness check on the field.
+    chk("  and the check's own output, from the run after the fix: " + JSON.stringify(String(t?.out || "").slice(-60)),
+        /value is 11, wanted 42/.test(String(t?.out || "")));
+    chk("  and the observation triple, which is what makes the verdict reconstructible",
+        t?.obs?.before === false && t?.obs?.after === false);
+
+    // NEGATIVE CONTROLS for the three assertions above. Each one is a shape findingTriage can actually be handed
+    // at runtime, and each must come back missing exactly the field the corresponding assertion demands —
+    // otherwise those assertions are satisfied by the builder's defaults rather than by the refusal.
+    chk("  control: nothing to store returns undefined, so an empty row gains no key",
+        findingTriage({}, {}) === undefined && findingTriage(null, null) === undefined);
+    chk("  control: a refusal with no output stores no out field, rather than an empty one",
+        (() => { const c = findingTriage({ claim: "x" }, { reason: "r" }); return !!c && c.claim === "x" && !("out" in c); })());
+    chk("  control: the caps truncate rather than being ignored",
+        (() => { const c = findingTriage({ claim: "y".repeat(900), check: "z".repeat(900) }, null);
+                 return c.claim.length === 401 && c.claim.endsWith("…") && c.check.length === 401; })());
+    // The obs triple is copied, not aliased: the record it comes from is mutated by later turns of the same run.
+    chk("  control: obs is a copy, so a later mutation cannot rewrite the stored evidence",
+        (() => { const src = { before: false, after: false };
+                 const c = findingTriage({ claim: "x" }, { obs: src });
+                 src.after = true; return c.obs.after === false; })());
   }
   {
     // A repo that is not a repo: the gate must say so rather than throw or silently confirm.
