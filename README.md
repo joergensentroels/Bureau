@@ -11,14 +11,29 @@ Bureau is the **control surface**; **[Latch](https://github.com/joergensentroels
 GitHub token, mailbox) and executes the risky actions. Bureau *proposes*; Latch *approves and does*.
 Bureau stores no secrets.
 
-**Why the floor is the point.** Multi-agent orchestration mostly races toward more autonomy — human
-approval is a setting you switch off once you trust the system. Bureau goes the other way: the approval
-floor for `shell`, `api_call`, email, repo creation, over-ceiling purchases and external tool calls is
-**code, not configuration**. No autonomy tier, policy rule, `autoApprove` flag, or API request can lower
-it — and Bureau cannot lower it for itself, because it holds no credentials to act with in the first
-place. The hierarchy is the product; the floor is what makes it safe to leave running.
+**Why the floor is the point.** Multi-agent orchestration mostly races toward more autonomy, and where
+approval survives it is usually a mode you can switch off wholesale. Bureau's approval floor for `shell`,
+`api_call`, email, repo creation, over-ceiling purchases and external tool calls is **code, not
+configuration**. No autonomy tier, policy rule, `autoApprove` flag, or API request can lower it — and
+Bureau cannot lower it for itself, because it holds no credentials to act with in the first place. The
+hierarchy is the product; the floor is what makes it safe to leave running.
 
-**Third parties now describe this as a gap in the frameworks.** 2026 comparisons of the main agent
+**The precise claim is about precedence, not about being alone.** The serious systems do enforce in code
+rather than by asking the model nicely. [`andrewyng/openworker`](https://github.com/andrewyng/openworker)
+decides every consequential tool call in a `PermissionEngine`, does not expose mode-switching as a tool the
+model can call, and pins subagents to read-only — good engineering, and worth reading. The difference is
+**order**. Its full-access mode returns *allowed* before any allowlist is consulted, so in that mode the
+only thing still reaching the human is a write outside a writable root. Bureau evaluates
+`requiresCeoAlways()` **last** — after the tier, after a policy that says *allow*, after run-level
+`autoApprove` — so there is no mode in which a floored action becomes automatic. The claim is therefore not
+"nobody else gates in code". It is **no action class is exempt** — narrower, and checkable:
+`node tools/demo-floor.mjs` sweeps every tier × policy × `autoApprove` combination, and deleting the floor
+turns four independent suites red (`decision`, `units`, `hunt-scope`, `hunt-dispatch`). _(Read from
+`coworker/permissions.py` on 2026-08-17; the four-suite figure re-measured the same day. Competitive claims
+rot — re-read the source before repeating this one.)_
+
+**Third parties describe this as a gap in the frameworks** — the libraries you build *on*, as distinct from
+the finished agent products above, which do ship gates of their own. 2026 comparisons of the main agent
 frameworks — LangGraph, CrewAI, and the merged Microsoft Agent Framework — note that none of them
 natively provides out-of-process security or a pre-dispatch approval gate, and recommend pairing
 whichever you pick with a separate agent control plane for policy, approvals and audit. Bureau plus
