@@ -90,10 +90,20 @@ quietly drops a wrong claim teaches nobody why it was wrong._
      - **That asymmetry is the whole reason elicitation is the interesting mechanism:** it routes to the
        *user*, a tool routes to the *model*. It is the only MCP-native way to do this without breaching the
        floor — which makes it more valuable and strictly harder, not less.
-     - **Spec churn is real:** SEP-2322 (revision 2026-07-28) replaced server-initiated requests with a
-       `resultType: input_required` + `inputRequests` pattern. Bureau's `/mcp` is tools-only, so nothing is
-       broken meanwhile — but it echoes back the client's requested `protocolVersion`, i.e. claims a
-       revision it has not implemented. One-line honesty fix, not a roadmap item.
+     - **Spec churn is real, and the transport half of it is now DONE.** SEP-2322 (revision `2026-07-28`)
+       replaced server-initiated requests with a `resultType: input_required` + `inputRequests` pattern.
+       _Corrected 2026-08-17: this bullet used to end "it echoes back the client's requested
+       `protocolVersion`, i.e. claims a revision it has not implemented — one-line honesty fix, not a
+       roadmap item." Both halves of that are stale._ The echo was fixed weeks ago — `initialize`
+       negotiates from `MCP_LEGACY_PROTOCOLS` and answers with a revision Bureau actually implements — and
+       the fix was not one line: it needed a separate legacy list, because answering `initialize` with a
+       modern revision names a handshake that does not exist. Bureau's `/mcp` now serves **both eras**, and
+       Latch's client speaks both as of the same day, so the two ends of an elicitation flow would at least
+       be talking the right protocol.
+       **That changes nothing about the two blockers above.** `beginRun()` is still fire-and-forget, so
+       there is still no in-flight call to elicit within, and a `decide_approval` tool would still be a
+       floor breach. The protocol was never the hard part; recording it as progress would be the same
+       mistake as the sentence this replaced.
   5. **Land the 4water scheduling case.** Chosen on 2026-08-01 as Bureau's first real external case,
      explicitly *before* publishing — and publishing went first. The ordering slipped, so this is now the
      most valuable non-code item on the list: one real external deployment is worth more than three
