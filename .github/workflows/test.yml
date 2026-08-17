@@ -13,17 +13,22 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      # v5 for the RUNTIME, not for any feature: v4 of both declares `using: node20`, which the runners
-      # force onto node24 anyway and announce as deprecated on every run. v5 is the first major of each
-      # that declares node24 itself. Needs a runner at v2.327.1+, which GitHub-hosted ubuntu-latest is.
+      # v7 on both — current, and the reason to leave v4 was the RUNTIME: v4 of each declares `using: node20`,
+      # which the runners no longer offer. They force it onto node24 and announce it as deprecated on every
+      # run. Read out of each action.yml rather than assumed: v4 is node20, v5/v6/v7 are all node24. Needs a
+      # runner at v2.327.1+, which GitHub-hosted ubuntu-latest is.
       #
-      # v7 is current for both, and v5 is deliberate: it fixes the deprecation and nothing here needs what
-      # the later majors add. The one v5 change worth knowing is setup-node's — it now caches automatically
-      # when package.json carries a `packageManager` field. This repo has no such field (and no
-      # dependencies at all), so that behaviour is off; whoever adds one should decide about
-      # `package-manager-cache` at the same time.
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      # What the majors after v4 change that could touch this workflow, checked rather than skimmed:
+      #   checkout    v6 moves credentials to a separate file; v7 blocks checking out a FORK PR under
+      #               `pull_request_target` and `workflow_run`. This one triggers on `push` and
+      #               `pull_request`, so that restriction does not reach it. Nothing here sets fetch-depth,
+      #               and the shallow default is unchanged — the suites do not read git history.
+      #   setup-node  v5 added automatic caching when package.json carries a `packageManager` field, and v6
+      #               narrowed that to npm only. This repo has no such field and no dependencies at all, so
+      #               it is off either way. v7 adds cache outputs and drops a dummy NODE_AUTH_TOKEN export;
+      #               nothing here publishes.
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"   # node:sqlite (DatabaseSync) + node --test
       - name: Run tests (pure + server, self-hosted)
