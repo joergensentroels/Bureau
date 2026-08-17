@@ -117,8 +117,13 @@ for (const r of rows) {
   // four refusals it just printed. The older prefix is matched alongside gateNeverRan for the same reason —
   // history was written under the old wording and does not get rewritten.
   if (errs.length && Number(j.unmet || 0) !== errs.length) {
-    console.log(`      (summary says refused=${j.unmet ?? "?"}; ${errs.length} refusal(s) are actually recorded — `
-              + `this run predates the fix that stopped hardcoding that field)`);
+    // States the disagreement; does NOT name a cause. This line used to assert "this run predates the fix
+    // that stopped hardcoding that field", which was true of the old rows it was written against and FALSE
+    // of the first run after the gate was repaired — that one said 6 with 7 recorded because shape
+    // rejections never reached rejectedFindings at all. A confident wrong reason is worse than no reason:
+    // it stops the reader looking, which is exactly how the undercount survived to be printed.
+    console.log(`      (summary says refused=${j.unmet ?? "?"}; ${errs.length} refusal(s) are recorded on the `
+              + `actions — the counts disagree, and this tool does not know which is right)`);
   }
   if (broken && v !== "ungated") {
     console.log(`      ⚠ recorded as "${v}" although ${broken} refusal(s) were the GATE FAILING, not a judgement.`);

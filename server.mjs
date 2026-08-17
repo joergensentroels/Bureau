@@ -3197,6 +3197,14 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
           history.push({ role: "user", content: "No repository is configured for findings (guardrails.findingRepo), so no claim can be verified here. Mention what you saw in your summary, and do NOT state it as confirmed." });
         } else if (!shape.ok) {
           emitAct({ agent: who, depth, actionType: "register_finding", url: "", ok: false, bytes: 0, error: "shape" });
+          // Counted as a refusal, which it had not been. A malformed finding emitted an audit row and told the
+          // agent, but never reached rejectedFindings — so the run summary's `refused` was short by every shape
+          // rejection, and a run that proposed seven findings and registered none reported six. The first run
+          // after the gate was repaired said 6 with 7 recorded, which is how this surfaced.
+          //
+          // It also belongs in the ALREADY REFUSED block the next turn reads: an agent that cannot see its
+          // malformed attempt was refused is free to send the same shape again.
+          (run.rejectedFindings || (run.rejectedFindings = [])).push({ ...(body || {}), reason: "shape: " + shape.reason });
           history.push({ role: "user", content: "That finding was not registered: " + shape.reason + ". Fix the shape and try again, or move on." });
         } else {
           setAgentState(agent.id, "waiting", "verifying a finding…");
