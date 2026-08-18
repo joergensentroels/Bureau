@@ -647,9 +647,40 @@ function loadWorkspaces() {
 const wsExists = (id) => WORKSPACES.some((w) => w.id === id);
 
 // Append an entry to the provenance / audit log — a direct, uncapped table insert (much cheaper than
-// rewriting the whole org, and full history is retained). Safe to fire-and-forget.
+// rewriting the whole org, and full history is retained). Fire-and-forget by design: a failed audit
+// write must never abort a real action, and all 26 call sites treat it that way (none awaits it).
+//
+// But it USED TO FAIL SILENTLY, and this table is not a diagnostic — it is the only durable record of
+// what agents did. tools/hunt-log.mjs reads it, /api/audit serves it, and the triage evidence on a
+// refused finding lives in it. If the insert throws (a locked database, WAL contention, a full disk)
+// the action still happened and no trace of it exists.
+//
+// That is the same shape as the log tee that went quiet for two days, on a surface that matters more:
+// the tee is how you SEE the system, this is how you can prove what it DID. And it is worse in one
+// respect — an empty audit table and a failing audit writer print identically, which is precisely the
+// reading that cost two days. `logAudit` even returns a promise, so it LOOKS like something whose
+// outcome you could await, and it can never report one.
+//
+// So: still swallowed, still non-fatal, but counted and announced. Once on stderr — a line per failed
+// insert would flood the channel during exactly the contention that caused it — and then countable, so
+// "is my audit trail complete" is a question with an answer instead of an inference from an absence.
+let auditDropped = 0;
+let auditDropReported = false;
+export function auditDropCount() { return auditDropped; }
 function logAudit(entry) {
-  try { auditInsert(currentWs(), { id: newId("a"), at: Date.now(), ...entry }); } catch {}
+  try {
+    auditInsert(currentWs(), { id: newId("a"), at: Date.now(), ...entry });
+  } catch (e) {
+    auditDropped++;
+    if (!auditDropReported) {
+      auditDropReported = true;
+      // console.error, not the raw stream: unlike the tee's own catch this is not inside the writer
+      // that just failed, so there is no recursion to avoid — and going through console means the line
+      // lands in bureau.log too, where an operator reading history will find it.
+      console.error(`!! AUDIT WRITE FAILED — ${e?.message || e}. Actions are still executing and are NOT `
+                    + `being recorded. Count via auditDropCount(); this is said once, not per row.`);
+    }
+  }
   return Promise.resolve();
 }
 // Optional outgoing webhook for external push (Slack/email relay/etc.). User-configured URL, so

@@ -11,7 +11,7 @@ import {
   objectiveSignature, dedupeMemories, recallQuery, rankOwnWork, ownWorkBlock,
   deliverableEmbedText, deliverableTitle,
   chunkDocument, deliverableChunks, modelUnreachable, trimVersions, clientKey, isLoopback,
-  startLogTee, webhookBody,
+  startLogTee, webhookBody, auditDropCount,
   normalizeFinding, verifyFinding, findingCheckAllowed, withFindingIo, huntVerdict, gateNeverRan,
   mcpDecodeHeader, mcpHeaderProblem, mcpMetaProblem, mcpIsModern, UNTRUSTED_REPO_NOTE, npmArgv, agentMayRun, usageSplit, addUsage, tierModelToSend, callCostUsd, unratedModelWarning, warnUnratedModel, unratedTierModels, repoReadCap, blankReplyReason, NO_THINKING, TURN_TOKENS, TURN_TOKENS_RETRY, usagesForTurn, jsonFailure, JSON_REPLY, checkOutTail, refusalMessage,
   LENSES, pickLens, investigateObjective, investigate, seedLenses, activeLenses, bookLensRound,
@@ -776,6 +776,24 @@ console.log("# startLogTee — the log a boot task leaves behind when nobody is 
   chk("  precondition: the directory is there to be removed", existsSync(dir));
   rmSync(dir, { recursive: true, force: true });    // only possible because stop() closed the handle
   chk("  the temp dir is removable after stop() (no leaked handle)", !existsSync(dir));
+}
+
+console.log("# a failed AUDIT write is counted and announced, not swallowed");
+{
+  // The audit table is not a diagnostic. It is the only durable record of what agents did:
+  // tools/hunt-log.mjs reads it, /api/audit serves it, and a refused finding's triage evidence lives
+  // in it. logAudit() swallows a throwing insert on purpose — a failed audit write must not abort a
+  // real action — but it used to swallow it in SILENCE, so an empty audit table and a failing audit
+  // writer read identically. That is the reading that cost two days on bureau.log, on the surface
+  // where it matters more: the log is how you see the system, this is how you prove what it did.
+  //
+  // Only the counter is asserted here. Driving a real insert failure needs a locked database and the
+  // exported counter is what makes the state ASKABLE, which is the property being added; the server
+  // suite covers the writing path itself.
+  const before = auditDropCount();
+  chk("  the drop counter is exported and readable", typeof before === "number");
+  chk("  and reads 0 on a healthy process, so a non-zero value means something",
+    before === 0, "dropped=" + before);
 }
 
 console.log("# a tee that dies SAYS so — silence is the failure mode that cost two days");
