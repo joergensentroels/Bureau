@@ -143,8 +143,25 @@ for (const r of rows) {
       }
     }
   } else if (errs.length) {
-    console.log(`      (no evidence stored with these refusals — recorded before the triage field, so the claim`);
-    console.log(`       and the check's output are gone and this cluster cannot be adjudicated)`);
+    // States WHAT IS MISSING and lets the reader place the cause; it does not name one.
+    //
+    // This line used to end "recorded before the triage field", which reads as "an old row, nothing to
+    // do". Measured 2026-08-18: the 08-17 21:15 hunt printed exactly that, eight hours after running.
+    // The row was new. The SERVER was old — started 2026-08-16 16:23, before the field was committed at
+    // 18:53 on the 17th — so a live process was writing rows in the pre-fix shape. The sentence sent the
+    // reader to "nothing actionable" when the action was "restart Bureau".
+    //
+    // Second time in this file. It previously asserted "this run predates the fix that stopped hardcoding
+    // that field", was corrected for naming a cause it could not know, and a new cause-asserting sentence
+    // was then written beside it. A tool that reads the audit table cannot see when the process was
+    // started, so it cannot distinguish an old row from an old server — and the honest move is to say so
+    // and hand the reader the check, rather than to guess for them.
+    console.log(`      (these refusals carry no evidence — no claim, no check, no output — so the cluster`);
+    console.log(`       cannot be adjudicated. Either the run is older than the triage field, or the SERVER`);
+    console.log(`       that wrote it was started before that field existed. This tool reads the audit table`);
+    console.log(`       and cannot tell which. If the run above is recent, check the second one:`);
+    console.log(`         Get-NetTCPConnection -LocalPort 4173 -State Listen   ->   process start time`);
+    console.log(`       A start time earlier than the fix means the code is on disk and not in memory.)`);
   }
 
   // The refusal count is DERIVED from the action rows, not read from the run summary. Runs recorded before the
