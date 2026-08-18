@@ -648,5 +648,51 @@ ok("the sign-in control is shared, not duplicated per call site", (HTML.match(/f
   }
 }
 
+// ---------------------------------------------------------------------------------------------------
+// The escaper has to be right for the CONTEXT it is used in, and here that context is attributes.
+//
+// esc() covered [&<>] — correct for text content, wrong for an attribute. Most of this file's ~288 call
+// sites ARE attributes: value=, title=, data-id= and 16 other names. A value containing a double quote
+// closes the attribute early and what follows is parsed as markup — and that needs NEITHER < nor >:
+// ` onmouseover=...` is a complete attack made only of characters esc() used to pass through. Escaping
+// the angle brackets is precisely what made the gap feel closed.
+//
+// Asserts BEHAVIOUR, by running the real esc() lifted out of the page. A source-text check is the thing
+// that let this through in the first place: "[&<>]" reads as "it escapes HTML" to anyone not thinking
+// about attribute context.
+// ---------------------------------------------------------------------------------------------------
+{
+  const from = HTML.indexOf("const esc = (s) =>");
+  const line = from < 0 ? "" : HTML.slice(from, HTML.indexOf("\n", from)).trim();
+  ok("lifted esc() out of the page", line.startsWith("const esc = (s) =>") && line.length > 40, line.slice(0, 60));
+
+  // eval of the shipped expression, deliberately — what it DOES is the question.
+  const expr = line.slice("const esc = ".length).replace(/;$/, "");
+  const esc = eval("(" + expr + ")");
+  const DQ = String.fromCharCode(34), SQ = String.fromCharCode(39);
+
+  ok("  escapes & < > as before", esc("a & b < c > d") === "a &amp; b &lt; c &gt; d", esc("a & b < c > d"));
+  ok("  escapes the double quote that would end an attribute", !esc(DQ).includes(DQ), esc(DQ));
+  ok("  escapes the single quote too, for single-quoted attributes", !esc(SQ).includes(SQ), esc(SQ));
+
+  // Stated as the attack rather than as a character list.
+  const attack = DQ + " onmouseover=alert(1) x=" + DQ;
+  ok("  an attribute-breakout payload can no longer close the attribute", !esc(attack).includes(DQ), esc(attack));
+  ok("  and that payload contains no angle brackets at all, so escaping [&<>] would have passed it",
+    !attack.includes("<") && !attack.includes(">"));
+
+  // CONTROLS. Every assertion above is "the output lacks a character", and a function returning "" would
+  // satisfy all of them. Content has to survive, and a stripped quote has to become an entity.
+  ok("  control: ordinary text passes through intact", esc("Ada reviews the roster") === "Ada reviews the roster");
+  ok("  control: a quote becomes an entity rather than vanishing", esc(DQ).length > 1, esc(DQ));
+
+  // Why it matters HERE: attributes are the majority use. If this ever reads 0, the block above is
+  // asserting things about a context the page no longer has.
+  let attrSites = 0, at = 0;
+  const needle = '="${esc(';
+  while ((at = HTML.indexOf(needle, at)) >= 0) { attrSites++; at += needle.length; }
+  ok("  precondition: esc() really is used inside attributes (" + attrSites + " sites)", attrSites >= 10);
+}
+
 console.log(fail ? `\nFAILURES — ${pass} passed, ${fail} failed` : `\nALL PASS ✓ — ${pass} passed, 0 failed`);
 process.exitCode = fail ? 1 : 0;

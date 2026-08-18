@@ -354,7 +354,19 @@
 <script>
 const $ = (s, r=document) => r.querySelector(s);
 const el = (t, c, h) => { const e=document.createElement(t); if(c)e.className=c; if(h!=null)e.innerHTML=h; return e; };
-const esc = (s) => String(s==null?"":s).replace(/[&<>]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[m]));
+// Escapes QUOTES as well as angle brackets, because most of this file's 288 call sites put the result
+// inside an attribute — value="${esc(...)}", title="${esc(...)}", data-id="${esc(...)}" and 16 others.
+// It used to cover only [&<>], which is correct for text content and NOT correct for an attribute: a
+// value containing a double quote closes the attribute early, and everything after it is parsed as
+// markup. That does not need < or > to be dangerous, which is exactly why escaping those two felt
+// sufficient — ` onmouseover=...` is a complete attack and contains neither.
+//
+// The values reaching those attributes are free text: run objectives, agent names, a GitHub owner, a
+// URL. Sub-objectives in a delegated run come from the manager model's own plan (see delegate()), so
+// this is not only operator-typed input. Whether a model-authored string provably reaches one of these
+// attributes was NOT traced end to end and is not claimed here — an escaper used in attribute position
+// simply has to escape quotes, and this is the surface that holds the operator token.
+const esc = (s) => String(s==null?"":s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));
 
 let ORG = null, HEALTH = null;
 
