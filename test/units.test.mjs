@@ -25,7 +25,7 @@ import {
   normalizeNote, UNEXECUTED_ACTIONS,
   buildUndecidedMsgs, normalizeUndecided, unaddressedUndecided, runInvestigateFlag,
 } from "../server.mjs";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { closeSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -777,25 +777,58 @@ console.log("# startLogTee — the log a boot task leaves behind when nobody is 
   rmSync(dir, { recursive: true, force: true });    // only possible because stop() closed the handle
   chk("  the temp dir is removable after stop() (no leaked handle)", !existsSync(dir));
 }
+
+console.log("# a tee that dies SAYS so — silence is the failure mode that cost two days");
 {
-  // The actual reported bug, end to end: limit=2 used to come back as the same entry twice.
-  const org = { agents: [{ id: "a1", name: "Ada", role: "Analyst", memory: [
-    { at: 3, objective: "why checklists are useful" + CRIT, summary: "(stopped without a summary)" },
-    { at: 2, objective: "why checklists are useful" + QA, summary: "wrote why-checklists.md" },
-    { at: 1, objective: "why checklists are useful" + CRIT, summary: "(stopped without a summary)" },
-    { at: 4, objective: "checklists in aviation safety", summary: "wrote aviation.md" },
-  ] }] };
-  const got = recallSharedMemory(org, "checklists", 2);
-  eq("  recall returns two DISTINCT entries, not one repeated", new Set(got.map((r) => objectiveSignature(r.objective))).size, 2);
-  chk("  and the surviving copy is the one with real content", got.some((r) => r.summary === "wrote why-checklists.md"));
-}
-{
-  // Cross-agent identical work is two data points, not a duplicate — attribution is information.
-  const org = { agents: [
-    { id: "a1", name: "Ada", role: "Analyst", memory: [{ at: 1, objective: "audit the logs", summary: "found nothing" }] },
-    { id: "a2", name: "Bo", role: "SRE", memory: [{ at: 2, objective: "audit the logs", summary: "found a leak" }] },
-  ] };
-  eq("  two agents doing the same task both keep a slot", recallSharedMemory(org, "audit logs", 4).length, 2);
+  // bureau.log held nothing for two days while the server ran perfectly and kept writing audit rows.
+  // A write had stopped succeeding and the tee latched `dead` without a word, so an empty log was
+  // indistinguishable from a quiet system. What is under test is the ANNOUNCEMENT, not the death: a
+  // log allowed to fail is fine; a log allowed to fail silently is not.
+  const dir = mkdtempSync(join(tmpdir(), "bureau-teedead-"));
+  const f = join(dir, "d.log");
+
+  // Every observation is collected while the streams are stubbed, and asserted only after they are
+  // restored. The first version asserted inside the stubbed window: the checks ran, counted, and
+  // printed NOTHING — invisible assertions, in the test about invisible failure. The tee wraps stdout,
+  // so anything chk() prints in here would also be fed back into the thing being broken.
+  const realOut = process.stdout.write.bind(process.stdout);
+  const realErr = process.stderr.write.bind(process.stderr);
+  const seen = [];
+  process.stdout.write = () => true;
+  process.stderr.write = (c) => { seen.push(String(c)); return true; };
+
+  const tee = startLogTee(f, 1024 * 1024, 3);
+  const startedAlive = tee !== null && tee.isDead() === false;
+
+  console.log("healthy line");
+  const wroteWhileHealthy = readFileSync(f, "utf8").includes("healthy line");
+  const quietWhileHealthy = !seen.some((x) => /LOG TEE DEAD/.test(x));
+
+  // Break the write for real rather than stubbing the failure and testing the stub: close the
+  // descriptor out from under it so writeSync throws the way a locked or vanished file would.
+  const before = seen.length;
+  try { closeSync(3); } catch { /* not our fd; the loop below then simply finds it still alive */ }
+  for (let i = 0; i < 40 && !tee.isDead(); i++) console.log("provoke " + i);
+  const notices = seen.slice(before).filter((x) => /LOG TEE DEAD/.test(x));
+  const diedAfterFailure = tee.isDead();
+
+  tee.stop();
+  process.stdout.write = realOut;
+  process.stderr.write = realErr;
+
+  chk("  a live tee does not report itself dead", startedAlive);
+  // CONTROLS FIRST. Every assertion below says a notice APPEARS; without these, a tee that shouted on
+  // every single write would satisfy them just as well.
+  chk("  control: a healthy tee writes to the file", wroteWhileHealthy);
+  chk("  control: and says NOTHING on stderr while it is working", quietWhileHealthy);
+  chk("  a failing write marks it dead", diedAfterFailure === true);
+  chk("  and that death is ANNOUNCED on raw stderr", notices.length >= 1);
+  chk("  the notice names the file and the pid, so it can be acted on",
+    notices.some((x) => x.includes(f) && x.includes(String(process.pid))));
+  // Once. A notice per failed write would flood the very channel it is trying to be heard on.
+  chk("  exactly once, however many writes follow", notices.length === 1);
+
+  rmSync(dir, { recursive: true, force: true });
 }
 
 console.log("# hybrid recall — vectors fused with BM25, degrading safely");

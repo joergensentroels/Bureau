@@ -91,6 +91,11 @@ const LOG_KEEP = Math.max(1, Number(process.env.BUREAU_LOG_KEEP) || 3);
 export function startLogTee(file = LOG_FILE, max = LOG_MAX, keep = LOG_KEEP) {
   if (String(process.env.BUREAU_LOG || "").toLowerCase() === "off") return null;
   let fd = null, bytes = 0, dead = false, atLineStart = true;
+  // The UNWRAPPED stderr write, captured below when the streams are patched. The catch in append()
+  // has to be able to say that it died, and it cannot use console.* or process.stderr.write to do it:
+  // both are wrapped to call append(), so reporting the failure would re-enter the failing function.
+  // This is the one channel that reaches a human without going back through the thing that broke.
+  let rawErr = null;
   const open = () => {
     bytes = existsSync(file) ? statSync(file).size : 0;   // size BEFORE opening: "a" doesn't report it
     fd = openSync(file, "a");
@@ -124,12 +129,33 @@ export function startLogTee(file = LOG_FILE, max = LOG_MAX, keep = LOG_KEEP) {
       if (bytes + buf.length > max) rotate();
       writeSync(fd, buf);
       bytes += buf.length;
-    } catch {
+    } catch (e) {
       // Never console.* from in here — that re-enters this function and recurses until the stack dies.
-      // A failing log (disk full, file locked) silently stops teeing; the console half keeps working.
+      //
+      // This used to stop teeing SILENTLY, and silence is the problem. Observed 2026-08-18: bureau.log
+      // held nothing for two days while the server ran perfectly and kept writing audit rows the whole
+      // time. A diagnostic surface that fails closed without a word is worse than not having one,
+      // because it is trusted — an empty log reads exactly like a system with nothing to report.
+      //
+      // What killed that particular tee is NOT established and this comment does not claim it. Two
+      // candidates fit the evidence and nothing distinguishes them after the fact: a write threw and
+      // latched `dead` here, or the writes kept landing at offsets another process had truncated away.
+      // Both were reachable, because Start-Bureau.ps1's detached branch pointed -RedirectStandardOutput
+      // at this same file — fixed there. Naming one of them here would be a guess dressed as a finding.
+      //
+      // The fix that does not depend on knowing which: say so when it happens.
+      //
+      // So it announces itself — once, on the raw stderr captured before the wrap, which is the only
+      // writer that does not route back through this function. If stderr is redirected to a file, that
+      // is where the notice lands; if the process is on a console, the operator sees it there.
       dead = true;
       try { if (fd !== null) closeSync(fd); } catch { /* already gone */ }
       fd = null;
+      try {
+        rawErr?.(`${new Date().toISOString()} !! LOG TEE DEAD — ${file} will receive nothing further `
+                 + `from pid ${process.pid}: ${e?.message || e}. The server keeps running; its log does not.
+`);
+      } catch { /* the last channel is gone too; there is nowhere left to say it */ }
     }
   };
   // Returns a stop() as well as the path, because a function that patches two global streams and offers
@@ -138,11 +164,16 @@ export function startLogTee(file = LOG_FILE, max = LOG_MAX, keep = LOG_KEEP) {
   const restore = [];
   for (const stream of [process.stdout, process.stderr]) {
     const orig = stream.write.bind(stream);
+    if (stream === process.stderr) rawErr = orig;   // the escape hatch append()'s catch needs
     stream.write = (chunk, enc, cb) => { append(chunk); return orig(chunk, enc, cb); };
     restore.push(() => { stream.write = orig; });
   }
   return {
     file,
+    // Observable, not just announced. A one-off line on stderr can scroll away or land in a file nobody
+    // opens; this lets a caller ASK. Used by the boot banner's counterpart and available to any future
+    // status surface — "is my log still recording" should be answerable without reading the log.
+    isDead: () => dead,
     stop() {
       for (const undo of restore) undo();
       if (fd !== null) { try { closeSync(fd); } catch { /* already gone */ } fd = null; }

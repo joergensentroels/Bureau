@@ -81,16 +81,32 @@ if ($Local -and $served) {
 if ($Foreground) {
   & node (Join-Path $here "server.mjs")
 } else {
-  $log = Join-Path $here "bureau.log"
+  # TWO FILES, and they must not be one file.
+  #
+  # This redirected stdout to bureau.log — the same file server.mjs's own startLogTee() opens in APPEND
+  # mode and writes timestamped lines to. Two writers, two independent offsets, one file:
+  #   * -RedirectStandardOutput TRUNCATES on open, so every start silently destroyed the log history;
+  #   * the two handles then overwrote each other, leaving fragments beginning mid-word;
+  #   * and any write that threw latched startLogTee's `dead` flag, permanently and (until now) silently.
+  # Measured 2026-08-18: bureau.log held nothing for two days while the server ran perfectly and kept
+  # writing audit rows. Nothing was broken except the ability to see anything.
+  #
+  # So the redirect gets its OWN file. Its job is the output that exists before the tee does — a crash
+  # during boot, a MODULE_NOT_FOUND, anything that kills node before startLogTee runs — and that job needs
+  # a few hundred bytes, not the server's running log. bureau.log now has exactly one writer.
+  $log     = Join-Path $here "bureau.log"        # server.mjs owns this one, via startLogTee (append)
+  $bootLog = Join-Path $here "bureau.boot.log"   # this script owns these two (truncated each start)
   # `server.mjs` relative, NOT the absolute path: if the repo sits under a path containing a space (this
   # one lives in "...\LLM server"), Start-Process splits -ArgumentList on that space, so the absolute form
   # launched node with "<...>\LLM" and it died with MODULE_NOT_FOUND. -WorkingDirectory makes the relative
   # name unambiguous and sidesteps quoting entirely. (Redirect paths are values, not command lines, so
   # spaces are fine there.)
   $p = Start-Process -FilePath "node" -ArgumentList "server.mjs" `
-    -WorkingDirectory $here -RedirectStandardOutput $log -RedirectStandardError "$log.err" `
+    -WorkingDirectory $here -RedirectStandardOutput $bootLog -RedirectStandardError "$bootLog.err" `
     -PassThru -WindowStyle Hidden
   Start-Sleep -Seconds 3
-  Write-Host "Bureau started (pid $($p.Id)) -> http://127.0.0.1:$Port   log: $log"
+  Write-Host "Bureau started (pid $($p.Id)) -> http://127.0.0.1:$Port"
+  Write-Host "  log      : $log        (the server's own, appended, survives restarts)"
+  Write-Host "  boot log : $bootLog   (this launcher's, overwritten each start)"
   Write-Host "Stop it with:  Stop-Process -Id $($p.Id) -Force"
 }
