@@ -284,12 +284,34 @@ if ($Verify) {
   if ($unproven.Count) {
     Write-Host "NOT YET PROVEN - nothing is broken, but the boot path has not been demonstrated:" -ForegroundColor Yellow
     $unproven | ForEach-Object { Write-Host "  - $_" -ForegroundColor Yellow }
-    Write-Host "`nThis is the expected state BEFORE a reboot: the tasks exist and are Ready, but the running" -ForegroundColor Yellow
-    Write-Host "processes are still the ones your logon started. REBOOT, then run -Verify again." -ForegroundColor Yellow
-    Write-Host "Do NOT delete the Startup shortcuts until every process shows owner=SYSTEM." -ForegroundColor Yellow
+    # THE ADVICE IS DERIVED from what is actually unproven, instead of printed regardless.
+    #
+    # This used to end "the running processes are still the ones your logon started. REBOOT, then run
+    # -Verify again" no matter which item was outstanding. Measured 2026-08-19: a run where every port
+    # was held by the right account and every server task had a live instance -- the boot path fully
+    # demonstrated -- still told the operator to reboot, because the inference probe had been skipped
+    # with -Quick. A reboot would not have probed inference. Advice that does not follow from the
+    # finding is how a checklist turns into decoration, which is the thing this block exists to avoid.
+    #
+    # The old closing line also said not to delete the Startup shortcuts until every process shows
+    # owner=SYSTEM. Two of the three should NOT be SYSTEM any more, and all three shortcuts were
+    # renamed .disabled long ago, so it named a condition that can never arrive about files that are
+    # already gone.
+    $bootPath = @($unproven | Where-Object { $_ -match "owned by|has never run|no running task instance" })
+    if ($bootPath.Count) {
+      Write-Host "`nThat is the expected state BEFORE a boot: the tasks exist, but something else started" -ForegroundColor Yellow
+      Write-Host "what is on the ports. Reboot -- or sign out and back in, which the logon triggers cover" -ForegroundColor Yellow
+      Write-Host "too -- then run -Verify again." -ForegroundColor Yellow
+    } else {
+      Write-Host "`nThe boot path IS demonstrated: every port is held by the account its task runs as, and" -ForegroundColor Yellow
+      Write-Host "every server task has a live instance. Only the items listed above are outstanding, and" -ForegroundColor Yellow
+      Write-Host "a reboot would not settle any of them." -ForegroundColor Yellow
+      if ($Quick) { Write-Host "Re-run without -Quick to close the inference probe." -ForegroundColor Yellow }
+    }
     exit 0   # not an error - just not evidence yet
   }
-  Write-Host "PROVEN - all three run as SYSTEM after boot, the model generates on the GPU, token resolved." -ForegroundColor Green
+  Write-Host "PROVEN - every port is held by the account its task runs as, every server task has a live" -ForegroundColor Green
+  Write-Host "instance, the model generates on the GPU, and Bureau's token resolved." -ForegroundColor Green
   $su = [Environment]::GetFolderPath('Startup')
   $live = Get-ChildItem $su -Filter "*.lnk" -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -in @("Start Bureau.lnk", "Start Latch.lnk", "Ollama.lnk") }
