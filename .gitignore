@@ -47,3 +47,8 @@ bureau.log.err
 # These carry objectives, agent output and error traces, so publishing them publishes the workspace.
 *.log
 *.log.[0-9]
+# ...and the stderr sibling of any of them. `bureau.log.err` is named above, but the launcher's boot
+# capture was split into its OWN file on 2026-08-18 and the rename carried its stderr file along:
+# bureau.boot.log.err matched none of the patterns here, so it showed up untracked the next time
+# anyone ran `git status`. A glob, so the next such rename does not repeat it.
+*.log.err

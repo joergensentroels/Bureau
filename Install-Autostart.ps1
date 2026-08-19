@@ -1,13 +1,23 @@
-# Make Bureau, Latch and Ollama survive an unattended reboot.
+# Make Bureau and Ollama survive an unattended reboot AND a Fast Startup resume.
 #
-# THE PROBLEM this fixes: all three live in the per-user Startup folder, which only fires after an
-# INTERACTIVE logon. This machine has no auto-login, so a reboot stops at the lock screen and all three
-# stay down — unreachable remotely, with no way to start them remotely either. Tailscale is a real service
+# THE PROBLEM this fixes: these used to live in the per-user Startup folder, which only fires after an
+# INTERACTIVE logon. This machine has no auto-login, so a reboot stops at the lock screen and everything
+# stays down — unreachable remotely, with no way to start it remotely either. Tailscale is a real service
 # and keeps running, so the symptom is a 502 from a hostname that resolves fine, which looks like an app
 # crash rather than "nothing ever started".
 #
-# THE FIX: Scheduled Tasks with an At-Startup trigger running as SYSTEM. SYSTEM needs no stored password
-# and does not need anyone logged in.
+# THE FIX: Scheduled Tasks, triggered at BOTH startup and logon.
+#
+# At-Startup alone is not enough here, which is the correction of 2026-08-19. Fast Startup is on, so an
+# ordinary "Shut down" hibernates the kernel session and the next power-on RESUMES it: boot type 0x1,
+# uptime unbroken, nothing started, no boot trigger fired. Only "Restart" produces a real boot. The logon
+# trigger covers every other route back to a running desktop. New-BootTask carries the measurement.
+#
+# WHO EACH TASK RUNS AS is now decided per task instead of SYSTEM for everything:
+#   Ollama   SYSTEM      no repository to own files in, and proven to hold the GPU from session 0
+#   Bureau   S4U as you  unelevated; SYSTEM-owned files in a user-owned repo caused dubious ownership
+#   Backup   SYSTEM      a finite job with the opposite settings, see New-DailyTask
+#   Latch    NOT HERE    Install-Latch-S4UStartupTask.ps1 owns it, as the operator. See $retired below.
 #
 # DELIBERATELY NOT auto-login. That is the other way to solve this and it means putting the account
 # password in the registry (or an LSA secret) and leaving the desktop unlocked on boot — a physical-security
@@ -40,7 +50,29 @@ $here    = Split-Path -Parent $MyInvocation.MyCommand.Path        # ...\bureau
 $root    = Split-Path -Parent $here                              # ...\LLM server
 $latch   = Join-Path $root "openclaw-command-center"
 $prefix  = "LLMServer-"
-$tasks   = @("$prefix`Ollama", "$prefix`Latch", "$prefix`Bureau", "$prefix`Backup")
+$tasks   = @("$prefix`Ollama", "$prefix`Bureau", "$prefix`Backup")
+
+# Task names this script used to create and must now actively REMOVE, rather than merely stop making.
+#
+# LLMServer-Latch ran `node server.js` as SYSTEM. Latch is the credential boundary: its whole job is
+# holding the tokens so that nothing else has to, and giving that process every right on the machine
+# is the opposite of what it exists to do. SYSTEM also leaks into the filesystem, and SYSTEM-owned
+# files inside a user-owned repository are what produced `fatal: detected dubious ownership` and cost
+# a night of Bureau's scheduled hunts on 2026-08-15. Install-Latch-S4UStartupTask.ps1 over in the
+# Latch repo registers "Latch Private Gateway" (troel, S4U, boot + logon), and that is now the only
+# thing that should ever start Latch.
+#
+# Deleting the registration alone would not have been enough. A task nobody re-registers does not go
+# away; it sits there Ready, invisible without an elevated shell, firing on every real boot. Measured
+# 2026-08-19: LLMServer-Latch was still present, still SYSTEM, last run 2026-08-13 01:32:59 result 1.
+# So retirement is something this script DOES, not a line it stops executing.
+$retired = @("$prefix`Latch")
+
+# The subset of $tasks whose action runs a server in the FOREGROUND, so a live task instance is itself
+# the proof that the TASK, rather than a shell, started what is listening. Backup is deliberately not
+# here: it is a finite job that runs and exits, and demanding a running instance of it would fail every
+# time except during the ninety seconds a day it is working.
+$servers = @("$prefix`Ollama", "$prefix`Bureau")
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin -and -not $WhatIfPreference) {
@@ -70,8 +102,17 @@ if (-not $isAdmin -and -not $WhatIfPreference) {
 # (Get-ScheduledTask returns nothing, Start-ScheduledTask says Access denied), so this has to run elevated
 # — which is also why the install cannot be checked from an unprivileged session.
 #
-# The check that actually matters is the PROCESS OWNER. If node is owned by SYSTEM, the task started it; if
-# it is owned by your own account, the Startup shortcut did, and the reboot proved nothing.
+# WHAT PROVES THE TASK STARTED IT changed on 2026-08-19, and the old answer is now misleading.
+#
+# This used to say: if node is owned by SYSTEM the task started it, and if it is owned by your own account
+# the Startup shortcut did. That worked while every task ran as SYSTEM. Bureau now runs S4U AS YOU, so the
+# owner of :4173 is your account either way and can no longer tell the two apart on its own.
+#
+# The signal that still separates them is the TASK INSTANCE: LastTaskResult 267009 means "currently
+# running", and because these actions run their server in the foreground, a task instance is alive for
+# exactly as long as the server it started is. A server on the port with no running instance behind it was
+# started by something else -- a shell, a shortcut, a person. Both checks are kept below: the owner still
+# catches the wrong ACCOUNT, and the instance catches the wrong STARTER.
 if ($Verify) {
   # THREE outcomes, not two. The first version tracked only pass/fail and printed "ALL GOOD" while every
   # process-owner line was a warning — a green verdict that contradicted its own checks, in the script whose
@@ -89,21 +130,54 @@ if ($Verify) {
     $i = $t | Get-ScheduledTaskInfo
     # LastTaskResult 267009 = "currently running", which is the healthy steady state for a server.
     $res = switch ($i.LastTaskResult) { 0 { "ok" } 267009 { "running" } 267011 { "not yet run" } default { "result=$($i.LastTaskResult)" } }
-    Write-Host ("  {0,-20} {1,-8} as={2,-8} lastRun={3,-9} {4}" -f $t.TaskName, $t.State, $t.Principal.UserId,
-      $(if ($i.LastRunTime.Year -gt 1999) { $i.LastRunTime.ToString("HH:mm:ss") } else { "never" }), $res)
+    # WITH THE DATE. This printed HH:mm:ss only, which reads as "this morning" for a run that happened
+    # last week: on 2026-08-19 this listing showed lastRun=01:32:59 for a task whose last run was six
+    # days earlier, and the times had to be re-fetched with Get-ScheduledTaskInfo to tell what any of
+    # them meant. A timestamp whose most significant digits are missing is not a timestamp.
+    Write-Host ("  {0,-20} {1,-8} as={2,-8} lastRun={3,-17} {4}" -f $t.TaskName, $t.State, $t.Principal.UserId,
+      $(if ($i.LastRunTime.Year -gt 1999) { $i.LastRunTime.ToString("yyyy-MM-dd HH:mm") } else { "never" }), $res)
     if ($i.LastRunTime.Year -le 1999) { $unproven += "$($t.TaskName) has never run" }
     if ($t.State -eq "Disabled") { $fail += "$($t.TaskName) is disabled" }
+    # A SERVER TASK THAT IS NOT RUNNING did not start whatever is on its port. See the note above the
+    # $Verify block: now that Bureau runs as the operator rather than SYSTEM, this is the check that
+    # distinguishes "the task brought it up" from "someone ran the launcher by hand", and without it a
+    # hand-started server would satisfy the owner check and be reported as proof the boot path works.
+    if ($servers -contains $t.TaskName -and $i.LastTaskResult -ne 267009) {
+      $unproven += "$($t.TaskName) has no running task instance, so it did not start what is on the port"
+    }
   }
-  Write-Host "`n--- who owns the running processes? (SYSTEM = the task started it; you = the Startup shortcut did) ---"
+  # THE EXPECTED OWNER IS PER PORT, and it is no longer SYSTEM for all three.
+  #
+  # This block used to assert `$owner -match "SYSTEM"` on every port and call anything else NOT YET
+  # PROVEN. That was correct while all three tasks ran as SYSTEM. It is now wrong for two of them:
+  # Bureau runs S4U as the operator, and Latch is started by "Latch Private Gateway", also S4U as the
+  # operator, specifically so that neither holds SYSTEM's rights. Left as it was, this check would
+  # report "not yet proven" after a flawless reboot, permanently -- and a checklist that can never go
+  # green is one people stop reading, which is the exact failure it exists to prevent.
+  #
+  # The process owner still carries the information it always did. It just has to be compared against
+  # what SHOULD own that port instead of against one hardcoded account.
+  $me = "$env:COMPUTERNAME\$env:USERNAME"
+  $expect = @{
+    11434 = @{ Owner = "SYSTEM"; By = "$prefix`Ollama" }
+    8787  = @{ Owner = $me;      By = "Latch Private Gateway (registered from the Latch repo)" }
+    4173  = @{ Owner = $me;      By = "$prefix`Bureau" }
+  }
+  Write-Host "`n--- who owns the running processes? (one account should own each port) ---"
   foreach ($port in 11434, 8787, 4173) {
+    $want = $expect[$port]
     $conn = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $conn) { Write-Host ("  :{0,-6} NOT LISTENING" -f $port) -ForegroundColor Red; $fail += "port $port not listening"; continue }
     $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$($conn.OwningProcess)" -ErrorAction SilentlyContinue
     $owner = try { $o = Invoke-CimMethod -InputObject $proc -MethodName GetOwner; "$($o.Domain)\$($o.User)" } catch { "?" }
-    $isSystem = $owner -match "SYSTEM"
-    Write-Host ("  :{0,-6} pid={1,-7} {2,-14} owner={3}" -f $port, $conn.OwningProcess, $proc.Name, $owner) -ForegroundColor $(if ($isSystem) { "Green" } else { "Yellow" })
-    # Not a failure BEFORE a reboot — it is the expected state, and precisely what a reboot is meant to change.
-    if (-not $isSystem) { Write-Host "         ^ started by a logged-on user, not the boot task" -ForegroundColor Yellow; $unproven += "port $port is owned by $owner, not SYSTEM" }
+    $ok = $owner -match [regex]::Escape($want.Owner)
+    Write-Host ("  :{0,-6} pid={1,-7} {2,-14} owner={3}  (want {4})" -f $port, $conn.OwningProcess, $proc.Name, $owner, $want.Owner) -ForegroundColor $(if ($ok) { "Green" } else { "Yellow" })
+    # Before a reboot this is the EXPECTED state, not a failure: it says a hand-started process holds
+    # the port, which is precisely what a reboot is meant to change.
+    if (-not $ok) {
+      Write-Host ("         ^ not the account $($want.By) runs as, so something else started this") -ForegroundColor Yellow
+      $unproven += "port $port is owned by $owner, expected $($want.Owner)"
+    }
   }
   Write-Host "`n--- the two things a SYSTEM account gets wrong by default ---"
   try {
@@ -236,7 +310,9 @@ if ($Verify) {
 }
 
 if ($Uninstall) {
-  foreach ($t in $tasks) {
+  # $retired is included, so an uninstall cannot leave the SYSTEM Latch task behind as the one thing
+  # still firing at boot after everything it was installed alongside has gone.
+  foreach ($t in ($tasks + $retired)) {
     if (Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue) {
       if ($PSCmdlet.ShouldProcess($t, "Unregister scheduled task")) {
         Unregister-ScheduledTask -TaskName $t -Confirm:$false
@@ -244,7 +320,12 @@ if ($Uninstall) {
       }
     } else { Write-Host "  $t not present" }
   }
-  Write-Host "`nDone. The per-user Startup shortcuts are untouched, so an interactive logon still starts everything."
+  # This used to end "the per-user Startup shortcuts are untouched, so an interactive logon still
+  # starts everything", which was true when it was written and is now false: checked 2026-08-19, all
+  # three shortcuts are renamed .disabled, so a logon starts nothing. An uninstall that reassures you
+  # about a fallback that no longer exists is worse than one that says nothing.
+  Write-Host "`nDone. There is NO fallback left: the per-user Startup shortcuts are all renamed .disabled,"
+  Write-Host "so an interactive logon starts none of these. Re-run this script to put the tasks back."
   exit 0
 }
 
@@ -300,29 +381,53 @@ $sysEnv = "`$env:LATCH_DATA='$latch\data'; `$env:OLLAMA_MODELS='$env:USERPROFILE
 $logRot = "foreach(`$f in 'boot.log','boot.err.log'){if((Test-Path `$f) -and (Get-Item `$f).Length -gt 1mb){Move-Item `$f (`$f + '.1') -Force -ErrorAction SilentlyContinue}};"
 
 function New-BootTask {
-  param([string]$Name, [string]$Command, [string]$WorkDir, [int]$DelaySeconds = 0)
+  param([string]$Name, [string]$Command, [string]$WorkDir, [int]$DelaySeconds = 0, [switch]$AsOperator)
   $ps = (Get-Command powershell.exe).Source
   # boot.log RELATIVE, resolved against -WorkingDirectory: this repo lives under "LLM server", and a
   # quoted absolute path nested inside an already-quoted -Command is how the MODULE_NOT_FOUND bug in
   # Start-Bureau.ps1 happened. Relative sidesteps the quoting entirely.
   $inner = "$logRot $sysEnv $Command 2>>boot.err.log 6>>boot.log"
   $action  = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -ExecutionPolicy Bypass -Command `"$inner`"" -WorkingDirectory $WorkDir
-  $trigger = New-ScheduledTaskTrigger -AtStartup
-  if ($DelaySeconds -gt 0) { $trigger.Delay = "PT$($DelaySeconds)S" }   # crude ordering: Ollama, then Latch, then Bureau
-  $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+  # TWO TRIGGERS, because on this machine a boot mostly does not happen. Fast Startup is on
+  # (HiberbootEnabled=1), so "Shut down" hibernates the kernel session instead of ending it, and the
+  # next power-on RESUMES it: the kernel logs boot type 0x1, uptime keeps counting from the last real
+  # boot, and nothing starts. A boot trigger fires on none of that. Only "Restart" forces a full boot.
+  #
+  # Measured 2026-08-18: shut down at 22:37:29 from the Start menu, powered back on five seconds
+  # later. Every process in the user session died, Latch and Bureau both, and neither came back, while
+  # uptime still read 2026-08-13. LLMServer-Ollama, which runs as SYSTEM in session 0, was hibernated
+  # and restored without ever stopping: checked on 2026-08-19 it still reported LastRunTime
+  # 2026-08-13 01:32:38 and "currently running". Same shutdown, opposite outcome, and the difference
+  # is which session the process lived in. That is the mechanism in one line.
+  #
+  # The logon trigger closes the gap, because a Fast Startup resume still logs you on. The delay is
+  # applied to BOTH, so the crude start ordering survives whichever route actually fires.
+  $trigger = @((New-ScheduledTaskTrigger -AtStartup), (New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME))
+  if ($DelaySeconds -gt 0) { foreach ($t in $trigger) { $t.Delay = "PT$($DelaySeconds)S" } }   # crude ordering: Ollama, then Bureau
+  # WHO IT RUNS AS is a parameter because the answer differs per task, and hardcoding SYSTEM here was
+  # actively harmful. LLMServer-Bureau had been migrated to S4U-as-operator outside this file, so
+  # re-running this installer -- a documented, supported action that its own output invites -- silently
+  # downgraded it back to SYSTEM and undid that migration. A script that quietly reverts a security
+  # decision every time it runs is worse than one that never took the decision.
+  $principal = if ($AsOperator) {
+    New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Limited
+  } else {
+    New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+  }
+  $asWho = if ($AsOperator) { "$env:USERNAME (S4U, unelevated)" } else { "SYSTEM" }
   # Restart on failure and NO execution time limit: these are long-lived servers, and the default
   # 3-day limit would silently kill them. Restart matters because a boot-time start can lose a race with
   # disk/network readiness, and a task that fails once and stays dead is the bug we are fixing.
   $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Seconds 0) `
     -MultipleInstances IgnoreNew
-  if ($PSCmdlet.ShouldProcess($Name, "Register At-Startup task as SYSTEM")) {
+  if ($PSCmdlet.ShouldProcess($Name, "Register boot+logon task as $asWho")) {
     Register-ScheduledTask -TaskName $Name -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
-    Write-Host "  registered $Name"
+    Write-Host "  registered $Name  (as $asWho, boot + logon)"
   } else {
     Write-Host "  WOULD register $Name" -ForegroundColor Cyan
     Write-Host "      $ps -NoProfile -ExecutionPolicy Bypass -Command `"$inner`"" -ForegroundColor DarkGray
-    Write-Host "      workdir=$WorkDir  as=SYSTEM  trigger=AtStartup$(if($DelaySeconds){" +${DelaySeconds}s"})" -ForegroundColor DarkGray
+    Write-Host "      workdir=$WorkDir  as=$asWho  triggers=AtStartup+AtLogOn$(if($DelaySeconds){" +${DelaySeconds}s"})" -ForegroundColor DarkGray
   }
 }
 
@@ -356,10 +461,32 @@ function New-DailyTask {
   }
 }
 
+# RETIRE FIRST, THEN REGISTER, so running this script CONVERGES the machine on the intended set
+# instead of only adding to it. Order matters: LLMServer-Latch binds :8787, and removing it before
+# anything is started keeps two Latches from racing for that port during this run.
+foreach ($t in $retired) {
+  if (-not (Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue)) { continue }
+  if ($PSCmdlet.ShouldProcess($t, "Unregister RETIRED scheduled task")) {
+    Unregister-ScheduledTask -TaskName $t -Confirm:$false
+    Write-Host "  retired $t - Latch starts from 'Latch Private Gateway' as the operator now, not as SYSTEM" -ForegroundColor Yellow
+  } else {
+    Write-Host "  WOULD retire $t" -ForegroundColor Cyan
+  }
+}
+
 if ($ollama) { New-BootTask -Name "$prefix`Ollama" -Command "& '$ollama' serve" -WorkDir (Split-Path -Parent $ollama) -DelaySeconds 0 }
-New-BootTask -Name "$prefix`Latch"  -Command "& '$node' server.js" -WorkDir $latch -DelaySeconds 20
+# NO Latch task here any more; see $retired at the top of this file. Latch is registered by
+# Install-Latch-S4UStartupTask.ps1 in the Latch repo, as the operator under S4U. Its data directory is
+# still passed to Bureau through $sysEnv and still required by the layout check above, because Bureau
+# reads Latch's auth.json off disk and exits 1 without it -- that dependency is on the FILE, not on
+# Latch running, so nothing here needs to start Latch.
+#
 # Bureau through its own launcher so the remote-guard default and LATCH_DATA logic stay in ONE place.
-New-BootTask -Name "$prefix`Bureau" -Command "& '$here\Start-Bureau.ps1' -Foreground" -WorkDir $here -DelaySeconds 40
+# -AsOperator because that is what is actually deployed: the live task has run S4U as troel since it
+# was migrated, and this script silently undid that migration on every run until now. The 40s delay is
+# kept as-is -- it no longer sequences after a Latch task registered here, but it still staggers Bureau
+# behind Ollama and behind Latch's own boot task, which is what it was really buying.
+New-BootTask -Name "$prefix`Bureau" -Command "& '$here\Start-Bureau.ps1' -Foreground" -WorkDir $here -DelaySeconds 40 -AsOperator
 New-DailyTask -Name "$prefix`Backup" -Command "& '$node' tools\backup.mjs" -WorkDir $here -At "03:30"
 
 if (-not $WhatIfPreference) {
@@ -374,7 +501,9 @@ if (-not $WhatIfPreference) {
   # termination is asynchronous, and -MultipleInstances IgnoreNew silently drops a start that overlaps a
   # still-dying instance.
   Write-Host "`nStarting them now to prove the command lines actually run..." -ForegroundColor Cyan
-  $checks = @(@{ Task = "$prefix`Latch"; Port = 8787 }, @{ Task = "$prefix`Bureau"; Port = 4173 })
+  # Bureau only. Latch is not this script's task any more, and starting a task it does not own -- or
+  # worse, reporting on one -- would be this file claiming credit for something it cannot see fail.
+  $checks = @(@{ Task = "$prefix`Bureau"; Port = 4173 })
   foreach ($c in $checks) { Stop-ScheduledTask -TaskName $c.Task -ErrorAction SilentlyContinue }
   foreach ($c in $checks) {
     $n = 0

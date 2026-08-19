@@ -20,10 +20,10 @@ off one clone, each with a pre-push hook — never share a server; set `BUREAU_P
 server it did **not** start is probed on an authenticated route first and refused if that
 credential does not work there, rather than handed to the suites to fail as 401s (see TESTING.md).
 
-Current totals: **<!--fig:pure-assertions-->1,609 pure assertions** across
-**<!--fig:pure-suites-->17 pure suites**, plus **<!--fig:server-assertions-->311 server assertions**
-across **<!--fig:server-suites-->6 server suites** — **<!--fig:assertions-->1,920 headless assertions
-across <!--fig:suites-->23 suites** in all. The live `--e2e` adds 18 more and is not counted here,
+Current totals: **<!--fig:pure-assertions-->1,623 pure assertions** across
+**<!--fig:pure-suites-->18 pure suites**, plus **<!--fig:server-assertions-->311 server assertions**
+across **<!--fig:server-suites-->6 server suites** — **<!--fig:assertions-->1,934 headless assertions
+across <!--fig:suites-->24 suites** in all. The live `--e2e` adds 18 more and is not counted here,
 because it is not part of the pre-push gate.
 
 > Those figures are **checked, not maintained**. `run-all.mjs` compares every number marked
@@ -46,6 +46,7 @@ asserts that every suite there is described below and that nothing described bel
 | suite | what it establishes |
 |---|---|
 | `secret-scan.test.mjs` | that no credential is committed. Runs first, so a leak fails before anything else does. Its patterns require the ENTROPY a generated token has and prose does not — `agent_deleted_yesterday` is a real fixture in `workspaces.test.mjs` and matches a naive prefix-and-length rule, and a scanner that fails on a fixture on its first run is a scanner someone switches off. It never prints the value it found: echoing it would put the secret into CI logs and terminal scrollback |
+| `ps1-encoding.test.mjs` | that no `.ps1` file carries a non-ASCII character anywhere PowerShell 5.1 will tokenise it. These files are UTF-8 with no BOM, so 5.1 decodes them as CP1252 and an em dash becomes three characters ending in `U+201D`, which it accepts as a closing quote — one em dash inside a live string ends it early and the rest of the file stops parsing. Comments stay exempt, because the prose in these files is full of them on purpose. It reads BYTES rather than running a parser: CI has pwsh 7, which decodes UTF-8 correctly and would pass exactly the file 5.1 chokes on. Self-checks against eight controls each run, and fails if it scans nothing |
 | `decision.test.mjs` | the approval-decision core: the tier truth table, the hard floor under every tier and under run-level auto-approve, policy first-match-wins, and the precedence rule **tier grants → policy loosens/tightens → floor clamps** |
 | `units.test.mjs` | the exported helpers — SSRF guard, tolerant JSON parse, action normalization, org normalization, BM25 + RRF ranking, recall de-duplication, vector pack/unpack, remote-mode allowlist, `trimVersions`, the review subsystem's own logic, and much else. By far the largest suite |
 | `scope.test.mjs` | the **scope guardrail** — which repository paths a run may open at all, as a rule in the runner rather than a sentence in the prompt |
