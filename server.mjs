@@ -767,18 +767,72 @@ function emitResult(run, data) {
 
 // ---------- Latch client (server-side only) ---------------------------------
 
-async function loadToken() {
-  if (process.env.OPERATOR_TOKEN) return process.env.OPERATOR_TOKEN.trim();
+// WHERE CREDENTIALS COME FROM, most-protected source first.
+//
+// A secret FILE beats an environment variable, and not marginally. An env var is inherited by every
+// child process Bureau spawns -- git, the probe gate's check commands, node itself -- it is readable at
+// /proc/<pid>/environ by anything sharing the container, `docker inspect` and `docker compose config`
+// print it back, and it survives into crash dumps and process listings. Docker, Podman and Kubernetes
+// all deliver secrets as tmpfs-backed FILES for exactly that reason, and `<NAME>_FILE` is the
+// convention the three of them share.
+//
+// auth.json stays LAST, and that ordering is the point. It is the right source for a bare-metal install
+// with Latch beside this repo, and it is the only one that requires Bureau to be able to read the
+// credential boundary's data directory at all. Under containers that mount is the thing worth NOT
+// having: it would place every secret Latch holds inside Bureau's filesystem, dissolving the separation
+// Latch exists to provide into a convention about which file Bureau happens to open. See docker/README.md.
+//
+// An explicitly-named FILE that is missing or empty is a HARD ERROR, never a fallback to something
+// weaker. A deployment that quietly downgrades because a mount did not appear has lost the boundary it
+// was configured to have and says nothing about it, which is the one failure a security seam cannot
+// afford: it looks identical to working.
+let TOKEN_SOURCE = "";
+export function tokenSource() { return TOKEN_SOURCE; }
+
+async function readSecretFile(p, varName) {
+  let raw;
+  try { raw = await readFile(p, "utf8"); }
+  catch (e) { throw new Error(`${varName}=${p} could not be read: ${e.code || e.message}`); }
+  // BOM-stripped and trimmed. A secret written by Set-Content, or by hand in an editor, picks up a UTF-8
+  // BOM or a trailing newline -- and a token differing from Latch's by one invisible byte fails auth with
+  // a 401 indistinguishable from a wrong token.
+  const v = raw.replace(/^﻿/, "").trim();
+  if (!v) throw new Error(`${varName}=${p} is empty`);
+  return v;
+}
+
+async function resolveOperatorToken() {
+  if (process.env.OPERATOR_TOKEN_FILE)
+    return [await readSecretFile(process.env.OPERATOR_TOKEN_FILE, "OPERATOR_TOKEN_FILE"),
+            `secret file (OPERATOR_TOKEN_FILE=${process.env.OPERATOR_TOKEN_FILE})`];
+  if (process.env.OPERATOR_TOKEN)
+    return [process.env.OPERATOR_TOKEN.trim(), "environment variable (OPERATOR_TOKEN)"];
   const raw = await readFile(path.join(DATA_DIR, "auth.json"), "utf8");
   const parsed = JSON.parse(raw);
   if (!parsed.operatorToken) throw new Error("no operatorToken in auth.json");
-  return parsed.operatorToken;
+  return [String(parsed.operatorToken).trim(), `Latch's auth.json (${DATA_DIR})`];
+}
+
+async function loadToken() {
+  const [value, source] = await resolveOperatorToken();
+  // An empty token is not a weaker credential, it is a LOCKOUT. authRole() returns null for every
+  // request while TOKEN is falsy, so Bureau would boot cleanly, print its listening banner, and then
+  // refuse the operator's own UI with nothing in any log to say why. Fail here, where the cause is still
+  // attached to the effect, rather than in a 401 an hour later.
+  if (!value) throw new Error(`the operator token resolved from ${source} is empty`);
+  TOKEN_SOURCE = source;
+  return value;
 }
 
 // Load the operator token WITHOUT starting the server. The server bootstrap (isMain block) sets
 // TOKEN itself; this exported init lets an out-of-process consumer (the offline eval harness in
 // eval/run-eval.mjs) authenticate to Latch and exercise the real askLlm path. No-op side effects.
 export async function initLatchAuth() { TOKEN = await loadToken(); return TOKEN; }
+// Symmetric with initLatchAuth, for the same reason it exists: the boot block sets READ_TOKEN itself,
+// and an out-of-process caller (or test/secret-tokens.test.mjs) needs the resolution logic without a
+// server. `READ_TOKEN` and `loadReadToken` are declared further down the file; that is fine because
+// nothing calls this until module evaluation has finished, by which point both exist.
+export async function initReadToken() { READ_TOKEN = await loadReadToken(); return READ_TOKEN; }
 
 // ---- Inbound auth: gate Bureau's own API with the SAME operator token it uses to reach Latch ----
 // One operator credential for the whole control plane. Bureau already loads this token at boot (and
@@ -793,9 +847,29 @@ function safeEqual(a, b) {
 // gets "readonly" — reads + read-only MCP tools, but no mutations, run-starts, steer, or config edits.
 // Absent → only the operator role exists.
 let READ_TOKEN = "";
+let READ_TOKEN_SOURCE = "";
+export function readTokenSource() { return READ_TOKEN_SOURCE; }
 async function loadReadToken() {
-  if (process.env.BUREAU_READ_TOKEN) return process.env.BUREAU_READ_TOKEN.trim();
-  try { const parsed = JSON.parse(await readFile(path.join(DATA_DIR, "auth.json"), "utf8")); return String(parsed.agentToken || "").trim(); } catch { return ""; }
+  // Same precedence as the operator token, and the same asymmetry in how failures are treated: an
+  // explicitly-named FILE must exist and carry a value, while an ABSENT read token stays absent
+  // quietly. The read-only role is optional by design, so silence is a valid configuration -- but
+  // "I pointed you at a secret" and "I did not configure this" are different statements, and only the
+  // second one is allowed to be quiet.
+  if (process.env.BUREAU_READ_TOKEN_FILE) {
+    const v = await readSecretFile(process.env.BUREAU_READ_TOKEN_FILE, "BUREAU_READ_TOKEN_FILE");
+    READ_TOKEN_SOURCE = `secret file (BUREAU_READ_TOKEN_FILE=${process.env.BUREAU_READ_TOKEN_FILE})`;
+    return v;
+  }
+  if (process.env.BUREAU_READ_TOKEN) {
+    READ_TOKEN_SOURCE = "environment variable (BUREAU_READ_TOKEN)";
+    return process.env.BUREAU_READ_TOKEN.trim();
+  }
+  try {
+    const parsed = JSON.parse(await readFile(path.join(DATA_DIR, "auth.json"), "utf8"));
+    const v = String(parsed.agentToken || "").trim();
+    READ_TOKEN_SOURCE = v ? `Latch's auth.json (${DATA_DIR})` : "not configured";
+    return v;
+  } catch { READ_TOKEN_SOURCE = "not configured"; return ""; }
 }
 // Classify the request's credential. Token comes from Authorization: Bearer or x-command-token —
 // HEADERS ONLY, never a query param. A token in a URL is copied into the access log of every proxy,
@@ -7519,6 +7593,12 @@ if (isMain) {
         console.warn(`   (e.g. Tailscale), never a public interface. Unset BUREAU_HOST to bind loopback only.\n`);
       }
       if (REMOTE_MODE) console.log("🔒 BUREAU_REMOTE is set — hard-floor actions cannot be APPROVED from Bureau's UI; decide those in Latch/Compass. Denying still works.");
+      // SAY WHERE THE CREDENTIALS CAME FROM. Bureau already announces its other postures — the remote
+      // guard, the host binding — for exactly this reason. A deployment that believes it is reading a
+      // mounted secret, and is in fact falling back to a bind-mounted auth.json, is byte-identical at
+      // runtime to one that is doing it right. This line is the only thing that separates them, and it
+      // prints the SOURCE, never the value.
+      console.log(`🔑 operator token from ${TOKEN_SOURCE} · read-only token: ${READ_TOKEN_SOURCE}`);
       server.listen(PORT, HOST, () => console.log(`Bureau on http://${HOST}:${PORT} (${WORKSPACES.length} workspace${WORKSPACES.length === 1 ? "" : "s"}, SQLite) — API + /mcp require the operator token (Authorization: Bearer <token>)`));
       setInterval(() => { tickSchedules().catch((e) => console.error("scheduler tick:", e.message)); }, 60000); // check due schedules every minute
     })
@@ -7536,7 +7616,15 @@ if (isMain) {
       console.error(`  2. Start it (it generates data/auth.json on first boot)`);
       console.error(`  3. Point Bureau at it if it is not beside this repo:  LATCH_DATA=<path to Latch>/data`);
       console.error(`\nLooked in: ${DATA_DIR}`);
-      console.error(`(Set LATCH_DATA to override. Default is ../openclaw-command-center/data via your home directory.)\n`);
+      console.error(`(Set LATCH_DATA to override. Default is ../openclaw-command-center/data via your home directory.)`);
+      // CONTAINERS TAKE THE OTHER ROUTE, and this block used to name only LATCH_DATA -- which in a
+      // container means bind-mounting the credential boundary's whole data directory into Bureau, the
+      // one arrangement the split exists to avoid. Someone reading only this message would do that,
+      // because it was the sole option offered.
+      console.error(`\nIn a container, do NOT mount Latch's data directory. Pass the tokens as secrets instead:`);
+      console.error(`  OPERATOR_TOKEN_FILE=/run/secrets/operator_token   (and optionally BUREAU_READ_TOKEN_FILE)`);
+      console.error(`  LATCH_URL=http://latch:8787                       (reach Latch over the network, not the disk)`);
+      console.error(`See docker/README.md.\n`);
       process.exit(1);
     });
 }
