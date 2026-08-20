@@ -1,0 +1,174 @@
+# The Bureau + Latch stack, arranged so the credential boundary is enforced by the runtime rather than
+# observed by convention.
+#
+# NOT RUN YET. No container runtime exists on the machine this was written on. See README.md beside this
+# file for what the first real `docker compose up` has to settle, and for the two known gaps.
+#
+# THE ONE THING THIS FILE EXISTS TO GET RIGHT: there is no shared volume between latch and bureau, and
+# bureau is given no path to Latch's data directory. Today, on bare metal, Bureau opens
+# <latch>/data/auth.json off the disk -- which means the boundary is a convention about which file Bureau
+# happens to read, and Bureau could read any other file in there just as easily. Two containers with no
+# shared mount, tokens delivered as secrets, and Latch reached by service name turns that convention into
+# something the runtime enforces.
+#
+# Getting this wrong is easy and quiet: bind-mounting ../../openclaw-command-center/data into bureau so
+# LATCH_DATA keeps working would produce a stack that starts, passes every check, and has exactly the
+# security properties of the single-process version -- two containers occupying one trust domain, for the
+# price of a harder deployment. If you ever find yourself adding that mount, the thing to change is the
+# secret, not the mount.
+
+name: bureau-stack
+
+# --- networks ----------------------------------------------------------------------------------------
+# One user-defined bridge. Bureau reaches Latch as http://latch:8787 over this network; neither service
+# needs the other's port published to the host to talk.
+#
+# EGRESS IS DELIBERATELY NOT RESTRICTED HERE, and that is a decision left open rather than one made
+# badly. `internal: true` would remove outbound access entirely, which is the stronger posture -- but
+# Latch is the external LLM gateway and reaches paid providers, and Bureau reaches Ollama on the host, so
+# a blanket internal network breaks both. Splitting it correctly needs to know which service is allowed
+# to talk to which provider, which is the operator's knowledge and not inferable from this repo. README.md
+# records it as an open question rather than leaving a false impression of a locked-down network.
+networks:
+  stack:
+    driver: bridge
+
+# --- secrets -----------------------------------------------------------------------------------------
+# Files, not environment variables. An env var is inherited by every child process a service spawns,
+# readable at /proc/<pid>/environ by anything in the container, printed back by `docker inspect` and
+# `docker compose config`, and preserved into crash dumps. Compose mounts these under /run/secrets on a
+# tmpfs, which never touches disk.
+#
+# Generate them from Latch's own auth.json ONCE, on the host, after Latch has booted for the first time.
+# See README.md; the files are gitignored and must never be committed.
+secrets:
+  operator_token:
+    file: ./secrets/operator_token
+  read_token:
+    file: ./secrets/read_token
+
+# --- shared hardening --------------------------------------------------------------------------------
+# Applied to both services. Every line is a capability being removed rather than a feature being added.
+x-hardening: &hardening
+  security_opt:
+    # Blocks setuid binaries from gaining privileges mid-process, which is the usual next step after a
+    # code-execution foothold. Neither service needs to escalate, so nothing legitimate is lost.
+    - no-new-privileges:true
+  cap_drop:
+    # Both are plain HTTP servers on unprivileged ports. They need none of the ~14 capabilities Docker
+    # grants by default -- not CHOWN, not SETUID, not NET_RAW (which is enough to sniff and spoof on the
+    # container network). Dropping ALL and adding nothing back is the correct set here.
+    - ALL
+  restart: unless-stopped
+  # A runaway agent loop or a fork bomb reaching one service must not take the host down with it, and
+  # must not be able to starve the OTHER service -- which for Latch would mean the approval path going
+  # away exactly when something is going wrong.
+  pids_limit: 512
+  # Bounded logs. The default json-file driver grows without limit, and these are chatty services.
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+services:
+  # ===================================================================================================
+  # LATCH -- the credential boundary. The only container that holds secrets at rest.
+  # ===================================================================================================
+  latch:
+    <<: *hardening
+    build:
+      # Overridable because the two repos are independent: someone may clone them anywhere.
+      context: ${LATCH_CONTEXT:-../../openclaw-command-center}
+    image: latch:local
+    ports:
+      # 127.0.0.1 EXPLICITLY. "8787:8787" binds 0.0.0.0 and would publish the credential boundary to
+      # every interface on the host, including the tailnet, silently. Anything wanting remote access
+      # should go through `tailscale serve` on the host, which is a deliberate act with its own config,
+      # rather than falling out of a port mapping nobody re-read.
+      - "127.0.0.1:8787:8787"
+    volumes:
+      # The ONLY persistent state in the stack. Latch writes exclusively inside its data directory --
+      # verified by reading every write call in server.js on 2026-08-20 -- which is what makes the
+      # read-only root filesystem below possible.
+      - latch-data:/app/data
+    # Achievable here and NOT for bureau, because of that single-directory property. The source tree is
+    # root-owned and the process runs as node, so a compromised Latch cannot rewrite its own code.
+    read_only: true
+    tmpfs:
+      # read_only leaves no writable /tmp, and Node needs one. noexec/nosuid so it cannot be used to
+      # stage a payload and run it.
+      - /tmp:rw,noexec,nosuid,size=64m
+    networks: [stack]
+    environment:
+      - PORT=8787
+      # 0.0.0.0 INSIDE the container is correct and is not the same as exposing it. The container's own
+      # namespace is the boundary; what reaches the host is decided by `ports:` above, which is loopback.
+      - HOST=0.0.0.0
+      - HOSTS=0.0.0.0
+      # LOAD-BEARING for read_only above. Latch defaults its log to __dirname/latch.log -- i.e. into the
+      # source tree, which is read-only here -- and would fail to open it. Pointing it inside the data
+      # volume is what makes the immutable root filesystem actually work rather than merely declared.
+      # (Found by re-grepping the write paths: an earlier pass looked only at writeFile/mkdir and missed
+      # the log entirely, which would have produced a container that dies on boot.)
+      - LATCH_LOG=/app/data/latch.log
+
+  # ===================================================================================================
+  # BUREAU -- the orchestrator. Holds NO credentials at rest; receives two tokens as secrets.
+  # ===================================================================================================
+  bureau:
+    <<: *hardening
+    build:
+      context: ..
+    image: bureau:local
+    depends_on:
+      latch:
+        # Waits for the HEALTHCHECK, not merely for the container to exist. Bureau exits 1 when it cannot
+        # load its token, so starting it against a Latch that is still booting would fail the stack on a
+        # race rather than on a fault.
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:4173:4173"
+    secrets:
+      - operator_token
+      - read_token
+    environment:
+      # The whole point: credentials arrive as tmpfs-backed FILES, and Latch is reached over the network.
+      # There is no LATCH_DATA here and there must not be -- see the warning at the top of this file.
+      - OPERATOR_TOKEN_FILE=/run/secrets/operator_token
+      - BUREAU_READ_TOKEN_FILE=/run/secrets/read_token
+      - LATCH_URL=http://latch:8787
+      - BUREAU_PORT=4173
+      - BUREAU_HOST=0.0.0.0
+      # Hard-floor actions must be decided in Latch, never approved from Bureau's own UI. Default-on for
+      # a container, which is by definition reachable from outside its own namespace.
+      - BUREAU_REMOTE=1
+      # Into the volume, so the log survives a container recreate. This is the ONLY piece of Bureau's
+      # state that currently can be redirected -- see the volume note below.
+      - BUREAU_LOG=/app/state/bureau.log
+    extra_hosts:
+      # Ollama runs on the HOST as a SYSTEM scheduled task and holds the GPU there. Containerising it
+      # would mean GPU passthrough, which is a separate and much larger job; reaching the host's instance
+      # is both simpler and leaves the proven arrangement alone.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # NOT read_only, and no bind mount to Latch. Bureau writes its state into its own source directory,
+      # so /app must be writable.
+      #
+      # WHAT THIS VOLUME ACTUALLY HOLDS: bureau.log, and nothing else. An earlier draft of this file
+      # claimed it kept "the DB and logs" out of the container layer, which was simply false -- Bureau
+      # writes data-bureau.db, data-bureau.json, data-bureau-workspaces.json, agent-profiles/ and
+      # drafts/ to /app directly, and only the log path is overridable. Mounting a volume at /app/state
+      # does not move files nothing writes there.
+      #
+      # SO THIS STACK IS NOT DEPLOYABLE YET: recreating the bureau container loses the database, every
+      # workspace and every audit row. That is a code change away, not a compose change -- route those
+      # paths through a single BUREAU_STATE_DIR (defaulting to HERE, so bare-metal is untouched) and this
+      # volume moves to it, /app goes back to root-owned, and read_only becomes possible here too. The
+      # file is left in this shape because it is the target shape; README.md, "Known gaps", says so.
+      - bureau-state:/app/state
+    networks: [stack]
+
+volumes:
+  latch-data:
+  bureau-state:

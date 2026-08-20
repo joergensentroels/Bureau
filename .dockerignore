@@ -1,0 +1,51 @@
+# WHAT MUST NOT GO INTO THE IMAGE. A security control, not a build optimisation.
+#
+# `COPY . /app` copies the build context verbatim, and on a live machine this tree holds data-bureau.db
+# (every workspace's objectives, agent output, audit rows), data-bureau.json, bureau.log, and .git --
+# which carries every secret ever committed and later reverted, still reachable by hash.
+#
+# Image layers are not private: content-addressed, cached, pushed, and readable by anyone who can pull,
+# via `docker history` and a tar extract, with no container running. A secret cannot be removed by
+# deleting it in a later layer either -- the earlier layer still holds it.
+#
+# DENY FIRST, then admit, because the two failure modes are not symmetric:
+#   - allowlist too narrow -> the image fails to start. Loud, immediate, fixed in minutes.
+#   - denylist too narrow  -> workspace data or a credential is baked into a layer. Silent, and possibly
+#                             already pushed by the time anyone looks.
+# The build is therefore arranged to break rather than to leak.
+#
+# Derived, not guessed: `git ls-files` for top-level modules plus every local import in server.mjs,
+# checked 2026-08-20. server.mjs imports exactly one local module (tools/git-env.mjs) and has no dynamic
+# imports, so static reading is sufficient. A new top-level module will fail the next build with
+# MODULE_NOT_FOUND naming itself.
+*
+
+# --- runtime, admitted deliberately -----------------------------------------------------------------
+!package.json
+!server.mjs
+!public/
+
+# tools/ wholesale rather than just the one imported file (tools/git-env.mjs). First-party code, no
+# secrets, and it is what makes the container diagnosable from inside: tools/hunt-log.mjs is precisely
+# what someone needs when a scheduled run in a container appears to have done nothing. A container you
+# cannot interrogate gets debugged by guesswork.
+!tools/
+
+# AGPL-3.0: handing someone an image is conveying the program, and section 4 requires the licence text to
+# travel with it. Omitting this is a licence violation, not untidiness.
+!LICENSE
+
+# --- re-excluded INSIDE the admitted trees ----------------------------------------------------------
+# The directory allowances above are wholesale, so anything sensitive that ever lands inside one needs
+# naming here.
+**/data/
+**/data-dev/
+**/bureauProjects/
+**/*.db
+**/*.db-journal
+**/*.db-wal
+**/*.log
+**/*.log.*
+**/.env
+**/.env.*
+**/node_modules/
