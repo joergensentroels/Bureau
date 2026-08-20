@@ -11,7 +11,7 @@
 // No dependencies. Node built-ins only.
 
 import { readFile, writeFile, mkdir, readdir, stat, rm, rename, realpath } from "node:fs/promises";
-import { openSync, closeSync, writeSync, existsSync, statSync, renameSync, symlinkSync } from "node:fs";
+import { openSync, closeSync, writeSync, existsSync, statSync, renameSync, symlinkSync, mkdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { createServer } from "node:http";
 import http from "node:http";
@@ -21,6 +21,7 @@ import dns from "node:dns/promises";
 import path from "node:path";
 import os from "node:os";
 import { gitSafeEnv } from "./tools/git-env.mjs";
+import { stateDir, stateDirIsOverridden } from "./tools/state-dir.mjs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { randomUUID, createHash, timingSafeEqual } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -35,18 +36,27 @@ const DATA_DIR = process.env.LATCH_DATA
 // below resolve the right paths automatically without threading a workspace arg through every call.
 // The "default" workspace uses the base paths (data-bureau.json / drafts / agent-profiles); other
 // workspaces get suffixed paths. (A one-time boot migration adopts a legacy data-foreman.json.)
-const _ORGFILE_DEFAULT = path.join(HERE, "data-bureau.json");
-const _ORGFILE_LEGACY = path.join(HERE, "data-foreman.json");   // pre-rename name; migrated on boot
-const _PROFILES_DEFAULT = path.join(HERE, "agent-profiles");
-const _DRAFTS_DEFAULT = path.join(HERE, "drafts");
-const WS_REGISTRY = path.join(HERE, "data-bureau-workspaces.json");
+// EVERY MUTABLE PATH BELOW HANGS OFF STATE_DIR, not HERE. Unset, it IS HERE -- so an existing install
+// resolves every one of these exactly where it did before, with nothing to migrate. Set, all of Bureau's
+// writable state moves to one directory, which is what lets a container mount a volume for it and keep
+// the source tree read-only. See tools/state-dir.mjs.
+//
+// The line to watch when editing this file: `public/` stays on HERE, because it is code. Anything Bureau
+// WRITES belongs under STATE_DIR and anything it only READS from the repo belongs under HERE, and
+// test/state-dir.test.mjs asserts that split rather than trusting it to hold.
+const STATE_DIR = stateDir(HERE);
+const _ORGFILE_DEFAULT = path.join(STATE_DIR, "data-bureau.json");
+const _ORGFILE_LEGACY = path.join(STATE_DIR, "data-foreman.json");   // pre-rename name; migrated on boot
+const _PROFILES_DEFAULT = path.join(STATE_DIR, "agent-profiles");
+const _DRAFTS_DEFAULT = path.join(STATE_DIR, "drafts");
+const WS_REGISTRY = path.join(STATE_DIR, "data-bureau-workspaces.json");
 const WS_RE = /^[a-z0-9][a-z0-9-]{0,30}$/;                  // safe workspace ids (also used as filename parts)
 const wsStore = new AsyncLocalStorage();
 const currentWs = () => wsStore.getStore()?.ws || "default";
 // org data now lives in SQLite (see the datastore section); _ORGFILE_* below are read once by the
 // JSON→SQLite boot migration. Drafts/agent-profiles remain per-workspace folders.
-const profilesDir = (ws = currentWs()) => ws === "default" ? _PROFILES_DEFAULT : path.join(HERE, `agent-profiles-${ws}`);
-const draftsDir = (ws = currentWs()) => ws === "default" ? _DRAFTS_DEFAULT : path.join(HERE, `drafts-${ws}`);
+const profilesDir = (ws = currentWs()) => ws === "default" ? _PROFILES_DEFAULT : path.join(STATE_DIR, `agent-profiles-${ws}`);
+const draftsDir = (ws = currentWs()) => ws === "default" ? _DRAFTS_DEFAULT : path.join(STATE_DIR, `drafts-${ws}`);
 const versionsDir = (ws = currentWs()) => path.join(draftsDir(ws), ".versions");   // prior versions of each deliverable (name.<ts>)
 const VERSION_KEEP = Math.max(1, Number(process.env.BUREAU_VERSION_KEEP) || 20);   // per-document archive cap — enforced on DISK as well as in metadata
 const AGENT_MEMORY_KEEP = 8;   // entries retained per agent — DISTINCT objectives, not raw rows (see persistRun)
@@ -84,7 +94,7 @@ let TOKEN = "";
 //
 // Writes are SYNCHRONOUS for the same class of reason — an async append is simply lost when the
 // process exits immediately afterwards, which is exactly the moment the line matters most.
-const LOG_FILE = process.env.BUREAU_LOG || path.join(HERE, "bureau.log");
+const LOG_FILE = process.env.BUREAU_LOG || path.join(STATE_DIR, "bureau.log");
 const LOG_MAX = Math.max(64 * 1024, Number(process.env.BUREAU_LOG_MAX) || 5 * 1024 * 1024);
 const LOG_KEEP = Math.max(1, Number(process.env.BUREAU_LOG_KEEP) || 3);
 
@@ -187,7 +197,7 @@ export function startLogTee(file = LOG_FILE, max = LOG_MAX, keep = LOG_KEEP) {
 // its own `audit` table (uncapped history + real queries). WAL mode + per-statement/transaction
 // locking give atomic writes and safe concurrency (no more half-written-file corruption or the
 // cross-process clobber that a shared JSON file allowed). Drafts/agent-profiles stay as files.
-const DB_FILE = path.join(HERE, "data-bureau.db");
+const DB_FILE = path.join(STATE_DIR, "data-bureau.db");
 let db = null;
 function initDb() {
   db = new DatabaseSync(DB_FILE);
@@ -222,7 +232,7 @@ async function migrateJsonToDb() {
   const insAudit = db.prepare("INSERT INTO audit(ws,id,at,kind,agent,agent_id,action_type,run_id,decision,ok,json) VALUES(?,?,?,?,?,?,?,?,?,?,?)");
   let imported = 0;
   for (const w of reg) {
-    const files = w.id === "default" ? [_ORGFILE_DEFAULT, _ORGFILE_LEGACY] : [path.join(HERE, `data-bureau-ws-${w.id}.json`)];
+    const files = w.id === "default" ? [_ORGFILE_DEFAULT, _ORGFILE_LEGACY] : [path.join(STATE_DIR, `data-bureau-ws-${w.id}.json`)];
     let org = {};
     for (const f of files) { try { org = JSON.parse(await readFile(f, "utf8")); break; } catch {} }
     const audit = Array.isArray(org.audit) ? org.audit : [];
@@ -7578,6 +7588,24 @@ if (isMain) {
   // tier informed and finding out from an invoice. The Latch-configured model is checked separately, at run
   // start (configuredPaidModel) and again on the first paid call that a model actually serves.
   for (const m of unratedTierModels()) warnUnratedModel(m);
+  // CREATE THE STATE DIRECTORY BEFORE ANYTHING OPENS A FILE IN IT, and do it HERE rather than at module
+  // scope. tools/hunt-log.mjs imports this file for `gateNeverRan` on the strength of "importing
+  // server.mjs boots nothing" -- a mkdir at module scope would make a read-only diagnostic tool create
+  // directories as a side effect of being loaded, which is precisely the sort of quiet side effect that
+  // sentence promises does not happen.
+  //
+  // Recursive and idempotent. With BUREAU_STATE_DIR unset this is the repo root, which exists by
+  // definition, so it is a no-op for every bare-metal install.
+  try { mkdirSync(STATE_DIR, { recursive: true }); }
+  catch (e) {
+    console.error(`\nCannot create BUREAU_STATE_DIR (${STATE_DIR}): ${e.message}`);
+    console.error("Bureau writes its database, workspaces, drafts and profiles there and cannot start without it.\n");
+    process.exit(1);
+  }
+  // Said out loud when it is NOT the default. A container that believes its state sits on a volume, while
+  // the variable never reached the process, fills the container layer instead and loses everything on the
+  // next recreate -- while looking completely healthy until then.
+  if (stateDirIsOverridden()) console.log(`💾 state directory: ${STATE_DIR} (BUREAU_STATE_DIR)`);
   initDb();
   migrateJsonToDb()                       // one-time import of legacy JSON files → SQLite (reads data-bureau.json or the legacy data-foreman.json)
     .catch((e) => console.error("JSON→SQLite migration:", e.message))

@@ -123,6 +123,19 @@ for (const [name, lines] of [["latch", latchLines], ["bureau", bureauLines]]) {
 
 // ---- hardening that must not be quietly dropped ----------------------------------------------------
 ok(/read_only:\s*true/.test(latch), "latch keeps an immutable root filesystem");
+ok(/read_only:\s*true/.test(bureau), "bureau keeps an immutable root filesystem too, now that its state has one home");
+
+// THE MOUNT PATH MUST MATCH THE VARIABLE. If BUREAU_STATE_DIR and the volume's mount point drift apart,
+// nothing errors: Bureau writes its database into the container's own layer, the volume sits there empty,
+// everything looks healthy, and the next `docker compose up --force-recreate` silently destroys every
+// workspace and audit row. Cross-checking the two is the only thing standing between that and a backup.
+const stateVar = (bureauEnv.match(/BUREAU_STATE_DIR\s*=\s*(\S+)/) || [])[1] || "";
+ok(stateVar !== "", "bureau sets BUREAU_STATE_DIR so its writable state has a single home");
+const stateMounts = subBlock(bureauLines, "volumes")
+  .map((l) => l.replace(/^\s*-\s*/, "").trim()).filter(Boolean)
+  .map((v) => v.split(":")[1] || "");
+ok(stateMounts.includes(stateVar),
+   `a volume must be mounted exactly at BUREAU_STATE_DIR (${stateVar}); mounts: ${stateMounts.join(", ") || "none"}`);
 ok(/LATCH_LOG\s*=\s*\/app\/data\//.test(latchEnv),
    "latch's log is redirected into its writable volume — without this, read_only kills it on boot");
 ok(/x-hardening:/.test(text) && /<<:\s*\*hardening/.test(bureau) && /<<:\s*\*hardening/.test(latch),
@@ -157,6 +170,13 @@ ctl.push(["losing latch's read-only rootfs is caught", !/read_only:\s*true/.test
 
 // A stripped environment block must read as absent, not as vacuously clean.
 ctl.push(["subBlock reports absence rather than inventing content", subBlock(["    other:", "      - x"], "environment").length === 0]);
+
+// A drifted mount point must be caught. This is the silent-data-loss case, so it gets its own control.
+m = text.replace("- bureau-state:/app/state", "- bureau-state:/app/elsewhere");
+const drifted = subBlock(decomment(serviceBlocks(m).get("bureau")), "volumes")
+  .map((l) => l.replace(/^\s*-\s*/, "").trim()).filter(Boolean).map((v) => v.split(":")[1] || "");
+ctl.push(["a volume mounted somewhere other than BUREAU_STATE_DIR is caught", !drifted.includes(stateVar)]);
+ctl.push(["and the real file's mount does match", stateMounts.includes(stateVar)]);
 
 // And the parser must not "find" services in a file that has none.
 ctl.push(["the parser reports nothing for a file with no services: key", serviceBlocks("name: x\nvolumes:\n  a:\n") === null]);

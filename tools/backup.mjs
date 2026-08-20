@@ -32,8 +32,13 @@ import {
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
+import { stateDir } from "./state-dir.mjs";
 
 const HERE = path.dirname(path.dirname(fileURLToPath(import.meta.url)));   // the bureau repo root
+// Backups must read the state Bureau actually WRITES. Resolved through the shared helper rather than
+// assumed to be the repo root: with BUREAU_STATE_DIR set, a backup rooted at HERE would find no
+// database, report "not present", and pass -- a green backup of nothing, which is worse than a failure.
+const STATE = stateDir(HERE);
 const REPO_PARENT = path.dirname(HERE);
 const LATCH_DATA = process.env.LATCH_DATA || path.join(REPO_PARENT, "openclaw-command-center", "data");
 
@@ -197,7 +202,7 @@ console.log(`snapshot -> ${snapDir}`);
 // reads at three different moments. VACUUM INTO takes one consistent read and writes a single compact,
 // already-checkpointed file. busy_timeout waits out a concurrent writer instead of failing.
 {
-  const src = path.join(HERE, "data-bureau.db");
+  const src = path.join(STATE, "data-bureau.db");
   const dest = path.join(snapDir, "bureau", "data-bureau.db");
   const item = { name: "bureau/data-bureau.db", verified: false };
   try {
@@ -232,7 +237,7 @@ console.log(`snapshot -> ${snapDir}`);
 
 // --- Bureau's non-DB state: the workspace registry, plus deliverables and profiles as trees.
 for (const [rel, kind] of [["data-bureau-workspaces.json", "file"], ["drafts", "tree"], ["agent-profiles", "tree"]]) {
-  const src = path.join(HERE, rel);
+  const src = path.join(STATE, rel);
   const item = { name: `bureau/${rel}`, verified: false };
   try {
     if (!existsSync(src)) { item.verified = true; item.skipped = "not present"; add(item); continue; }
@@ -307,7 +312,7 @@ for (const [rel, kind] of [["data-bureau-workspaces.json", "file"], ["drafts", "
 const ok = problems.length === 0;
 const manifest = {
   ok, at: new Date().toISOString(), host: os.hostname(), node: process.version,
-  sources: { bureau: HERE, latch: LATCH_DATA },
+  sources: { bureau: STATE, latch: LATCH_DATA },   // where the data was READ FROM, not where the code lives
   bytes: dirSize(snapDir), items, problems,
   // Recorded because a BOM'd config is readable but has bitten this system once already: any loader
   // that forgets to strip it fails open to defaults, silently. Not a snapshot failure.

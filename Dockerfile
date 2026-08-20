@@ -18,6 +18,7 @@ ENV NODE_ENV=production \
     BUREAU_PORT=4173 \
     BUREAU_HOST=0.0.0.0 \
     BUREAU_REMOTE=1 \
+    BUREAU_STATE_DIR=/app/state \
     LATCH_URL=http://latch:8787
 
 # BUREAU_REMOTE DEFAULTS ON IN THE IMAGE, matching Start-Bureau.ps1's posture and for the same reason.
@@ -34,22 +35,18 @@ WORKDIR /app
 
 COPY . /app
 
-# --- THE HONEST LIMITATION, stated where someone changing this file will see it -----------------------
+# --- state lives in ONE directory, so the code can be immutable ---------------------------------------
 #
-# /app is writable by the app user, and Latch's equivalent is not. That asymmetry is real and it is not
-# an oversight: Bureau writes its state INTO ITS OWN SOURCE DIRECTORY -- data-bureau.db,
-# data-bureau.json, data-bureau-workspaces.json, agent-profiles/, drafts/, bureau.log -- so the directory
-# holding the code must be writable for the process to start at all.
+# Bureau used to write its database, org blobs, drafts and agent-profiles into its own source directory.
+# That forced /app to be writable, made `read_only: true` impossible, and left a compromised process able
+# to rewrite its own code. BUREAU_STATE_DIR (see tools/state-dir.mjs) collects all of it under one path.
 #
-# Two consequences, both worth knowing before trusting this image:
-#   1. `read_only: true` is NOT possible for this service, while it is for Latch.
-#   2. A compromised Bureau process can rewrite its own source. Latch's cannot.
+# So /app stays ROOT-OWNED while the process runs as node: it can read its code and cannot alter it,
+# which is the posture Latch's image already had. Only /app/state is writable, and compose mounts a named
+# volume there so nothing persistent lives in the container layer.
 #
-# The fix is a code change and not a packaging one: route those paths through a single BUREAU_STATE_DIR
-# (defaulting to HERE, so bare-metal behaviour is unchanged), then /app goes back to root-owned and
-# read-only with one named volume at the state directory. Until that lands, this file should not pretend
-# otherwise -- see docker/README.md, "Known gaps".
-RUN chown -R node:node /app
+# The variable defaults to the repo root when unset, so no bare-metal install is affected by any of this.
+RUN mkdir -p /app/state && chown node:node /app/state
 
 USER node
 

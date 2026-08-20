@@ -143,30 +143,30 @@ services:
       # Hard-floor actions must be decided in Latch, never approved from Bureau's own UI. Default-on for
       # a container, which is by definition reachable from outside its own namespace.
       - BUREAU_REMOTE=1
-      # Into the volume, so the log survives a container recreate. This is the ONLY piece of Bureau's
-      # state that currently can be redirected -- see the volume note below.
-      - BUREAU_LOG=/app/state/bureau.log
+      # ALL of Bureau's mutable state, in one directory on the volume below: the database, per-workspace
+      # org blobs, the drafts and agent-profile trees, and the log. No BUREAU_LOG line is needed any more
+      # -- the log's own default is now STATE_DIR/bureau.log, so it follows this without being named.
+      - BUREAU_STATE_DIR=/app/state
     extra_hosts:
       # Ollama runs on the HOST as a SYSTEM scheduled task and holds the GPU there. Containerising it
       # would mean GPU passthrough, which is a separate and much larger job; reaching the host's instance
       # is both simpler and leaves the proven arrangement alone.
       - "host.docker.internal:host-gateway"
     volumes:
-      # NOT read_only, and no bind mount to Latch. Bureau writes its state into its own source directory,
-      # so /app must be writable.
+      # The ONE writable path, and now genuinely the only one. BUREAU_STATE_DIR points every mutable path
+      # here, so /app can be root-owned and immutable exactly as Latch's is.
       #
-      # WHAT THIS VOLUME ACTUALLY HOLDS: bureau.log, and nothing else. An earlier draft of this file
-      # claimed it kept "the DB and logs" out of the container layer, which was simply false -- Bureau
-      # writes data-bureau.db, data-bureau.json, data-bureau-workspaces.json, agent-profiles/ and
-      # drafts/ to /app directly, and only the log path is overridable. Mounting a volume at /app/state
-      # does not move files nothing writes there.
-      #
-      # SO THIS STACK IS NOT DEPLOYABLE YET: recreating the bureau container loses the database, every
-      # workspace and every audit row. That is a code change away, not a compose change -- route those
-      # paths through a single BUREAU_STATE_DIR (defaulting to HERE, so bare-metal is untouched) and this
-      # volume moves to it, /app goes back to root-owned, and read_only becomes possible here too. The
-      # file is left in this shape because it is the target shape; README.md, "Known gaps", says so.
+      # Earlier drafts of this file mounted a volume here and claimed it held "the DB and logs" while
+      # Bureau wrote them to /app directly -- the volume existed and held nothing. That is fixed in the
+      # code rather than in the comment.
       - bureau-state:/app/state
+    # Now achievable, and for the same reason it always was for Latch: exactly one writable directory.
+    # A compromised Bureau can no longer rewrite its own source.
+    read_only: true
+    tmpfs:
+      # read_only leaves no writable /tmp and Node needs one. noexec/nosuid so it cannot be used to stage
+      # a payload and then run it.
+      - /tmp:rw,noexec,nosuid,size=64m
     networks: [stack]
 
 volumes:

@@ -19,9 +19,15 @@ import path from "node:path";
 // The same predicate the runner uses, imported rather than restated — a second copy here would drift from the
 // gate's wording and quietly stop recognising the failure it exists to name. Importing server.mjs boots nothing.
 import { gateNeverRan } from "../server.mjs";
+import { stateDir } from "./state-dir.mjs";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
-const DB = path.join(ROOT, "data-bureau.db");
+// Through the shared helper, for the same reason this file imports gateNeverRan instead of restating
+// it: a tool that resolves the state directory differently from the server does not fail, it reads a
+// DIFFERENT DATABASE and reports confidently about it. An empty one here while the server writes audit
+// rows elsewhere would print "No runs recorded at all" -- the exact false absence this file exists to
+// stop someone believing.
+const DB = path.join(stateDir(ROOT), "data-bureau.db");
 
 const args = process.argv.slice(2);
 const li = args.indexOf("--limit");

@@ -5,9 +5,12 @@
 directory is reviewed, reasoned, and statically checked; none of it is exercised. [First build](#first-build)
 lists what to settle the moment a runtime exists.
 
-What *is* verified is the code change underneath it: `test/secret-tokens.test.mjs` (22 assertions,
-negative-controlled) covers credential provenance, and `test/compose-boundary.test.mjs` (22 assertions)
-checks this compose file for the one property it exists to hold.
+What *is* verified is the code underneath it, by three suites in the pre-push gate — all three
+negative-controlled, and counts deliberately not quoted here because nothing would check them:
+
+- `test/secret-tokens.test.mjs` — credential provenance, and that the strong source cannot degrade
+- `test/state-dir.test.mjs` — that `BUREAU_STATE_DIR` relocates state and that its default did not move
+- `test/compose-boundary.test.mjs` — this compose file, against the properties it exists to hold
 
 ## Why two containers
 
@@ -16,14 +19,17 @@ credential boundary a *convention* — Bureau opens one file in that directory b
 code happens to do, and it could open any other file there just as easily. Nothing prevents it.
 
 Two containers with no shared mount, tokens delivered as secrets, and Latch reached by service name turn
-that convention into something the runtime enforces:
+that convention into something the runtime enforces. `BUREAU_STATE_DIR` is what made the second column
+possible: with every mutable path collected under one directory, Bureau's source tree can be root-owned
+and immutable, so a compromised process cannot rewrite its own code.
 
 | | Latch | Bureau |
 |---|---|---|
 | Credentials at rest | **yes — the only one** | none |
+| Writable path | `/app/data` (volume) | `/app/state` (volume) |
 | Gets its tokens from | its own `data/` | `/run/secrets/*`, tmpfs |
 | Reaches the other via | — | `http://latch:8787` |
-| Root filesystem | **read-only** | writable (see [gaps](#known-gaps)) |
+| Root filesystem | **read-only** | **read-only** |
 | Published on | `127.0.0.1:8787` | `127.0.0.1:4173` |
 | Capabilities | `cap_drop: ALL` | `cap_drop: ALL` |
 
@@ -74,23 +80,12 @@ Bureau's boot line reports which source each credential came from — never the 
 
 ## Known gaps
 
-**1. Bureau's state lives in its source directory, so this stack is not deployable yet.**
-Bureau writes `data-bureau.db`, `data-bureau.json`, `data-bureau-workspaces.json`, `agent-profiles/` and
-`drafts/` into `/app` itself. Only the log path is redirectable (`BUREAU_LOG`). Consequences: `/app` must
-be writable, so `read_only: true` is impossible for Bureau and a compromised process can rewrite its own
-source; and **recreating the container loses the database, every workspace and every audit row.**
-
-The fix is a code change, not a compose change: route those paths through a single `BUREAU_STATE_DIR`
-(defaulting to `HERE`, so bare-metal behaviour is untouched). Then the volume moves to it, `/app` goes
-back to root-owned, and `read_only` becomes possible here too. The compose file is written in the target
-shape deliberately.
-
-**2. Egress is unrestricted.** `internal: true` would be stronger, but Latch is the external LLM gateway
+**1. Egress is unrestricted.** `internal: true` would be stronger, but Latch is the external LLM gateway
 and reaches paid providers, while Bureau reaches Ollama on the host. Splitting that correctly requires
 knowing which service may talk to which provider — operator knowledge, not inferable from this repo. Left
 open rather than half-done, so the network is not mistaken for locked down.
 
-**3. The finding gate needs `git` and a target checkout.** Bureau's review subsystem builds a real git
+**2. The finding gate needs `git` and a target checkout.** Bureau's review subsystem builds a real git
 worktree of the repo under review. Whether `node:24-bookworm-slim` ships `git` is unconfirmed, and the
 repos under review are not in the image regardless. A containerised Bureau can serve its UI and run
 schedules; the hunt path needs either `git` installed and the repos mounted, or to stay on bare metal.
@@ -103,10 +98,13 @@ Nothing below has been observed. In rough order of how likely each is to bite:
    from `git ls-files` plus every local import (neither repo has dynamic imports). A miss fails loudly
    with `MODULE_NOT_FOUND` naming the file — the intended failure mode, chosen over a denylist that leaks
    silently.
-2. **Does Latch start under `read_only: true`?** It should: it writes only inside `data/`, and
-   `LATCH_LOG` is pointed into that volume. That env var is load-bearing — without it Latch tries to
-   write `latch.log` into the read-only source tree and dies on boot. An earlier pass missed it, because
-   the grep looked at `writeFile`/`mkdir` and the log is opened elsewhere.
+2. **Do BOTH start under `read_only: true`?** Bureau only just became able to — `BUREAU_STATE_DIR`
+   collects its database, org blobs, drafts and profiles under `/app/state`, and the compose file
+   cross-checks that the volume is mounted at exactly that path (a drift there loses every workspace on
+   the next recreate, silently). Latch should be fine — it writes only inside `data/`, and `LATCH_LOG` is
+   pointed into that volume. That variable is load-bearing: without it Latch tries to write `latch.log`
+   into the read-only source tree and dies on boot. An earlier pass over the write paths missed it,
+   because the grep looked at `writeFile`/`mkdir` and the log is opened through neither.
 3. **Does `cap_drop: ALL` leave both able to bind their ports?** 8787 and 4173 are unprivileged, so it
    should, but this is the sort of thing that is cheap to check and expensive to assume.
 4. **Do the healthchecks pass?** Both are credential-free by necessity — a token in a `HEALTHCHECK`
