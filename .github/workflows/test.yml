@@ -11,7 +11,27 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # BOTH PLATFORMS, because neither one alone is a superset and the gap is where the bugs hid.
+    #
+    # This ran on ubuntu-latest only, while the local pre-push hook runs on Windows. A test carrying a
+    # platform assumption therefore passed the gate and failed the runner, or the reverse, and nobody
+    # found out until someone opened the Actions tab. Measured: `closeSync(3)` guessed which descriptor
+    # the log tee held -- correct on Windows, wrong on Linux -- and CI was red for TWELVE consecutive runs
+    # across three days on a public repository while every local push reported green.
+    #
+    # fail-fast: false because the whole point is to see BOTH answers. Cancelling the second leg the moment
+    # the first one fails would reproduce exactly the blind spot this matrix exists to remove.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    # bash on both. The steps below use PIPESTATUS, tee, grep, sed and awk; windows-latest defaults to
+    # pwsh, where none of that parses. Git Bash ships on the Windows runners, so one shell covers both and
+    # the scripts stay single-sourced rather than forked per platform.
+    defaults:
+      run:
+        shell: bash
     steps:
       # v7 on both — current, and the reason to leave v4 was the RUNTIME: v4 of each declares `using: node20`,
       # which the runners no longer offer. They force it onto node24 and announce it as deprecated on every
@@ -39,18 +59,20 @@ jobs:
         # reported nothing anyone could act on. A gate you cannot read is a gate people learn to ignore.
         run: |
           set +e
-          node test/run-all.mjs --serve 2>&1 | tee /tmp/test-output.txt
+          TMP_OUT="${RUNNER_TEMP:-/tmp}/test-output.txt"
+          TMP_REPORT="${RUNNER_TEMP:-/tmp}/test-report.txt"
+          node test/run-all.mjs --serve 2>&1 | tee "$TMP_OUT"
           code=${PIPESTATUS[0]}
           if [ "$code" -ne 0 ]; then
             # The FAILING lines first, then the tail. A tail alone is the wrong 80 lines: the suites print one line
             # per assertion, so the end of the output is whatever ran last, not what went wrong. The first version
             # of this annotation showed twenty consecutive ticks under the words "suite failed".
-            { grep -nE '^(✗|not ok|FAILURES|  FAIL )' /tmp/test-output.txt | head -40
+            { grep -nE '^(✗|not ok|FAILURES|  FAIL )' "$TMP_OUT" | head -40
               echo "-- last 40 lines --"
-              tail -40 /tmp/test-output.txt
-            } > /tmp/test-report.txt
-            body=$(sed -e 's/%/%25/g' -e 's/\r/%0D/g' /tmp/test-report.txt | awk '{printf "%s%%0A", $0}')
-            echo "::error title=Test suite failed (exit $code)::$body"
+              tail -40 "$TMP_OUT"
+            } > "$TMP_REPORT"
+            body=$(sed -e 's/%/%25/g' -e 's/\r/%0D/g' "$TMP_REPORT" | awk '{printf "%s%%0A", $0}')
+            echo "::error title=Test suite failed on ${{ matrix.os }} (exit $code)::$body"
           fi
           exit $code
         env:
@@ -63,6 +85,6 @@ jobs:
       - name: Coverage audit (every export + /api + /mcp route is tested or in the TESTING.md ledger)
         run: |
           node test/coverage-audit.mjs || {
-            echo "::error title=Coverage audit failed::An export or route is neither referenced by a test nor listed in TESTING.md. Add a test, or add a ledger entry with the reason."
+            echo "::error title=Coverage audit failed on ${{ matrix.os }}::An export or route is neither referenced by a test nor listed in TESTING.md. Add a test, or add a ledger entry with the reason."
             exit 1
           }
