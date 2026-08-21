@@ -186,6 +186,15 @@ for (const r of rows) {
     console.log(`      (summary says refused=${j.unmet ?? "?"}; ${errs.length} refusal(s) are recorded on the `
               + `actions — the counts disagree, and this tool does not know which is right)`);
   }
+  // The recorded cause, for an idle run. This is the whole point of the verdict: "idle" says the round
+  // established nothing, and this line says why, which is what decides where to look next.
+  if (v === "idle") {
+    if (j.idleReason) console.log(`      why idle: ${j.idleReason}`);
+    // An idle row with no reason is a run recorded before the cause was captured. Said plainly, without
+    // guessing at one -- the same rule the no-evidence refusal block below follows.
+    else console.log(`      (no reason recorded — this run predates idleReason, so why it did nothing is not on the record)`);
+  }
+
   // A STORED "clean" THAT SPENT NOTHING was an idle round recorded under the old rule. History is not
   // rewritten, so the audit table still says "clean" for every such run -- and the whole reason to read
   // this listing is to find out what the hunts established, which for these runs is nothing at all.

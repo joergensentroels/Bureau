@@ -1364,6 +1364,61 @@ export const gateNeverRan = (reason) => String(reason || "").startsWith(GATE_SET
 // A hunt's verdict. "clean" is a claim that the code was examined and nothing survived the gate, so it may only be
 // said when the gate actually ran. If every refusal was a setup failure there is no evidence either way, and the
 // honest word is "ungated" — which the UI renders with its neutral badge, because that is exactly what it is.
+// WHY A ROUND PRODUCED NOTHING, kept on the run object so it can outlive the event stream.
+//
+// The unparsed-reply site already carries the note "Emitted, because this used to be silent. A round
+// that spent every turn failing to format its action was indistinguishable from a round that found
+// nothing." Emitting fixed that for someone WATCHING. A nightly scheduled hunt has no viewer: the run
+// stream is not persisted, so by morning the only durable trace is the audit row -- and on 2026-08-21
+// that row was a bare summary saying "clean" for a round with zero actions and zero tokens.
+//
+// So the reasons are tallied here as well as emitted. Cheap by construction: two integers and one string
+// per run, written only on the paths that already stopped to emit an event.
+function noteIdle(run, kind, why) {
+  if (!run) return;
+  const t = (run.idleTally ||= { counts: {}, first: "" });
+  t.counts[kind] = (t.counts[kind] || 0) + 1;
+  // FIRST, not last. The first failure is the one with a cause; everything after it is usually the same
+  // cause repeating, and the last one is the least informative of the set.
+  if (!t.first && why) t.first = String(why).replace(/\s+/g, " ").trim().slice(0, 240);
+}
+
+// One sentence naming why a round did nothing. Exported for test/units.test.mjs.
+//
+// NEVER RETURNS EMPTY. An idle run whose explanation is blank is the defect this exists to fix, one layer
+// down: it would put a verdict of "idle" in the audit row with nothing beside it, and the reader is back
+// to guessing. The two cases are deliberately distinguished, because they send you to different places:
+// turns were attempted and produced nothing (look at the model), or no turn was attempted at all (look at
+// whether the round was ever dispatched).
+export function idleReason(run = {}) {
+  const t = run.idleTally || { counts: {}, first: "" };
+  const counts = t.counts || {};
+  // BOTH FORMS SPELLED OUT. A naive `label + "s"` produced "2 unparsable replys" -- caught by the test,
+  // not by reading it back. English plurals are not a suffix, and a diagnosis line that reads as machine
+  // output is one a tired reader skims instead of acting on.
+  const LABEL = { blank:        ["blank reply", "blank replies"],
+                  unparsed:     ["unparsable reply", "unparsable replies"],
+                  capRefused:   ["thinking-cap refusal", "thinking-cap refusals"],
+                  llmError:     ["provider error", "provider errors"],
+                  lensRejected: ["lens refusal", "lens refusals"] };
+  const parts = Object.keys(counts).sort().map((k) => {
+    const n = counts[k];
+    const form = LABEL[k] || [k, k + "(s)"];   // an unlabelled kind still reads sanely rather than "somethingNews"
+    return `${n} ${n === 1 ? form[0] : form[1]}`;
+  });
+  const rounds = (run.rounds || []).length;
+  if (!parts.length) {
+    return rounds
+      ? `${rounds} round(s) ran but nothing was proposed, and no turn reported a failure`
+      : "no turn was attempted — the round never reached the model";
+  }
+  // Flattened HERE as well as in noteIdle. This function is the one that promises a single line -- it feeds
+  // a one-line audit field and a one-line hunt-log row -- so the guarantee belongs to it, not only to the
+  // recorder that happens to be its usual caller.
+  const first = String(t.first || "").replace(/\s+/g, " ").trim();
+  return `${parts.join(", ")} across ${rounds} round(s)` + (first ? `; first: ${first}` : "");
+}
+
 export function huntVerdict(findings = [], rejected = [], evidence = {}) {
   if (findings.length) return "found";
   if (rejected.some((r) => gateNeverRan(r && r.reason))) return "ungated";
@@ -2653,8 +2708,9 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
       try { return await ask(maxTokens, { ...NO_THINKING, ...JSON_REPLY }); }
       catch (e) {
         run.capUnsupported = true;
-        emit(run, "retry", { agent: who, depth, capRefused: true,
-                             why: "the provider refused the thinking cap / JSON mode (" + String(e.message || e).slice(0, 90) + ") — this run will stop sending them" });
+        const capWhy = "the provider refused the thinking cap / JSON mode (" + String(e.message || e).slice(0, 90) + ") — this run will stop sending them";
+        emit(run, "retry", { agent: who, depth, capRefused: true, why: capWhy });
+        noteIdle(run, "capRefused", capWhy);
         return ask(maxTokens);
       }
     };
@@ -2671,11 +2727,15 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
         const split = usageSplit(meta.usage, 0);
         emit(run, "retry", { agent: who, depth, capped, why: blankReplyReason(split, capped),
                              outputTokens: split.output, reasoningTokens: split.reasoning });
+        noteIdle(run, "blank", blankReplyReason(split, capped));
         raw = await askCapped(TURN_TOKENS_RETRY);
       }
       noteLlm(run, true);
     }
-    catch (e) { noteLlm(run, false); emit(run, "error", { agent: who, depth, message: e.message }); break; }
+    // A provider failure BREAKS the turn loop without failing the run, so a round can end here having done
+    // nothing at all -- the most likely shape of the 2026-08-21 06:16 hunt, which spent zero tokens. Recorded
+    // rather than only emitted, because that run's stream is long gone and its audit row said "clean".
+    catch (e) { noteLlm(run, false); noteIdle(run, "llmError", e.message); emit(run, "error", { agent: who, depth, message: e.message }); break; }
     const callTokens = estTokens(sendable) + Math.ceil((raw.length) / 4);
     tokens += callTokens;
     if (meta.paid) {
@@ -2704,6 +2764,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
       // indistinguishable from a round that found nothing — same feed, same "clean" verdict, no trace of the cause.
       const f = jsonFailure(raw, ++unparsed);
       emit(run, "unparsed", { agent: who, depth, attempt: unparsed, reason: f.reason, detail: f.detail });
+      noteIdle(run, "unparsed", f.reason);
       history.push({ role: "assistant", content: raw });
       history.push({ role: "user", content: f.guidance });
       continue;
@@ -3613,7 +3674,8 @@ async function runHunt(run) {
   const verdict = huntVerdict(run.findings || [], run.rejectedFindings || [],
                               { tokens, rounds: (run.rounds || []).length });
   const b = await persistRun(run.objective || `hunt: ${repo}`, tokens,
-    { agent: agent.name, hush: run.hush, hunt: true, verdict, findings: (run.findings || []).length, refused: (run.rejectedFindings || []).length, rounds: (run.rounds || []).length },
+    { agent: agent.name, hush: run.hush, hunt: true, verdict, findings: (run.findings || []).length, refused: (run.rejectedFindings || []).length, rounds: (run.rounds || []).length,
+      ...(verdict === "idle" ? { idleReason: idleReason(run) } : {}) },
     tally, run.memoryEntries, run.paidTally);
   const paidSpentUsd = Math.round(Object.values(run.paidTally || {}).reduce((s, v) => s + v, 0) * 1e6) / 1e6;
   emit(run, "budget", { runTokens: tokens, totalTokens: b.tokens, ranPaid: !!run.ranPaid, paidTokens: run.paidTokens || 0, orchPaidTokens: run.orchPaidTokens || 0, paidSpentUsd, usage: run.paidUsage || null });
@@ -3623,8 +3685,15 @@ async function runHunt(run) {
     // four findings had been formed and thrown away, and left "met 0 / unmet 0" reading as a quiet night.
     tokens, costUsd: paidSpentUsd || 0, verdict, met: (run.findings || []).length,
     unmet: (run.rejectedFindings || []).length, total: (run.rounds || []).length,
+    // WHY, on the row, and only when the verdict is "idle". A verdict of "idle" with nothing beside it
+    // leaves the morning reader exactly where "clean" left them -- knowing the round established nothing,
+    // and unable to tell whether the model was unreachable, the replies were unparsable, or the round was
+    // never dispatched. Those send you to three different places. Attached only for idle because for every
+    // other verdict the counts above already carry the story, and an unconditional field would be noise.
+    ...(verdict === "idle" ? { idleReason: idleReason(run) } : {}),
     decision: run.autoApprove ? "auto" : "you" });
-  emit(run, "done", { verdict, findings: (run.findings || []).length, refused: (run.rejectedFindings || []).length });
+  emit(run, "done", { verdict, findings: (run.findings || []).length, refused: (run.rejectedFindings || []).length,
+                      ...(verdict === "idle" ? { idleReason: idleReason(run) } : {}) });
   run.done = true;
 }
 

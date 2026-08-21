@@ -303,7 +303,7 @@ Full threat model, review findings and accepted residuals:
 node test/run-all.mjs --serve     # pure + server suites (self-hosts a throwaway server)
 node test/run-all.mjs --ui        # …then holds the server open so the UI can be looked at
 ```
-**<!--fig:assertions-->2,021 headless assertions across <!--fig:suites-->27 suites**, plus a live `--e2e`
+**<!--fig:assertions-->2,047 headless assertions across <!--fig:suites-->27 suites**, plus a live `--e2e`
 that needs Latch and a model. A pre-push hook and GitHub Actions run this on every push. See
 **[TESTING.md](TESTING.md)** for the suites, the coverage ledger, and the "tested-or-documented" rule.
 

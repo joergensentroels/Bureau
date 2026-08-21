@@ -12,7 +12,7 @@ import {
   deliverableEmbedText, deliverableTitle,
   chunkDocument, deliverableChunks, modelUnreachable, trimVersions, clientKey, isLoopback,
   startLogTee, webhookBody, auditDropCount,
-  normalizeFinding, verifyFinding, findingCheckAllowed, withFindingIo, huntVerdict, gateNeverRan,
+  normalizeFinding, verifyFinding, findingCheckAllowed, withFindingIo, huntVerdict, gateNeverRan, idleReason,
   mcpDecodeHeader, mcpHeaderProblem, mcpMetaProblem, mcpIsModern, UNTRUSTED_REPO_NOTE, npmArgv, agentMayRun, usageSplit, addUsage, tierModelToSend, callCostUsd, unratedModelWarning, warnUnratedModel, unratedTierModels, repoReadCap, blankReplyReason, NO_THINKING, TURN_TOKENS, TURN_TOKENS_RETRY, usagesForTurn, jsonFailure, JSON_REPLY, checkOutTail, refusalMessage,
   LENSES, pickLens, investigateObjective, investigate, seedLenses, activeLenses, bookLensRound,
   normalizeLens, lensParaphrase, addProposedLens, lensProposalObjective, sigWords, postReadGuidance,
@@ -3008,6 +3008,77 @@ console.log("# huntVerdict — a round that did NOTHING must not report the code
       huntVerdict([], [], { tokens: "lots", rounds: null }) === "idle");
   chk("a negative count does not count as work",
       huntVerdict([], [], { tokens: -5, rounds: -1 }) === "idle");
+}
+
+console.log("# idleReason \u2014 an idle run must say WHY, and never say nothing");
+{
+  // WHY THIS EXISTS. The unparsed-reply site in server.mjs carries the note "Emitted, because this used
+  // to be silent. A round that spent every turn failing to format its action was indistinguishable from a
+  // round that found nothing." Emitting fixed it for someone watching a live run. A nightly scheduled hunt
+  // has no viewer and the run stream is not persisted, so by morning the audit row is the only trace --
+  // and for run_1kiolwjo_1k on 2026-08-21 that row was a bare summary. Verdict, zero counts, no cause.
+  //
+  // "idle" without a reason would leave the reader exactly where "clean" left them: knowing the round
+  // established nothing, unable to tell whether the model was unreachable, the replies were unparsable, or
+  // the round was never dispatched. Those are three different places to look.
+
+  // The two no-tally cases are DIFFERENT diagnoses and must not collapse into one sentence.
+  const neverRan = idleReason({});
+  const ranQuietly = idleReason({ rounds: [{}, {}] });
+  chk("no tally and no rounds says the round never reached the model", /never reached the model/.test(neverRan));
+  chk("no tally but rounds ran says something different", /nothing was proposed/.test(ranQuietly));
+  chk("  and the two are not the same sentence", neverRan !== ranQuietly);
+
+  // NEVER EMPTY. This is the property the whole change rests on: a blank reason reintroduces the defect
+  // one layer down. Checked across every shape the function can be handed, including malformed ones.
+  for (const [what, run] of [
+    ["an empty object", {}],
+    ["a null-ish tally", { idleTally: null }],
+    ["an empty tally", { idleTally: { counts: {}, first: "" } }],
+    ["counts with no first", { idleTally: { counts: { blank: 2 } } }],
+    ["rounds but no tally", { rounds: [{}] }],
+    ["an unknown kind", { idleTally: { counts: { somethingNew: 1 }, first: "x" } }],
+  ]) chk(`  never empty: ${what}`, typeof idleReason(run) === "string" && idleReason(run).trim().length > 0);
+
+  // The counted cases name the cause and carry the first message.
+  const provider = idleReason({ rounds: [{}], idleTally: { counts: { llmError: 3 }, first: "fetch failed" } });
+  chk("a provider error is named", /provider error/.test(provider));
+  chk("  the count is reported", /3 provider errors/.test(provider));
+  chk("  and the first message is carried, because it is the one with a cause", /first: fetch failed/.test(provider));
+  chk("  with the round count, so 'it never started' is distinguishable", /1 round\(s\)/.test(provider));
+
+  chk("a single occurrence is not pluralised",
+      /1 unparsable reply\b/.test(idleReason({ idleTally: { counts: { unparsed: 1 } } })));
+  chk("several kinds are all listed",
+      (() => { const r = idleReason({ idleTally: { counts: { blank: 1, unparsed: 2 } } });
+               return /blank reply/.test(r) && /unparsable replies/.test(r); })());
+
+  // Newlines flattened: this string goes into a one-line audit field and a one-line hunt-log row.
+  chk("a multi-line first message is flattened to one line",
+      !/\n/.test(idleReason({ idleTally: { counts: { blank: 1 }, first: "line one\nline two" } })));
+}
+
+console.log("# idleReason \u2014 the recording is actually WIRED to the paths that fail");
+{
+  // The summariser can be perfect and report nothing, because the tally is only as good as the call sites
+  // that fill it. Derived from server.mjs's source rather than from a run, so it covers paths no unit test
+  // can reach without a broken provider -- and so that deleting a noteIdle call is a test failure rather
+  // than a silent loss of the only durable evidence an unattended round leaves.
+  const src = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
+  const kinds = [...src.matchAll(/noteIdle\(run,\s*"([a-zA-Z]+)"/g)].map((m) => m[1]);
+  chk("noteIdle is called at all", kinds.length > 0);
+  for (const k of ["blank", "unparsed", "llmError", "capRefused"])
+    chk(`  the ${k} path records its reason`, kinds.includes(k));
+
+  // Every kind recorded must have a human label in idleReason, or it renders as a raw key with a naive
+  // plural. A new kind added without one would read as "2 lensRejecteds".
+  const labelBlock = (src.match(/const LABEL = \{[\s\S]*?\};/) || [""])[0];
+  for (const k of new Set(kinds))
+    chk(`  kind "${k}" has a readable label`, labelBlock.includes(k + ":"));
+
+  // And the reason must reach the durable record, not just the live stream.
+  chk("the audit row carries idleReason when the verdict is idle",
+      /verdict === "idle" \? \{ idleReason: idleReason\(run\) \}/.test(src));
 }
 
 console.log("# huntVerdict — the classifier is wired to the string production actually emits");
