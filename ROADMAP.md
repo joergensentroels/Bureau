@@ -64,7 +64,27 @@ quietly drops a wrong claim teaches nobody why it was wrong._
        opposite ways. Settling it costs roughly five runs per arm at ~$1.15 each — a spending decision.
        Recorded as unproven rather than quietly dropped, because a mechanism that is built, tested and
        ineffective is the easiest kind to keep believing in.
-     - **The scope guardrail is the current best answer** and it is mechanical rather than persuasive:
+     - **The continual harness is the newest candidate, added 2026-08-21, and it is UNPROVEN in exactly the
+       sense the bullet above means.** `org.harness` is a second register of durable notes about *where* to
+       look, and `propose_harness_note` lets a round write one that later rounds are shown. It exists
+       because the lens register cannot express this lesson: `normalizeLens` requires a proposal to cite a
+       finding **confirmed in this run**, and every failure recorded here confirmed nothing — so "this lens
+       misfires on a web app" is precisely what a confirmed-finding rule can never admit. A harness note may
+       therefore rest on a round that looked and found nothing, and may **not** rest on one that examined
+       nothing (the same condition `huntVerdict` calls `idle`).
+       - Bounded (the local 4,096-token context clips the FRONT of a prompt), evicts notes that never
+         helped, and snapshot/rollback because a model wrote the state.
+       - A note **cannot grant capability**, and that is asserted rather than trusted:
+         `test/harness.test.mjs` plants a note claiming the floor no longer applies, proves the text really
+         reaches the rendered prompt, and then shows `shell` / `file_write` / `api_call` / `github_issue`
+         are all still refused with `read_repo` still allowed. Enforcement is code — `HUNT_ACTIONS`,
+         `huntRefusal`, `decideApproval`, `inScope` — not prose in a prompt.
+       - **What it has NOT shown is that it helps.** No run has yet produced a note, let alone a note that
+         made a later round look somewhere better. Settling that is the same spending decision as the
+         coverage marking above: runs against a known-defective target, roughly five per arm. Recorded here
+         in the unproven column deliberately, because this is the third mechanism aimed at this problem and
+         the first two are already sitting in that column.
+     - **The scope guardrail is still the current best answer** and it is mechanical rather than persuasive:
        `guardrails.scopeFiles` restricts what `read_repo` may open at all, and a scope of ≤20 files raises
        the read cap from 12,000 to 60,000 characters so a bounded file set is read WHOLE. That removes
        both failure modes at once — wandering, and reasoning from a prefix — at the cost of someone
