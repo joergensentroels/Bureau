@@ -24,11 +24,14 @@
 // Comments stay inert on purpose: these files carry em dashes in their prose throughout, deliberately,
 // and a check that flagged those would be noise and would get switched off.
 import { readdir, readFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { gitSafeEnv } from "../tools/git-env.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const skipDirs = new Set([".git", "data", "data-dev", "node_modules", "__pycache__", "bureauProjects"]);
+const skipDirs = new Set([".git", ".claude", "data", "data-dev", "node_modules", "__pycache__", "bureauProjects"]);
+let gitAnswered = true;
 
 // Walk the source tracking what PowerShell would consider itself inside, and report only characters
 // reached in CODE or STRING state. Comment state is inert by construction.
@@ -96,6 +99,43 @@ if (brokenControls.length) {
   process.exit(1);
 }
 
+// WHAT GIT TRACKS, asked of git rather than found by walking the disk.
+//
+// The walk below scanned 6 files locally and 3 in CI, because `.claude/worktrees/` holds another agent
+// session's checkout of this same repository -- gitignored, machine-specific, and not this commit's
+// source. That made the suite's assertion count depend on local scratch state, which broke the
+// doc-figure check in CI and nowhere else: green locally, red on the runner, for a reason that had
+// nothing to do with the code being checked.
+//
+// It was also simply wrong to scan it. A copy of the repo under .claude/ is not this repo's source; its
+// contents are controlled by whatever that session is doing, so a file there could fail this suite for
+// reasons no commit here can fix.
+//
+// Same answer as the sibling repo's secret scan, for the same reason: git already knows what belongs to
+// the project, and a hand-kept skip list is the shape that cannot notice what is absent from itself.
+async function* trackedPs1() {
+  let listed = null;
+  try {
+    // gitSafeEnv, because this repo requires it of every git spawn and units.test.mjs enforces that. An
+    // inherited GIT_DIR or GIT_WORK_TREE -- which a hook, a worktree shell or a CI step can all carry --
+    // would point `ls-files` at a DIFFERENT repository, and the answer would look perfectly plausible.
+    const out = execFileSync("git", ["ls-files", "-z", "*.ps1"],
+                             { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+                               env: gitSafeEnv(process.env) });
+    // String.fromCharCode(0), not a "\0" escape. Writing that escape here put a LITERAL NUL byte into
+    // this file, and test/searchable-source.test.mjs caught it on the next run -- which is the whole reason
+    // that suite exists: ripgrep treats a file with a NUL as binary and stops searching, so one invisible
+    // byte hides the rest of the file from every grep an audit depends on. Built at runtime instead, so the
+    // source stays text.
+    listed = out.split(String.fromCharCode(0)).filter(Boolean);
+  } catch { listed = null; }
+  if (listed) { for (const rel of listed) yield path.join(root, rel); return; }
+  // Fallback: git could not answer, so walk. A superset is the safe direction for a check like this, and
+  // it is reported at the end so a differing count has a stated cause rather than looking like drift.
+  gitAnswered = false;
+  yield* walk(root);
+}
+
 async function* walk(dir) {
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     if (entry.isDirectory()) {
@@ -108,7 +148,7 @@ async function* walk(dir) {
 
 const findings = [];
 let scanned = 0;
-for await (const file of walk(root)) {
+for await (const file of trackedPs1()) {
   scanned++;
   const relative = path.relative(root, file).replaceAll("\\", "/");
   for (const hit of liveNonAscii(await readFile(file, "utf8"))) {
@@ -134,8 +174,11 @@ if (findings.length) {
   process.exit(1);
 }
 
-// Reported as "N passed, 0 failed" because run-all.mjs's doc-figure check parses that shape out of every
-// suite, and a suite it cannot read a count from fails the run. The count is the eight scanner controls
-// plus one decision per file, which is what was actually checked.
-const assertions = controls.length + scanned;
-console.log(`ps1-encoding: ${controls.length} scanner controls held, ${scanned} .ps1 file(s) clean - ${assertions} passed, 0 failed`);
+// THE COUNT MUST NOT MOVE WITH THE NUMBER OF FILES. It was `controls.length + scanned`, which made every
+// added .ps1 file -- and every local worktree the walk wandered into -- change a figure pinned in four
+// documents. The honest count is the eight controls plus ONE aggregate assertion: "no tracked .ps1 file
+// carries live non-ASCII". The file count is context, printed but not counted.
+const assertions = controls.length + 1;
+console.log(`ps1-encoding: ${controls.length} scanner controls held, ${scanned} tracked .ps1 file(s) clean`
+          + `${gitAnswered ? "" : " (git could not list them; walked the tree instead)"}`
+          + ` - ${assertions} passed, 0 failed`);
