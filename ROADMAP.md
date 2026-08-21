@@ -26,12 +26,36 @@ quietly drops a wrong claim teaches nobody why it was wrong._
      `tools/demo-floor.mjs` sweeps every autonomy tier × policy effect × `autoApprove` against the real
      `decideApproval()` and exits non-zero if a hard-floored action is ever auto-approved; its transcript
      **is** a README section; and `test/readme-demo.test.mjs` pins that code fence to the tool, so the
-     numbers in it cannot drift quietly. The claim is already evidence rather than prose. What is still
-     open is narrower and worth stating exactly: **that sweep is `decideApproval()` in process.** Nothing
-     demonstrates the live chain — an agent proposing `shell`, the floor refusing at trusted tier, the
-     operator approving in Latch, Latch executing — and there is no recording of any of it. Twenty seconds
-     of asciinema is still the cheapest item here; it is now an *addition* to the proof, not a substitute
-     for a missing one.
+     numbers in it cannot drift quietly. The claim is already evidence rather than prose.
+
+     _Narrowed again on 2026-08-21, because the sentence that stood here was false._ It said "Nothing
+     demonstrates the live chain". **S4 of `test/e2e-autonomy.mjs` demonstrates it**, and has since
+     2026-07-31: an agent proposes `github_pr`, a hard-floored action; `autoApprove === false` at trusted
+     tier so the floor held; no approver is stamped; the proposal carries a usable `approvalId`; a human
+     approves through the seam; and the assertions end on a **real `github.com/…/pull/N` URL** with
+     `decidedBy === "you"`. Both postures are covered — under `BUREAU_REMOTE` the seam must answer **403**,
+     so remote mode's refusal is coverage rather than a red suite. That is the live chain, with a real
+     side effect, and the roadmap was telling anyone who read it to go and build it.
+
+     What is genuinely still open is one path and one artifact:
+
+     - **The `shell` path is not exercised live, and it is the deepest chain in the system.** `e2e-autonomy`
+       never proposes `shell` (grep: zero occurrences). It is also the only chain that leaves this machine:
+       `server.mjs`'s `shell` branch calls `waitForExecution(approval.id)` and the command is run by the
+       **`latch-agent-executor` service on the openclaw VM**, not by Bureau and not by Latch. So the full
+       sequence is Bureau proposes → floor refuses → approval waits in Latch → operator approves → the VM's
+       executor runs it → Bureau polls the result back. Four systems, three machines, and the one the pitch
+       is actually about. S4 proves the floor and the seam; it does not prove that.
+       - **Prerequisite, and it is an operator fact rather than a code one:** the executor is an *optional*
+         service on that VM (`OPENCLAW-WORKER.md` lists `latch-agent-executor` as optional, and the bridge
+         runs in approval-gated planning mode). The dispatch branch already anticipates it being absent —
+         "the worker executor may be offline or shell execution isn't enabled on the VM". Confirm it is
+         enabled and reachable before writing a scenario that needs it, or the test measures the VM's
+         configuration and reports it as a product failure.
+     - **There is still no recording of any of it.** Twenty seconds of asciinema remains the cheapest item
+       here. It is an *addition* to a proof that already exists, not a substitute for a missing one — which
+       is what the previous wording implied and is the reason this entry needed rewriting rather than
+       extending.
   2. **Browser UI — Playwright is DECLINED, not pending.** _This item ranked it second and called the UI
      "the largest untested surface"; TESTING.md recorded the opposite decision on the same day, and the two
      documents gave opposite instructions for two weeks. TESTING.md is the one that is right._
