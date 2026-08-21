@@ -824,8 +824,16 @@ console.log("# a tee that dies SAYS so — silence is the failure mode that cost
 
   // Break the write for real rather than stubbing the failure and testing the stub: close the
   // descriptor out from under it so writeSync throws the way a locked or vanished file would.
+  //
+  // ASK THE TEE WHICH DESCRIPTOR, rather than guessing. This was `closeSync(3)`, and 3 was the log's fd on
+  // Windows but not on the Linux CI runner -- so there the provocation closed something else or threw,
+  // nothing broke, and the four assertions below failed as though the tee had stopped announcing its own
+  // death. That is the worst possible reading: the suite pointed at the announcement mechanism when the
+  // fault was in the test's own hand. Ten consecutive red CI runs, green every time locally.
   const before = seen.length;
-  try { closeSync(3); } catch { /* not our fd; the loop below then simply finds it still alive */ }
+  const logFd = tee.fd();
+  let provoked = false;
+  if (typeof logFd === "number") { try { closeSync(logFd); provoked = true; } catch { /* asserted below */ } }
   for (let i = 0; i < 40 && !tee.isDead(); i++) console.log("provoke " + i);
   const notices = seen.slice(before).filter((x) => /LOG TEE DEAD/.test(x));
   const diedAfterFailure = tee.isDead();
@@ -839,6 +847,11 @@ console.log("# a tee that dies SAYS so — silence is the failure mode that cost
   // every single write would satisfy them just as well.
   chk("  control: a healthy tee writes to the file", wroteWhileHealthy);
   chk("  control: and says NOTHING on stderr while it is working", quietWhileHealthy);
+  // ASSERTED BEFORE THE DEATH CHECKS, and separately from them. "the provocation did not work" and "the
+  // tee did not notice a failed write" are different findings that send you to different places, and
+  // collapsing them is exactly what made a platform assumption look like a broken announcement. If this
+  // line is the one that fails, fix the test; if the ones below fail while this passes, fix the tee.
+  chk("  control: the provocation really closed the tee's own descriptor", provoked, "fd=" + String(logFd));
   chk("  a failing write marks it dead", diedAfterFailure === true);
   chk("  and that death is ANNOUNCED on raw stderr", notices.length >= 1);
   chk("  the notice names the file and the pid, so it can be acted on",

@@ -184,6 +184,17 @@ export function startLogTee(file = LOG_FILE, max = LOG_MAX, keep = LOG_KEEP) {
     // opens; this lets a caller ASK. Used by the boot banner's counterpart and available to any future
     // status surface — "is my log still recording" should be answerable without reading the log.
     isDead: () => dead,
+    // THE DESCRIPTOR, for the same reason isDead() exists: this thing fails silently, so it has to be
+    // askable rather than only announceable. A caller diagnosing "my log stopped" wants to know whether a
+    // descriptor is still held, and `null` after death or stop() answers that directly.
+    //
+    // It is also the only honest way to TEST the death path. test/units.test.mjs used to provoke a failed
+    // write with `closeSync(3)` -- a guess at the number. It was the log's descriptor on Windows and was
+    // not on Linux, so on the CI runner the provocation did nothing, the tee stayed healthy, and four
+    // assertions failed as though it had stopped announcing its own death. Ten consecutive red CI runs,
+    // while the suite passed on the machine the test was written on. A test that has to guess at the
+    // internals it means to break is not testing the mechanism, it is testing a coincidence.
+    fd: () => fd,
     stop() {
       for (const undo of restore) undo();
       if (fd !== null) { try { closeSync(fd); } catch { /* already gone */ } fd = null; }

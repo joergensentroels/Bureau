@@ -39,3 +39,26 @@ node test/run-all.mjs --serve || {
   echo "✗ pre-push blocked: tests failed. Fix them, or bypass with 'git push --no-verify' (not recommended)."
   exit 1
 }
+
+# WHAT DID THE LAST PUSH DO ON CI? Advisory, never blocking.
+#
+# This suite runs on Windows here and on ubuntu-latest there, and neither is a superset of the other. A
+# test carrying a platform assumption passes the gate above and fails the runner -- which is exactly what
+# happened: `closeSync(3)` guessed the log's descriptor, was right on Windows, wrong on Linux, and CI was
+# red for TEN consecutive runs across three days on a public repository while every local push was green.
+#
+# Nothing here can prevent that. What it can do is make the next push the moment you find out, instead of
+# whenever someone happens to open the Actions tab. Deliberately cannot block: no network, no gh, or an
+# unauthenticated gh must never stand between the operator and a push.
+if command -v gh >/dev/null 2>&1; then
+  last=$(gh run list --limit 1 --branch main --json conclusion,displayTitle            --jq '.[0] | "\(.conclusion // "in progress")	\(.displayTitle[0:50])"' 2>/dev/null || true)
+  case "$last" in
+    failure*|cancelled*|timed_out*)
+      echo ""
+      echo "⚠ the PREVIOUS push is red on CI:  $last"
+      echo "  Local runs on Windows, CI on ubuntu-latest. A green gate here does not mean green there."
+      echo "  gh run view --log-failed" ;;
+    success*) echo "pre-push: previous CI run passed" ;;
+    *) : ;;   # in progress, unknown, or gh not authenticated — say nothing rather than guess
+  esac
+fi
