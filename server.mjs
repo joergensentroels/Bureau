@@ -1364,9 +1364,28 @@ export const gateNeverRan = (reason) => String(reason || "").startsWith(GATE_SET
 // A hunt's verdict. "clean" is a claim that the code was examined and nothing survived the gate, so it may only be
 // said when the gate actually ran. If every refusal was a setup failure there is no evidence either way, and the
 // honest word is "ungated" — which the UI renders with its neutral badge, because that is exactly what it is.
-export function huntVerdict(findings = [], rejected = []) {
+export function huntVerdict(findings = [], rejected = [], evidence = {}) {
   if (findings.length) return "found";
-  return rejected.some((r) => gateNeverRan(r && r.reason)) ? "ungated" : "clean";
+  if (rejected.some((r) => gateNeverRan(r && r.reason))) return "ungated";
+  // NO FINDINGS AND NO REFUSALS IS NOT EVIDENCE OF ANYTHING, and this function used to call it "clean".
+  //
+  // `[].some(...)` is false, so a round that did absolutely nothing fell through to the same word as a
+  // round that read 48 files and cleared them. Measured 2026-08-21: run_1kiolwjo_1k recorded verdict
+  // "clean" -- rendered by tools/hunt-log.mjs as "the gate ran and nothing survived it" -- with ONE audit
+  // row, its own summary. Zero actions, zero tokens, zero cost, nothing opened. It is the exact false
+  // reassurance the comment above this function forbids, produced by the function the comment describes.
+  //
+  // So "clean" now requires positive evidence that the round did work. Refusals count (something was
+  // judged), tokens count (the model was called), rounds count. With none of the three there is no claim
+  // to make about the code, and "idle" is the word for that.
+  //
+  // FAILS CLOSED on a caller that supplies no evidence at all: the answer is "idle", not "clean". A
+  // future call site that forgets the third argument then under-claims, which is recoverable; the other
+  // default direction silently manufactures reassurance, which is not.
+  const worked = rejected.length > 0
+    || (Number(evidence.tokens) || 0) > 0
+    || (Number(evidence.rounds) || 0) > 0;
+  return worked ? "clean" : "idle";
 }
 
 // May a hunting round take this action, and if not, what does the agent get told? Returns null when it may — including
@@ -3590,7 +3609,9 @@ async function runHunt(run) {
   // A hunt's verdict is what it FOUND. "passed" would be a lie either way: finding nothing is not success, and finding
   // something is not failure — so it reports the count and lets the operator read it. And when the GATE could not run,
   // neither word applies: see huntVerdict, which reports "ungated" rather than letting a broken machine read as clean.
-  const verdict = huntVerdict(run.findings || [], run.rejectedFindings || []);
+  // Evidence that the round actually examined something, so a no-work round cannot report "clean".
+  const verdict = huntVerdict(run.findings || [], run.rejectedFindings || [],
+                              { tokens, rounds: (run.rounds || []).length });
   const b = await persistRun(run.objective || `hunt: ${repo}`, tokens,
     { agent: agent.name, hush: run.hush, hunt: true, verdict, findings: (run.findings || []).length, refused: (run.rejectedFindings || []).length, rounds: (run.rounds || []).length },
     tally, run.memoryEntries, run.paidTally);

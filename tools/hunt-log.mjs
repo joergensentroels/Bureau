@@ -40,6 +40,7 @@ const MEANING = {
   found:   "findings confirmed through the gate",
   clean:   "the gate ran and nothing survived it",
   ungated: "THE GATE COULD NOT RUN — this says nothing about the code",
+  idle:    "THE ROUND DID NOTHING — no model call, nothing read; this says nothing about the code",
 };
 
 let db;
@@ -93,10 +94,12 @@ if (live.length) {
 console.log(`${rows.length} most recent COMPLETED run(s)${ws ? ` in ${ws}` : ""}:\n`);
 
 let ungated = 0;
+let idle = 0;
 for (const r of rows) {
   let j = {}; try { j = JSON.parse(r.json); } catch {}
   const v = j.verdict || "?";
   if (v === "ungated") ungated++;
+  if (v === "idle") idle++;
   const cost = j.costUsd ? ` · $${Number(j.costUsd).toFixed(4)}` : "";
   const tok = j.tokens ? ` · ${Number(j.tokens).toLocaleString("en-US")} tok` : "";
   console.log(`  ${when(r.at)}  ${String(v).padEnd(8)} found=${j.met ?? "?"} refused=${j.unmet ?? "?"}${tok}${cost}`);
@@ -183,10 +186,32 @@ for (const r of rows) {
     console.log(`      (summary says refused=${j.unmet ?? "?"}; ${errs.length} refusal(s) are recorded on the `
               + `actions — the counts disagree, and this tool does not know which is right)`);
   }
+  // A STORED "clean" THAT SPENT NOTHING was an idle round recorded under the old rule. History is not
+  // rewritten, so the audit table still says "clean" for every such run -- and the whole reason to read
+  // this listing is to find out what the hunts established, which for these runs is nothing at all.
+  // Derived from the action rows rather than trusting the summary, exactly as the refusal count below is,
+  // and for the same reason: the summary was written by the logic that was wrong.
+  const acts = db.prepare("SELECT COUNT(*) n FROM audit WHERE run_id = ? AND kind = 'action'").get(r.run_id || "").n;
+  if (v === "clean" && acts === 0 && !Number(j.tokens || 0)) {
+    console.log(`      ⚠ recorded as "clean" but this run took NO actions and spent NO tokens — it examined`);
+    console.log(`        nothing, so it is evidence about neither the code nor the gate. Runs from before`);
+    console.log(`        2026-08-21 say "clean" in exactly this situation; huntVerdict now says "idle".`);
+  }
   if (broken && v !== "ungated") {
     console.log(`      ⚠ recorded as "${v}" although ${broken} refusal(s) were the GATE FAILING, not a judgement.`);
     console.log(`        Runs from before the ungated fix say "clean" in exactly this situation.`);
   }
+  console.log("");
+}
+
+// Its own block, and NOT folded into the ungated advice below. Both mean "no claim about the code", but
+// the causes are different and so is the fix: ungated says the worktree could not be built, idle says the
+// round never called a model. Sending someone to probe-doctor over a provider outage is the shape of
+// advice that stops people reading these notes at all.
+if (idle) {
+  console.log(`${idle} of these run(s) were IDLE — no tokens, no actions, nothing examined. A run like this`);
+  console.log("proves nothing about the code, and before 2026-08-21 it was recorded as \"clean\". Check that the");
+  console.log("provider the schedule routes to was reachable at that hour:  node tools/heartbeat.mjs --once");
   console.log("");
 }
 

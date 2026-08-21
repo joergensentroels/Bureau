@@ -2963,9 +2963,51 @@ console.log("# huntVerdict — a hunt whose gate never ran must not report the c
   chk("a setup failure reports ungated, not clean", huntVerdict([], [broke]) === "ungated");
   chk("  one broken gate among judged refusals is enough to withhold clean",
       huntVerdict([], [judged, broke, judged]) === "ungated");
-  chk("no refusals at all is genuinely clean", huntVerdict([], []) === "clean");
   chk("a confirmed finding reports found regardless of a broken gate",
       huntVerdict([{ claim: "x" }], [broke]) === "found");
+}
+
+console.log("# huntVerdict — a round that did NOTHING must not report the code clean either");
+{
+  // THIS BLOCK REPLACES AN ASSERTION THAT LOCKED IN THE DEFECT. It read:
+  //
+  //     chk("no refusals at all is genuinely clean", huntVerdict([], []) === "clean");
+  //
+  // "Genuinely" was doing a lot of work there. No findings and no refusals is not evidence that the code
+  // was examined -- it is equally the signature of a round that never started. `[].some(...)` is false, so
+  // both fell through to the same word, and the test asserted that as correct.
+  //
+  // Measured 2026-08-21, in the operator's own audit table: run_1kiolwjo_1k recorded verdict "clean" with
+  // ONE audit row -- its own summary. Zero actions, zero tokens, zero cost, no file opened. tools/hunt-log
+  // rendered it "the gate ran and nothing survived it", the night after a run that read 48 files and
+  // confirmed a real finding. The nightly for 2026-08-20 is simply missing from the table.
+  const judged = { reason: "a finding needs a claim: one sentence naming what is wrong" };
+
+  chk("no findings, no refusals and NO WORK reports idle, not clean",
+      huntVerdict([], [], { tokens: 0, rounds: 0 }) === "idle");
+  chk("  and with no evidence argument at all it still refuses to say clean (fails closed)",
+      huntVerdict([], []) === "idle");
+
+  // Any ONE of the three is enough: work demonstrably happened.
+  chk("tokens spent is evidence of work, so clean is allowed",
+      huntVerdict([], [], { tokens: 868000, rounds: 0 }) === "clean");
+  chk("a completed round is evidence of work",
+      huntVerdict([], [], { tokens: 0, rounds: 2 }) === "clean");
+  chk("a refusal is evidence of work even with no tokens recorded",
+      huntVerdict([], [judged], { tokens: 0, rounds: 0 }) === "clean");
+
+  // The precedence above idle must not be disturbed by the new rule.
+  chk("a finding still wins over the no-work rule",
+      huntVerdict([{ claim: "x" }], [], { tokens: 0, rounds: 0 }) === "found");
+  chk("a broken gate still reports ungated, not idle",
+      huntVerdict([], [{ reason: "the finding gate could not run against C:/x: fatal: detected dubious ownership" }],
+                  { tokens: 0, rounds: 0 }) === "ungated");
+
+  // Junk in the evidence must not read as work. A string, a NaN or a negative count is not a token spent.
+  chk("non-numeric evidence does not count as work",
+      huntVerdict([], [], { tokens: "lots", rounds: null }) === "idle");
+  chk("a negative count does not count as work",
+      huntVerdict([], [], { tokens: -5, rounds: -1 }) === "idle");
 }
 
 console.log("# huntVerdict — the classifier is wired to the string production actually emits");
