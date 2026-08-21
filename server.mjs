@@ -5311,16 +5311,33 @@ export async function readRepoFile(repo, rel, cap = 4000) {
   const abs = repoPathSafe(repo, rel);
   if (!abs) return { ok: false, error: "that path is not inside the configured repository" };
   try {
-    // realpath first: a symlink inside the repo can point outside it, and the string check above cannot see that.
+    // BOTH SIDES RESOLVED, and that is the whole fix.
+    //
+    // realpath first, because a symlink inside the repo can point outside it and the string check above
+    // cannot see that. But this compared the realpath'd FILE against an UNRESOLVED repo ROOT -- so any
+    // repository reached through a symlink, a junction, or a Windows 8.3 short name had every legitimate
+    // read refused as "leaves the repository through a link". The relative path from an unresolved root to
+    // a resolved file starts with "..", which is exactly what an escape looks like.
+    //
+    // Not a Windows curiosity: macOS /tmp IS a symlink to /private/tmp, so a repo under /tmp failed the
+    // same way, as does any Linux path with a symlinked component. It survived because the operator's own
+    // temp path happens not to mangle -- a five-character username needs no short form -- and CI ran only
+    // on ubuntu, where the fixture path is literal. It surfaced the day windows-latest joined the matrix,
+    // where TEMP is an 8.3 short name (RUNNE~1) that realpath expands to the real one.
+    //
+    // THE SECURITY PROPERTY IS UNCHANGED, and is asserted separately in scope.test.mjs: a link pointing
+    // OUT of the repo still resolves outside the RESOLVED root, and is still refused.
+    const root = await realpath(path.resolve(repo));
     const real = await realpath(abs);
-    if (!repoPathSafe(repo, path.relative(path.resolve(repo), real))) {
+    if (!repoPathSafe(root, path.relative(root, real))) {
       return { ok: false, error: "that path leaves the repository through a link" };
     }
     const st = await stat(real);
     if (st.isDirectory()) return { ok: false, error: "that is a directory — list it instead of reading it" };
     if (st.size > 400000) return { ok: false, error: "that file is too big to read (" + Math.round(st.size / 1024) + "kB)" };
     const content = await readFile(real, "utf8");
-    return { ok: true, name: path.relative(path.resolve(repo), real).split(path.sep).join("/"),
+    // Relative to the RESOLVED root as well, or the reported name carries the same ".." escape shape.
+    return { ok: true, name: path.relative(root, real).split(path.sep).join("/"),
              content: content.slice(0, cap), truncated: content.length > cap, bytes: content.length };
   } catch (e) { return { ok: false, error: "could not read it: " + (e.code || e.message) }; }
 }

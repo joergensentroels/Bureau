@@ -12,7 +12,7 @@
 // for scope discipline does not produce scope discipline. This suite asserts that the boundary holds when the
 // asking fails — and every case here has a control, because a scope that refuses everything would pass a suite
 // that only checked that out-of-scope reads are refused.
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -23,6 +23,61 @@ import {
 let pass = 0, fail = 0;
 const chk = (name, cond) => { if (cond) { pass++; console.log("✓ " + name); } else { fail++; console.log("✗ " + name); } };
 const eq = (name, a, b) => chk(name + "   (got " + JSON.stringify(a) + ")", JSON.stringify(a) === JSON.stringify(b));
+
+console.log("# readRepoFile — a repo reached THROUGH a link is still the repo");
+{
+  // WHY. This compared the realpath'd FILE against an UNRESOLVED repo ROOT, so a repository reached through
+  // a symlink, a junction or a Windows 8.3 short name had every legitimate read refused as "leaves the
+  // repository through a link" -- the relative path from an unresolved root to a resolved file starts with
+  // "..", which is what an escape looks like.
+  //
+  // It is not an exotic case. macOS /tmp IS a symlink to /private/tmp, so any repo under /tmp hit it. It
+  // survived on this machine because the operator's temp path happens not to mangle, and in CI because the
+  // only runner was ubuntu, where the fixture path is literal. Adding windows-latest -- where TEMP is an 8.3
+  // short name -- turned five assertions in this suite red at once.
+  //
+  // So the fixture reaches the repo through a link ON PURPOSE. A test that only ever uses a literal path
+  // cannot see this class of bug on any platform.
+  const base = await mkdtemp(path.join(tmpdir(), "bureau-link-"));
+  const real = path.join(base, "realrepo");
+  const viaLink = path.join(base, "linkrepo");
+  const outside = path.join(base, "outside");
+  await mkdir(real, { recursive: true });
+  await mkdir(outside, { recursive: true });
+  await writeFile(path.join(real, "sum.mjs"), "export const sum = (a, b) => a + b;\n");
+  await writeFile(path.join(outside, "secret.txt"), "not part of the repository\n");
+
+  // Directory junctions, which Windows allows unelevated -- a file symlink there needs admin or Developer
+  // Mode. If even this is refused the case is SKIPPED out loud: a link test that silently becomes a
+  // literal-path test is worse than none, because it reports the coverage without providing it.
+  let linked = true;
+  try {
+    await symlink(real, viaLink, "junction");
+    await symlink(outside, path.join(real, "escape"), "junction");
+  } catch (e) { linked = false; console.log("  SKIPPED: this environment refuses to create links (" + (e.code || e.message) + ")"); }
+
+  if (linked) {
+    // THE REGRESSION. Same file, same content, reached by a path with a link in it.
+    const viaReal = await readRepoFile(real, "sum.mjs");
+    const viaSym = await readRepoFile(viaLink, "sum.mjs");
+    chk("  CONTROL: the file reads through the literal path", viaReal.ok === true);
+    chk("  and it reads through a linked repo root too", viaSym.ok === true);
+    chk("  with the same content either way", viaSym.ok && viaSym.content === viaReal.content);
+    // The reported name must be repo-relative, not a "../.." escape through the resolved root.
+    chk("  and the name it reports is repo-relative", viaSym.name === "sum.mjs");
+
+    // THE SECURITY PROPERTY, which the fix must not have traded away: a link pointing OUT is still refused.
+    // Without this the whole block could be satisfied by a guard that stopped checking anything.
+    const escaped = await readRepoFile(real, "escape/secret.txt");
+    chk("  CONTROL: a link pointing OUT of the repo is still refused", escaped.ok === false);
+    chk("  and refused for that reason, not by accident",
+        /leaves the repository through a link/.test(String(escaped.error || "")));
+    // …including when the root itself was reached through a link, which is where the two interact.
+    const escapedVia = await readRepoFile(viaLink, "escape/secret.txt");
+    chk("  CONTROL: still refused when the root is ALSO reached through a link", escapedVia.ok === false);
+  }
+  await rm(base, { recursive: true, force: true });
+}
 
 console.log("# normScopeFiles — what an operator types becomes what inScope compares");
 {
