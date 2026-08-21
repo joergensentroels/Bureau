@@ -1428,6 +1428,41 @@ const GATE_SETUP_FAILED = "the finding gate could not run against";
 // True when the gate never got to judge — the gate broke, so the finding is unproven rather than disproven.
 export const gateNeverRan = (reason) => String(reason || "").startsWith(GATE_SETUP_FAILED);
 
+// WHICH ARM DID THIS RUN EXECUTE UNDER? Stamped on the run at the moment it finishes.
+//
+// This is the piece that made ROADMAP item 3 unsettleable. Both candidate interventions there -- the
+// coverage marking and now the continual harness -- are recorded as "built, tested, and UNPROVEN", and the
+// previous A/B is recorded as showing "no measurable effect and two signals pointing opposite ways". The
+// reason is structural rather than statistical: the guardrails and the harness register live in the ORG
+// BLOB, which keeps no history. So no past run can be asked what it ran under. Any grouping after the fact
+// is a guess, and two guesses about the same data is exactly how you get two signals pointing opposite
+// ways.
+//
+// Read from `reg` -- the org as re-read after lens seeding, which is the same object the investigate call
+// is given -- so this records the configuration the round ACTUALLY used, not the configuration at the
+// moment someone later reads the row.
+//
+// COUNTS AND BOOLEANS, not the underlying lists. This goes into every run's audit row, and a scope of 400
+// filenames repeated on every row would make the table expensive to keep and no easier to group by. The
+// exception is `lenses`, which is kept whole and short: the previous A/B's own validity note was "one lens
+// throughout", so which lens ran is arm-relevant rather than incidental.
+export function runArm(run = {}, org = {}) {
+  const g = org.guardrails || {};
+  return {
+    // 0 means unscoped, which is a distinct arm rather than a missing value.
+    scopeFiles: normScopeFiles(g.scopeFiles).length,
+    // Defaults ON in the runner (`coverageMap: reg.guardrails?.coverageMap !== false`), so the arm has to
+    // record the same defaulting or an unset guardrail would look like the intervention was off.
+    coverageMap: g.coverageMap !== false,
+    // Notes actually SHOWN to the round: an `off` note is in the register and not in the prompt, so
+    // counting it would put a run in the treated arm on the strength of something it never saw.
+    harnessNotes: (Array.isArray(org.harness) ? org.harness : []).filter((h) => h && !h.off).length,
+    roundsCap: Number(g.investigateRounds) || 0,
+    lenses: [...new Set((run.rounds || []).map((r) => r && r.lens).filter(Boolean))],
+    ranPaid: Boolean(run.ranPaid),
+  };
+}
+
 // A hunt's verdict. "clean" is a claim that the code was examined and nothing survived the gate, so it may only be
 // said when the gate actually ran. If every refusal was a setup failure there is no evidence either way, and the
 // honest word is "ungated" — which the UI renders with its neutral badge, because that is exactly what it is.
@@ -3776,7 +3811,7 @@ async function runHunt(run) {
                               { tokens, rounds: (run.rounds || []).length });
   const b = await persistRun(run.objective || `hunt: ${repo}`, tokens,
     { agent: agent.name, hush: run.hush, hunt: true, verdict, findings: (run.findings || []).length, refused: (run.rejectedFindings || []).length, rounds: (run.rounds || []).length,
-      ...(verdict === "idle" ? { idleReason: idleReason(run) } : {}) },
+      ...(verdict === "idle" ? { idleReason: idleReason(run) } : {}), arm: runArm(run, reg) },
     tally, run.memoryEntries, run.paidTally);
   const paidSpentUsd = Math.round(Object.values(run.paidTally || {}).reduce((s, v) => s + v, 0) * 1e6) / 1e6;
   emit(run, "budget", { runTokens: tokens, totalTokens: b.tokens, ranPaid: !!run.ranPaid, paidTokens: run.paidTokens || 0, orchPaidTokens: run.orchPaidTokens || 0, paidSpentUsd, usage: run.paidUsage || null });
@@ -3792,6 +3827,10 @@ async function runHunt(run) {
     // never dispatched. Those send you to three different places. Attached only for idle because for every
     // other verdict the counts above already carry the story, and an unconditional field would be noise.
     ...(verdict === "idle" ? { idleReason: idleReason(run) } : {}),
+    // THE ARM, unconditionally. Unlike idleReason this is on every row, because the whole point is to be
+    // able to group runs that were never planned as an experiment -- the last eight nightly hunts are
+    // baseline data for free, and only if the row says what they ran under.
+    arm: runArm(run, reg),
     decision: run.autoApprove ? "auto" : "you" });
   emit(run, "done", { verdict, findings: (run.findings || []).length, refused: (run.rejectedFindings || []).length,
                       ...(verdict === "idle" ? { idleReason: idleReason(run) } : {}) });

@@ -12,7 +12,7 @@ import {
   deliverableEmbedText, deliverableTitle,
   chunkDocument, deliverableChunks, modelUnreachable, trimVersions, clientKey, isLoopback,
   startLogTee, webhookBody, auditDropCount,
-  normalizeFinding, verifyFinding, findingCheckAllowed, withFindingIo, huntVerdict, gateNeverRan, idleReason,
+  normalizeFinding, verifyFinding, findingCheckAllowed, withFindingIo, huntVerdict, gateNeverRan, idleReason, runArm,
   mcpDecodeHeader, mcpHeaderProblem, mcpMetaProblem, mcpIsModern, UNTRUSTED_REPO_NOTE, npmArgv, agentMayRun, usageSplit, addUsage, tierModelToSend, callCostUsd, unratedModelWarning, warnUnratedModel, unratedTierModels, repoReadCap, blankReplyReason, NO_THINKING, TURN_TOKENS, TURN_TOKENS_RETRY, usagesForTurn, jsonFailure, JSON_REPLY, checkOutTail, refusalMessage,
   LENSES, pickLens, investigateObjective, investigate, seedLenses, activeLenses, bookLensRound,
   normalizeLens, lensParaphrase, addProposedLens, lensProposalObjective, sigWords, postReadGuidance,
@@ -2954,6 +2954,62 @@ console.log("# MCP modern era — the per-request validation, at the edges the w
       mcpIsModern({ method: "tools/list" }, { "mcp-protocol-version": "2025-06-18" }) === false);
   chk("CONTROL: and a bare tools/call with nothing modern about it is legacy",
       mcpIsModern({ method: "tools/call", params: { name: "list_agents" } }, {}) === false);
+}
+
+console.log("# runArm \u2014 a run has to record which arm it executed under, or nothing can be grouped later");
+{
+  // WHY. ROADMAP item 3 records two interventions as "built, tested, and UNPROVEN" and the previous A/B as
+  // showing "no measurable effect and two signals pointing opposite ways". The cause is structural: the
+  // guardrails and the harness register live in the org blob, which keeps no history, so no past run can be
+  // asked what it ran under. Any grouping after the fact is a guess, and two guesses about one dataset is
+  // exactly how you get two signals pointing opposite ways.
+
+  const org = { guardrails: { scopeFiles: ["src/a.mjs", "src/b.mjs"], coverageMap: false, investigateRounds: 4 },
+                harness: [{ note: "n1" }, { note: "n2", off: true }, { note: "n3" }] };
+  const run = { rounds: [{ lens: "stale-claim" }, { lens: "stale-claim" }, { lens: "what-would-it-accept" }], ranPaid: true };
+  const a = runArm(run, org);
+
+  chk("  the scope is counted, not copied", a.scopeFiles === 2);
+  chk("  an explicit coverageMap:false is recorded as off", a.coverageMap === false);
+  chk("  the rounds cap is carried", a.roundsCap === 4);
+  chk("  paid is carried, because the cheap and expensive eras behave differently", a.ranPaid === true);
+  chk("  lenses are deduplicated but kept whole", JSON.stringify(a.lenses) === JSON.stringify(["stale-claim", "what-would-it-accept"]));
+
+  // THE SUBTLE ONE. An `off` note sits in the register and never reaches the prompt. Counting it would put
+  // a run in the TREATED arm on the strength of something the round never saw, which is the single most
+  // effective way to make an A/B report no effect.
+  chk("  only notes the round could actually SEE are counted", a.harnessNotes === 2);
+
+  // Unscoped and untreated is a real arm, not a missing value.
+  const bare = runArm({}, {});
+  chk("  an empty config yields scopeFiles 0 rather than undefined", bare.scopeFiles === 0);
+  chk("  and no lenses rather than undefined", Array.isArray(bare.lenses) && bare.lenses.length === 0);
+  chk("  and tolerates being handed nothing at all", typeof runArm() === "object");
+
+  // coverageMap DEFAULTS ON, and it has to default the same way the runner does or the arm label is a lie.
+  chk("  an unset coverageMap records as ON, matching the runner's default", runArm({}, { guardrails: {} }).coverageMap === true);
+}
+
+console.log("# runArm \u2014 its defaulting must match the runner's, and the row must carry it");
+{
+  // A DERIVED CHECK, because this is the failure that would be invisible. If the runner is ever changed to
+  // `coverageMap === true` while runArm keeps `!== false`, every run with an unset guardrail is filed under
+  // the wrong arm and the experiment quietly measures noise. Nothing about the code would look wrong.
+  const src = readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
+  const runnerDefault = /coverageMap:\s*reg\.guardrails\?\.coverageMap\s*!==\s*false/.test(src);
+  const armDefault = /coverageMap:\s*g\.coverageMap\s*!==\s*false/.test(src);
+  chk("  the runner defaults coverageMap on with !== false", runnerDefault);
+  chk("  and runArm defaults it the same way", armDefault);
+  chk("  so an unset guardrail cannot be filed under the wrong arm", runnerDefault === armDefault);
+
+  // And the stamp itself: unconditional on the run's audit row, because the value of this is grouping runs
+  // that were never planned as an experiment.
+  chk("  the audit row stamps the arm on every run", /arm: runArm\(run, reg\),\n\s*decision:/.test(src));
+  chk("  and so does the org's own run record", /arm: runArm\(run, reg\) \},/.test(src));
+  // Read from `reg`, not `org`: reg is the org re-read after lens seeding and is the object the investigate
+  // call is actually given, so it is the configuration the round ran under.
+  chk("  both read the config the round was actually given (reg, not org)",
+      !/arm: runArm\(run, org\)/.test(src));
 }
 
 console.log("# huntVerdict — a hunt whose gate never ran must not report the code clean");

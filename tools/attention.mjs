@@ -82,7 +82,7 @@ for (const r of runs) {
   if (urls.length < 5) continue;   // a round that barely read anything says nothing about where it looked
   let j = {}; try { j = JSON.parse(r.json); } catch {}
   rows.push({ at: r.at, ws: r.ws, runId: r.run_id, verdict: j.verdict || "?", cost: Number(j.costUsd) || 0,
-              found: Number(j.met) || 0, ...classifyReads(urls) });
+              found: Number(j.met) || 0, arm: j.arm || null, ...classifyReads(urls) });
 }
 
 if (!rows.length) {
@@ -125,7 +125,43 @@ console.log("");
 console.log("A most-searched file of `*` is a repository-wide search with no file target — the round searched");
 console.log("everything rather than choosing somewhere, which concentration cannot describe either way.");
 console.log("");
-console.log("A run's arm is not recoverable from this table: the harness register lives in the org blob, which");
-console.log("keeps no history, so a run cannot be told afterwards whether notes were present. An experiment has");
-console.log("to record its own arms as it goes — which is the gap that left the previous A/B with \"two signals");
-console.log("pointing opposite ways\" and nothing to settle them.");
+// ---- THE A/B READOUT, grouped by the arm the run recorded for itself ------------------------------
+//
+// Runs from before 2026-08-21 carry no arm, because nothing stamped one. They are reported separately and
+// NOT pooled with the rest: an unlabelled run cannot be assigned to a group, and quietly dropping it into
+// one is precisely how a comparison produces "two signals pointing opposite ways".
+const armKey = (a) => a
+  ? `scope=${a.scopeFiles} coverage=${a.coverageMap ? "on" : "off"} notes=${a.harnessNotes}`
+    + ` rounds=${a.roundsCap} paid=${a.ranPaid ? "y" : "n"}`
+  : null;
+
+const labelled = rows.filter((r) => armKey(r.arm));
+const unlabelled = rows.length - labelled.length;
+
+console.log("");
+if (!labelled.length) {
+  console.log(`No run carries an arm yet. ${unlabelled} run(s) predate arm recording (added 2026-08-21), so they`);
+  console.log("cannot be grouped — the config they ran under is not recoverable from this table. The next hunt");
+  console.log("will stamp one. Until then this listing is a baseline, not a comparison.");
+} else {
+  const groups = new Map();
+  for (const r of labelled) {
+    const k = armKey(r.arm);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(r);
+  }
+  console.log("BY ARM  (only runs that recorded one)");
+  for (const [k, set] of [...groups.entries()].sort()) {
+    const conc = set.filter((r) => r.concentration !== null).map((r) => r.concentration);
+    console.log(`  ${k}`);
+    console.log(`     n=${set.length}   concentration median ${conc.length ? pct(median(conc)) : "   -"}`
+              + `   found ${set.reduce((a, r) => a + r.found, 0)}`
+              + `   cost median $${median(set.map((r) => r.cost)).toFixed(4)}`);
+  }
+  // Said out loud rather than left to arithmetic on the reader: two arms of three runs each is not a
+  // comparison, and the honest thing is to name the n before anyone reads a difference into it.
+  const smallest = Math.min(...[...groups.values()].map((g) => g.length));
+  if (groups.size < 2) { console.log(""); console.log("  ONE ARM ONLY so far — nothing to compare against yet."); }
+  else if (smallest < 8) { console.log(""); console.log(`  SMALLEST ARM HAS n=${smallest}. Too few to read a difference from; at a median $${median(rows.map((r) => r.cost)).toFixed(3)} a run, more is cheap.`); }
+  if (unlabelled) { console.log(""); console.log(`  ${unlabelled} older run(s) carry no arm and are excluded rather than assumed.`); }
+}
