@@ -92,9 +92,23 @@ quietly drops a wrong claim teaches nobody why it was wrong._
        ~2,000 tokens), the file-coverage ledger. None of them makes looking *broader*.
      - **The coverage marking is built, tested, and UNPROVEN as an intervention.** A valid A/B (both arms
        proved distinct first, one lens throughout) showed no measurable effect and two signals pointing
-       opposite ways. Settling it costs roughly five runs per arm at ~$1.15 each — a spending decision.
-       Recorded as unproven rather than quietly dropped, because a mechanism that is built, tested and
-       ineffective is the easiest kind to keep believing in.
+       opposite ways. Recorded as unproven rather than quietly dropped, because a mechanism that is built,
+       tested and ineffective is the easiest kind to keep believing in.
+       _Two figures in this bullet were measured on 2026-08-21 and both were wrong._
+       - **It is not a spending decision.** "~$1.15 each" was true of the 2026-08-10 to 08-12 runs, which
+         were paid-heavy. Since 08-14 a hunting round costs **$0.007–$0.036**, median $0.028. Ten runs an
+         arm is under a pound. Whatever has kept this unsettled, it has not been the price since 08-14.
+       - **The pathology is real, measured, and about half of what the entry describes.** `tools/attention.mjs`
+         computes the roadmap's own metric — the share of a round's SEARCHES landing in one file — over the
+         audit table, so every past run is free baseline. The 08-10/08-11 era runs at 33–**100%** (four at
+         100%), which is where "41 of 50" comes from. The last eight run **24–64%, median 39%**. So it
+         halved and did not go away: a third of every round's searching still lands in one file, which is
+         signal an intervention can move.
+       - **Why nobody could settle it.** A run's ARM is not recoverable afterwards: the harness and the
+         guardrails live in the org blob, which keeps no history, so no past run can be asked whether the
+         intervention was on. That is the likeliest source of "two signals pointing opposite ways" — an
+         experiment has to record its own arms as it goes, and the readout has to be computed rather than
+         eyeballed. The measurement half now exists; the arm-recording half does not.
      - **The continual harness is the newest candidate, added 2026-08-21, and it is UNPROVEN in exactly the
        sense the bullet above means.** `org.harness` is a second register of durable notes about *where* to
        look, and `propose_harness_note` lets a round write one that later rounds are shown. It exists
