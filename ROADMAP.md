@@ -62,7 +62,14 @@ quietly drops a wrong claim teaches nobody why it was wrong._
      `test/ui.test.mjs` shipped 2026-08-02 in the **pure** set: the inline `<script>` is really parsed, and
      every literal `#id` lookup must resolve to an id defined somewhere in the file — the single most likely
      way this UI breaks, because a misspelled selector throws nothing, fails no syntax check, and just
-     returns `null` onto a silently dead control. `node test/run-all.mjs --ui` holds the throwaway server
+     returns `null` onto a silently dead control. _Understated as of 2026-08-21: that sentence described the
+     suite as it shipped and it has roughly quadrupled since. It now carries ~109 checks, including that
+     **every action type the runner dispatches can be named in a policy** and that **every event the server
+     emits renders in the live feed** across 57 event types, each lifted from the real renderers and run
+     against a permanent negative control. Both of those caught real omissions on 2026-08-21 within minutes
+     of a new action type being added. The decline below is unaffected — it was never a claim that the UI is
+     untested, it is a claim about a dependency — but a reader weighing Playwright should know the size of
+     the net that already exists. `node test/run-all.mjs --ui` holds the throwaway server
      open on a disposable token so the page can be *looked at* without assembling a harness, which is how
      the panels shipped in this stretch were reviewed. **Playwright is declined on a stated trade:** it
      needs a live Bureau *and* a browser dependency in a repo whose zero-dependency property is a design
@@ -152,12 +159,29 @@ quietly drops a wrong claim teaches nobody why it was wrong._
      explicitly *before* publishing — and publishing went first. The ordering slipped, so this is now the
      most valuable non-code item on the list: one real external deployment is worth more than three
      features when the repo's job is to be evidence.
+     _Corrected 2026-08-21: this entry read as though nothing existed yet, and the hard part is done._
+     **The app is built and public.** `joergensentroels/4Water-Flow` — phone-first volunteer shift
+     scheduling, zero runtime dependencies, SQLite, 550 tests, AGPL-3.0, last pushed 2026-08-18, and it was
+     itself produced as a Bureau benchmark. So "land" no longer means "build something for them"; it means
+     the narrower and entirely non-code step of **getting it in front of real volunteers and watching them
+     use it** — which is the only part that can produce the evidence this entry is on the list for.
+     Provisionally the operator's next 4water meeting (stated 2026-08-21 as "next weekend"); recorded as
+     provisional because a date in a document that nobody moves becomes a date nobody believes.
   6. **Durable / resumable runs — on the list, deliberately not started.** Checkpointing so a crash resumes
      mid-run is table stakes across LangGraph, CrewAI and AutoGen; Bureau has none, and a restart silently
      loses in-flight runs. Coherent with the unattended-service work, and the honest counterweight is that
      runs are minutes of local-model time, so the loss per crash is small. **Write the trigger down rather
      than carry it as vague debt: build this when runs get long or paid-heavy enough that losing one costs
      real money.**
+     _Measured 2026-08-21, and the economics hold._ The last four completed nightly hunts took **3.2–4.3
+     minutes** across 53–60 actions each, at roughly $0.02–0.04 a run. Losing one is genuinely cheap, so the
+     written trigger has not fired.
+     **A second trigger, which the original wording missed: restart frequency, not run length.** On
+     2026-08-21 Bureau was restarted four times in an evening (pids 17736 → 22284 → 31660 → 37664) across
+     twelve commits, and a restart silently discards whatever was in flight. The cost of losing one run is
+     unchanged; the *chance* of losing one rose sharply, and nothing reports it when it happens. So: build
+     this when either the loss per run gets expensive **or** restarts become routine enough that a silently
+     clipped run stops being a rare event. The second condition is the one that arrived first.
 
 **Recommended against, with reasons** (so these do not come back as open questions):
 
