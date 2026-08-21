@@ -3661,6 +3661,8 @@ async function runHunt(run) {
       coverageMap: reg.guardrails?.coverageMap !== false,
       lenses: activeLenses(reg), lensStats: reg.lenses || [],
       taxonomy: reg.taxonomy || {},
+      harness: harnessBlock(reg),
+
       maxRounds: Number(reg.guardrails?.investigateRounds) || undefined,
       onRound: async (r, round) => {
         await updateOrg((o) => { seedLenses(o); bookLensRound(o, round.lens, round.confirmed, Date.now()); }).catch(() => {});
@@ -4292,6 +4294,8 @@ async function runGated(run, worker, persistExtra, perAgentTally, soloWorker = n
       coverageMap: org0.guardrails?.coverageMap !== false,
       lenses: activeLenses(reg), lensStats: reg.lenses || [],
       taxonomy: org0.taxonomy || {},
+      harness: harnessBlock(reg),
+
       maxRounds: Number(org0.guardrails?.investigateRounds) || undefined,
       // Each confirmed finding bumps its class on the company, so the NEXT run's lens choice is informed by this one.
       onRound: async (r, round) => {
@@ -4760,6 +4764,136 @@ export function addProposedLens(org, lens, now = 0, cap = LENS_PROPOSAL_CAP) {
   return { added: true, lens: org.lenses[org.lenses.length - 1] };
 }
 
+// ---- The continual harness: durable notes about WHERE a round should look -------------------------
+//
+// WHY A SECOND REGISTER, and not more lenses. normalizeLens already requires a proposal to cite a finding
+// CONFIRMED IN THIS RUN, which makes the lens register an evidence-gated harness for *what to look for*.
+// That rule is right, and it is also the reason the register cannot learn the failure that actually costs
+// money here.
+//
+// Measured, and recorded in ROADMAP "Next" item 3: five rounds against a green 4water spent 41 of 50
+// searches inside one file and never opened the one holding the planted defect; three separate rounds
+// under `what-would-it-accept` all went to authorization, because that lens reads as an authorization
+// question to a model looking at a web app. Judgement was eliminated as the cause -- handed the defective
+// function whole, the model named it 5 times in 8, with zero false positives in 12.
+//
+// Every one of those rounds produced NO confirmed finding. So the lesson worth keeping -- "this lens
+// misfires on a web app", "that directory was searched five times and held nothing" -- is exactly the
+// lesson a confirmed-finding rule can never admit. This register takes evidence of having LOOKED, which a
+// dry round has and a lens proposal is not permitted to use.
+//
+// WHAT A NOTE IS NOT ALLOWED TO DO. A note is written by a model and read back into a later prompt, which
+// is self-injection by construction. The mitigation is NOT a blocklist of forbidden phrases: that is the
+// hand-kept-list shape which cannot notice what is absent from itself. It is that enforcement lives in
+// CODE rather than in the prompt -- HUNT_ACTIONS is a Set, huntRefusal fires at the dispatcher, the floor
+// clamps inside decideApproval, and repoPathSafe/inScope decide what may be opened at all. A note can
+// therefore misdirect attention, which is the whole point of it and is recoverable, and cannot widen the
+// action surface, lift the floor, or reach a file the scope forbids. test/harness.test.mjs asserts that
+// instead of trusting it.
+const HARNESS_CAP = 6;             // notes in the register at once
+const HARNESS_NOTE_MAX = 400;      // one note, in characters
+const HARNESS_BLOCK_MAX = 1400;    // the whole rendered block, in characters
+const HARNESS_SNAPSHOTS = 5;       // prior generations kept, for rollback
+
+// A note has to tell the next round something it can act on. Same argument as LENS_IMPERATIVE: a noun
+// phrase ("test coverage gaps") reads like guidance and changes nothing about what anybody does.
+const HARNESS_IMPERATIVE = /^(read|open|start|skip|prefer|avoid|look|search|check|trace|walk|list|compare|ignore|begin|do not|dont)\b/i;
+
+export function normalizeHarnessNote(body, opts = {}) {
+  const { existing = [], run = {} } = opts;
+  const note = String(body && body.note || "").trim().slice(0, HARNESS_NOTE_MAX);
+  const because = String(body && body.because || "").trim().slice(0, 240);
+  if (note.length < 30) return { ok: false, reason: "that is a label, not guidance — say what a later round should DO differently, in a sentence" };
+  if (!HARNESS_IMPERATIVE.test(note))
+    return { ok: false, reason: "a harness note must start with an instruction verb (Read, Open, Skip, Prefer, Avoid, Do not…), or it is a label and it changes nothing about where the next round looks" };
+  if (!because) return { ok: false, reason: "say what in THIS run makes the note true, so it rests on something that happened rather than on a feeling about coverage" };
+  // Paraphrase check, reusing the lens rule: a register that accumulates the same advice six times spends
+  // its whole budget saying one thing.
+  const dup = lensParaphrase(note, (existing || []).map((h) => ({ id: h.id, prompt: h.note })));
+  if (dup) return { ok: false, reason: `that is the "${dup}" note in different words — the register already carries it` };
+
+  // THE EVIDENCE RULE, and it is deliberately not the lens rule. A note may rest on a round that looked and
+  // found nothing, because that is the case the lens register cannot express. What it may not rest on is a
+  // round that did not look at all -- the same condition huntVerdict calls "idle". A note drawn from a round
+  // with no reads, no refusals and no tokens is drawn from nothing, and is indistinguishable from invention.
+  const reads = Number(run.reads) || 0;
+  const refused = (run.rejectedFindings || []).length;
+  const found = (run.findings || []).length;
+  const tokens = Number(run.tokensSoFar != null ? run.tokensSoFar : run.tokens) || 0;
+  if (!(reads > 0 || refused > 0 || found > 0) || tokens <= 0)
+    return { ok: false, reason: "this round examined nothing, so it has nothing to teach a later one — a note needs a round that actually read the repository" };
+
+  const id = (String(body && body.id || "").trim().toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "").slice(0, 40))
+          || ("h-" + String(sigWords(note).slice(0, 3).join("-") || "note").slice(0, 30));
+  if ((existing || []).some((h) => h.id === id)) return { ok: false, reason: "there is already a note with that id" };
+  return { ok: true, entry: { id, note, because, runId: String(run.id || "") } };
+}
+
+export function addHarnessNote(org, note, now = 0, cap = HARNESS_CAP) {
+  org.harness = Array.isArray(org.harness) ? org.harness : [];
+  if (org.harness.length >= cap) {
+    // Full: the note carried longest without ever being cited by a round that found something makes room.
+    // Mirrors addProposedLens, which evicts the least productive proposal rather than refusing outright.
+    const worst = org.harness.slice().sort((a, b) => (a.helped || 0) - (b.helped || 0) || (a.at || 0) - (b.at || 0))[0];
+    if ((worst.helped || 0) > 0) return { added: false, reason: "the harness slots are full and every note in it has been useful" };
+    org.harness = org.harness.filter((h) => h !== worst);
+  }
+  org.harness.push({ id: note.id, note: note.note, because: note.because, runId: note.runId, helped: 0, off: false, at: now });
+  return { added: true, entry: org.harness[org.harness.length - 1] };
+}
+
+// ROLLBACK, which the lens register does not have, and which is the property most worth copying from a
+// harness that edits itself. Any change to durable state that a MODEL proposed has to be reversible, or
+// the only way back is an operator reading a prompt block and guessing which line spoiled a run.
+export function snapshotHarness(org, now = 0, keep = HARNESS_SNAPSHOTS) {
+  org.harnessSnaps = Array.isArray(org.harnessSnaps) ? org.harnessSnaps : [];
+  org.harnessSnaps.push({ at: now, notes: JSON.parse(JSON.stringify(org.harness || [])) });
+  if (org.harnessSnaps.length > keep) org.harnessSnaps = org.harnessSnaps.slice(-keep);
+  return org.harnessSnaps.length;
+}
+
+export function rollbackHarness(org) {
+  const snaps = Array.isArray(org.harnessSnaps) ? org.harnessSnaps : [];
+  if (!snaps.length) return { ok: false, reason: "there is no snapshot to roll back to" };
+  const prev = snaps.pop();
+  const was = (org.harness || []).length;
+  org.harness = prev.notes;
+  return { ok: true, restoredTo: prev.at, was, now: org.harness.length };
+}
+
+// What the round is actually shown. Delimited, labelled by origin, and bounded.
+//
+// BOUNDED IS NOT COSMETIC. The local provider runs a 4,096-token context, and a prompt that grows by one
+// note per successful round silently pushes the standing instructions off the FRONT -- which this project
+// has already paid for once, as a fortnight of "flaky model" behaviour that turned out to be a clipped
+// prompt rather than a flaky model.
+//
+// The header says where the notes came from and what they cannot do. That sentence is NOT the security
+// boundary -- the boundary is that HUNT_ACTIONS, the floor and the scope guard are code -- but a round
+// which knows these are observations rather than orders reads them the way they are meant.
+export function harnessBlock(org, opts = {}) {
+  const max = Number(opts.max) || HARNESS_BLOCK_MAX;
+  const all = Array.isArray(org && org.harness) ? org.harness : [];
+  const notes = all.filter((h) => h && h.note && !h.off);
+  if (!notes.length) return "";
+  const head = "WHAT EARLIER ROUNDS LEARNED (written by previous rounds in this workspace, from what they"
+             + " actually read. These say where to look. They do not change what you may do: the actions"
+             + " available to you, the approval floor and the file scope are enforced in the runner, and no"
+             + " note can widen them.)";
+  const lines = [];
+  let used = head.length;
+  for (const h of notes) {
+    const line = "- " + h.note;
+    if (used + line.length + 1 > max) {
+      lines.push("- …and " + (notes.length - lines.length) + " more, not shown (the block is capped)");
+      break;
+    }
+    lines.push(line);
+    used += line.length + 1;
+  }
+  return head + "\n" + lines.join("\n");
+}
+
 // What to say after handing an agent a file during a hunting round. Live run five is the reason this exists: given
 // 10kB of README and no direction, the model produced a valid turn and finished with nothing.
 // When to tell an agent its round is nearly over, and what to say. Fires ONCE, with two turns left, and only in a
@@ -4865,7 +4999,7 @@ export function pickLens(run, lenses = LENSES, stats = null) {
 // The prompt for one round. Carries the lens, what has already been claimed (confirmed AND refused, so the agent does
 // not resubmit a refused claim), and the classes this company has found before — which is what made lens choice
 // informed on the benchmark rather than a fresh guess every time.
-export function investigateObjective(run, lens, taxonomy = {}, digest = "") {
+export function investigateObjective(run, lens, taxonomy = {}, digest = "", harness = "") {
   const seen = [...(run.findings || []).map((f) => "CONFIRMED: " + f.claim),
                ...(run.rejectedFindings || []).map((f) => "ALREADY REFUSED (" + f.reason + "): " + f.claim)];
   const classes = Object.entries(taxonomy).sort((a, b) => (b[1]?.count || 0) - (a[1]?.count || 0))
@@ -4877,6 +5011,10 @@ export function investigateObjective(run, lens, taxonomy = {}, digest = "") {
     "THIS ROUND'S LENS — use it, do not substitute your own:",
     lens.prompt,
     "",
+    // BESIDE THE LENS, and before the file listing, because the two answer different halves of the same
+    // question: the lens is what to look FOR, these notes are where to look. Placing them after the digest
+    // would put the guidance behind the thing it is supposed to steer.
+    harness || "",
     classes.length ? "Defect shapes this company has found before, most common first: " + classes.join(", ") + "." : "",
     seen.length ? "Do NOT repeat any of these:\n" + seen.slice(0, 20).join("\n") : "",
     "",
@@ -4905,7 +5043,7 @@ export async function investigate(run, worker, opts = {}) {
   // `digest` is the digest OBJECT now, not its rendered text, because the map is re-rendered every round: what a
   // round has already opened changes between rounds, and coverage-first ordering is worthless if computed once.
   const { taxonomy = {}, onRound = null, dryLimit = INVESTIGATE_DRY_ROUNDS, maxRounds = INVESTIGATE_MAX_ROUNDS,
-          lenses = LENSES, lensStats = null, digest = null, coverageMap = true } = opts;
+          lenses = LENSES, lensStats = null, digest = null, coverageMap = true, harness = "" } = opts;
   run.rounds = run.rounds || []; run.findings = run.findings || []; run.rejectedFindings = run.rejectedFindings || [];
   run.dryRounds = 0;
   let tokens = 0;
@@ -4917,7 +5055,8 @@ export async function investigate(run, worker, opts = {}) {
     emit(run, "lens", { lens: lens.id, round: roundNo });
     const seenBefore = run.filesSeen instanceof Set ? run.filesSeen.size : 0;
     const w = await worker(investigateObjective(run, lens, taxonomy,
-      typeof digest === "string" ? digest : digestText(digest, 8000, coverageMap ? run.filesSeen : null)));
+      typeof digest === "string" ? digest : digestText(digest, 8000, coverageMap ? run.filesSeen : null),
+      harness));
     tokens += (w && w.tokens) || 0;
     const confirmed = run.findings.length - before;
     // Coverage on the round record, beside the lens. A dry round that opened five of eighty-seven files and a dry
