@@ -407,6 +407,57 @@ const SAFE_TIER_ACTIONS = new Set(["web_search", "web_research", "read_file", "r
 // register_finding is safe-tier deliberately: it takes no real-world action, runs only commands the project itself
 // ships (FINDING_CHECK_ALLOW), and does it in a throwaway worktree. Autonomy is the entire point of the action — a
 // gate that needs the CEO for every claim is a gate nobody runs.
+// ---- Provenance: untrusted content entering a run removes the STANDING grant for writes ------------
+//
+// THE MEASURED GAP. The hard floor stops shell, api_call, email_draft, mcp_call, github_repo,
+// github_issue, github_comment, github_pr and over-ceiling purchases -- nothing crosses it. What it does
+// not stop, measured on 2026-08-21 against decideApproval itself, is what an `autonomous` tier, a
+// run-level autoApprove, or a policy `allow` grants unattended:
+//
+//     file_write, plan_add, github_file
+//
+// github_file is the sharp one: it COMMITS content to a GitHub repository. And `read_issues` is
+// safe-tier, so it auto-approves at trusted tier and above. So the concrete sequence is: a scheduled
+// autonomous run reads a repository's issues, an attacker has filed one containing an instruction, the
+// model follows it, and `github_file` commits attacker-chosen content with no human in the loop. Every
+// step of that is currently permitted.
+//
+// THE FIX IS NOT A NEW REFUSAL, it is the removal of a standing grant -- the same shape the comment above
+// SAFE_TIER_ACTIONS already describes: "What is gone is the STANDING grant, where a tier alone let it
+// happen unattended." A tainted run may still do all three things. It may no longer do them unattended.
+// That keeps the capability and adds the checkpoint, which is the whole design of this system, rather
+// than blocking work and teaching people to widen the policy.
+//
+// Borrowed from Prime Intellect's prime-agent, whose agent loop stamps untrusted content and narrows the
+// callable tool surface for the rest of the turn. Bureau already owned the enforcement half; what it
+// lacked was arming a restriction because of what a run has INGESTED rather than because of what kind of
+// run it is.
+//
+// WHAT COUNTS AS UNTRUSTED IS A JUDGEMENT WITH A COST EITHER WAY, so it is stated rather than assumed.
+// Third-party content only: the open web, and issue/comment bodies anyone can file. Deliberately NOT
+// read_file or read_repo, which are the operator's own disk and the operator's own repository -- inputs
+// they chose. Including them would taint the ordinary construction flow (read a brief, write the
+// deliverable) and make autonomous tier need a human for its main job, which is the crying-wolf failure
+// that gets a control switched off. mcp_call is listed even though the floor already catches the CALL,
+// because its RESULT still enters the context and the taint is about content, not about permission.
+const TAINTING_ACTIONS = new Set(["web_search", "web_research", "read_issues", "mcp_call"]);
+
+// The writes that lose their standing grant once a run is tainted. Everything else is either already on
+// the floor or is read-only, so naming more here would be noise that hides the three that matter.
+const TAINT_DEMOTED_ACTIONS = new Set(["file_write", "plan_add", "github_file"]);
+
+// Arm it. Called from ONE place -- emitAct, which all 42 dispatcher branches route through -- so a new
+// action that returns third-party content is covered by adding its name to the set above and nothing
+// else. Only a SUCCESSFUL action taints: a refused web_search brought no content in, and treating it as
+// though it had would demote the rest of the run for nothing.
+export function armTaint(run, actType, ok) {
+  if (!run || !ok || !TAINTING_ACTIONS.has(String(actType || ""))) return false;
+  if (!run.taintedBy) run.taintedBy = String(actType);
+  return true;
+}
+export const isTainted = (run) => Boolean(run && run.taintedBy);
+export function taintDemotes(actType) { return TAINT_DEMOTED_ACTIONS.has(String(actType || "")); }
+
 // The hard floor: actions that ALWAYS require the CEO, regardless of tier or run.autoApprove.
 // shell + api_call (real-world reach), spend over the guardrail ceiling, and sending email.
 function requiresCeoAlways(actType, next, gr) {
@@ -562,7 +613,7 @@ export function evaluatePolicy(policies, ctx) {
 // then the HARD FLOOR clamps everything back (shell/api/email/over-ceiling can never auto). The floor
 // is absolute: a policy "allow" can NOT auto-approve a floored action. ("block" is handled by the
 // caller, which refuses the action before it is ever filed.)
-export function decideApproval(tier, actType, next, gr, runAutoApprove, policyEffect = "none") {
+export function decideApproval(tier, actType, next, gr, runAutoApprove, policyEffect = "none", tainted = false) {
   let auto = !!runAutoApprove;
   let approver = auto ? "run" : "";
   if (!auto) {
@@ -571,6 +622,11 @@ export function decideApproval(tier, actType, next, gr, runAutoApprove, policyEf
   }
   if (policyEffect === "allow") { auto = true; approver = "policy"; }         // policy loosens
   else if (policyEffect === "require") { auto = false; approver = ""; }        // policy tightens (overrides tier/run)
+  // BEFORE the floor and AFTER policy, deliberately. After policy, because a blanket `allow` must not
+  // re-open a write to injected text — an operator who loosened file_write for convenience did not thereby
+  // consent to a web page deciding what gets written. Before the floor, because the floor is the stronger
+  // statement and should have the last word on `approver`.
+  if (tainted && TAINT_DEMOTED_ACTIONS.has(actType)) { auto = false; approver = ""; }
   if (requiresCeoAlways(actType, next, gr)) { auto = false; approver = ""; }   // hard floor — nothing crosses it
   return { auto, approver };
 }
@@ -2680,7 +2736,9 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
   // (not on `run`) so concurrent agents under parallel delegation can't clobber each other's attribution.
   // emitAct threads it into every real-action result; emitResult falls back to the run's default.
   let decidedBy = "";
-  const emitAct = (d) => emitResult(run, { ...d, decidedBy });
+  // Arming the provenance gate here covers all 42 dispatcher branches at once, and covers the next one
+  // written without anybody remembering to. See TAINTING_ACTIONS.
+  const emitAct = (d) => { armTaint(run, d && d.actionType, d && d.ok); return emitResult(run, { ...d, decidedBy }); };
   let seenSteers = 0;   // how many run.steer entries this agent has already folded into its history (broadcast: every agent drains every steer exactly once)
   const actionExpected = /\b(write|draft|compose|save|create|make|search|find|look ?up|research|fetch|read|send|email|publish|build|document|report|note|guide|memo|summary|list|announcement|letter|plan)\b/i.test(String(objective));
   setAgentState(agent.id, "working", objective.slice(0, 80));
@@ -3003,7 +3061,7 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
     // The autonomy tier + policy + hard-floor decision lives in one place (decideApproval) so it's
     // auditable and unit-tested. Tier can grant auto; a policy can loosen/tighten; the floor
     // (shell/api/email/over-ceiling) always clamps it back.
-    const { auto: effectiveAuto, approver } = decideApproval(tier, actType, next, gr, run.autoApprove, polEffect);
+    const { auto: effectiveAuto, approver } = decideApproval(tier, actType, next, gr, run.autoApprove, polEffect, isTainted(run));
     const approval = await fileApproval(agent, next, run);
     emit(run, "propose", {
       agent: who, depth, approvalId: approval.id, actionType: next.actionType || "other",
