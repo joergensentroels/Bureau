@@ -403,7 +403,7 @@ const TIERS = ["supervised", "trusted", "autonomous"];
 //
 // The operator can still auto-approve it per run: `autoApprove` on a run is an explicit act with a person
 // behind it. What is gone is the STANDING grant, where a tier alone let it happen unattended.
-const SAFE_TIER_ACTIONS = new Set(["web_search", "web_research", "read_file", "read_issues", "note", "ask_peer", "register_finding", "ask_stakeholder", "propose_lens", "read_repo", "declined_check"]);
+const SAFE_TIER_ACTIONS = new Set(["web_search", "web_research", "read_file", "read_issues", "note", "ask_peer", "register_finding", "ask_stakeholder", "propose_lens", "read_repo", "declined_check", "propose_harness_note"]);
 // register_finding is safe-tier deliberately: it takes no real-world action, runs only commands the project itself
 // ships (FINDING_CHECK_ALLOW), and does it in a throwaway worktree. Autonomy is the entire point of the action — a
 // gate that needs the CEO for every claim is a gate nobody runs.
@@ -491,7 +491,7 @@ export function remoteBlocksApproval(cur, gr = {}) {
 export const POLICY_ACTIONS = [
   "web_search", "web_research", "read_file", "file_write", "note", "purchase", "api_call", "shell",
   "email_draft", "ask_peer", "ask_stakeholder", "plan_add", "mcp_call", "register_finding", "read_repo",
-  "declined_check", "propose_lens", "github_file", "github_repo", "read_issues", "github_issue",
+  "declined_check", "propose_lens", "propose_harness_note", "github_file", "github_repo", "read_issues", "github_issue",
   "github_comment", "github_pr",
 ];
 // Action types the model can still reach that this server deliberately does NOT execute, each mapped to where
@@ -1269,7 +1269,7 @@ async function fileApproval(agent, action, run = null) {
     });
     return json;
   }
-  const typeMap = { email_draft: "external_contact", note: "context_question", file_write: "context_question", read_file: "context_question", ask_peer: "context_question", ask_stakeholder: "context_question", propose_lens: "context_question", read_repo: "context_question", declined_check: "context_question" };
+  const typeMap = { email_draft: "external_contact", note: "context_question", file_write: "context_question", read_file: "context_question", ask_peer: "context_question", ask_stakeholder: "context_question", propose_lens: "context_question", read_repo: "context_question", declined_check: "context_question", propose_harness_note: "context_question" };
   const { json } = await latch("POST", "/api/approvals", {
     type: typeMap[action.actionType] || "other",
     title: action.title || "Action requested",
@@ -1352,7 +1352,7 @@ function emit(run, type, data) {
 
 // The actions a hunting round can actually use. Everything else is noise in a phase that must not write, buy, send or
 // commit — and noise is not free when the context window is 4,096 tokens and the prompt is clipped from the front.
-const HUNT_ACTIONS = new Set(["read_repo", "register_finding", "ask_stakeholder", "note", "propose_lens", "ask_peer", "declined_check"]);
+const HUNT_ACTIONS = new Set(["read_repo", "register_finding", "ask_stakeholder", "note", "propose_lens", "ask_peer", "declined_check", "propose_harness_note"]);
 
 // The one refusal that is NOT a verdict about the finding. Every other reason the gate produces — no claim, no
 // location, a probe that asserts on file text, a probe path escaping the repo — says the finding did not hold.
@@ -1571,6 +1571,7 @@ export function systemPrompt(org, agent, opts = {}) {
     "- plan_add: record a follow-up task you notice but shouldn't do right now into the company's persistent plan — title=the task, details=why/context. It is saved for a future run so nothing is lost. Runs instantly (no approval). Do NOT use it to defer the CURRENT objective.",
     "- register_finding: claim a DEFECT and prove it. title=the one-sentence claim, url=file:line, details=the defect class, command=the check that detects it (one of the project's own: npm test | npm run <script> | node --test [file] | node tools/<x>.mjs), fix={file,find,replace}=the change that makes the check pass. The runner verifies it ITSELF in a throwaway copy and requires three things: your check FAILS on the current code, PASSES with your fix, and FAILS AGAIN once the fix is reverted. A claim without that evidence is refused and you are told why, so do not register a hunch — register something you can make fail. IF NOTHING IN THE PROJECT ALREADY FAILS because of the defect — which is the usual case for a real one — omit \"command\" and supply probe={file,content} instead: a NEW test, file named test/<name>.test.mjs, content = a test that FAILS on the code as it stands and passes once your fix is applied. The runner writes it, runs all four observations including that the project's existing suite still passes with your fix, and throws it away. The probe must exercise BEHAVIOUR — import the module and call it, or drive the app's own entry point. A probe that reads the source file and asserts on its text is refused, because it would pass whatever the code does.",
     findingRepo(org) ? "- read_repo: read the source of the repository under investigation. title=the PATH, relative to the repo root, and nothing else — \"src/db.mjs\", not a description of what you are doing. Leave title blank (or name a directory) to LIST what is in the repository; a path that does not exist also returns the listing, so start there and read exact paths from it rather than guessing. Put a TERM in \"command\" to search instead of read — a literal substring, or a regular expression if you write one (alternation, .* and character classes are recognised; the reply tells you which way it was read): it greps the whole file (or the whole repository if you give no path) and returns every matching line with its number — use that whenever you want to claim something is MISSING, because a read can be cut off and a search cannot. Read-only and confined to that one repository. Use it before claiming anything about the code: a check command and a fix must quote text that is really in the file." + scopeLine(org) : "",
+    findingRepo(org) ? "- propose_harness_note: record what THIS round learned about WHERE to look, for later rounds in this workspace. title=a short id, command=the note itself and it must start with a verb (Read / Open / Skip / Prefer / Avoid / Search / Compare), details=what happened in this round that makes it true. Refused until you have actually read something this round. It changes where a later round looks; it cannot change what you are allowed to do." : "",
     "- declined_check: record a check you could NOT perform — title=what you did not verify, command=why you could not, details=what would have to be true for it to become possible. All three are required: a reason nobody can test is the one claim that never gets examined, and it then licenses every later skip without being restated. The runner searches the repository for whatever your reason names and, if it finds it, hands the evidence back once — because an excuse is a claim and it gets a control like any other.",
     "- note: record what you checked and what you concluded, when there is nothing to run — title=the heading, details=what you looked at and what you found or ruled out. It runs instantly and changes nothing. Use it instead of inventing an action when the honest answer is that you looked and found nothing.",
     "- ask_stakeholder: record a question only the CEO can settle — scope, a policy choice, a name, a number nobody wrote down — WITHOUT stopping. title=the question, command=the assumption you are proceeding under meanwhile, url=where that assumption is written down (file, field, document). It does not wait for an answer and it must not: you keep working, the question is queued for the CEO to answer alongside others, and the answer reaches a later run. A question with no assumption is REFUSED, because that is just asking to stop. Use this instead of escalate whenever the work can continue on a stated guess.",
@@ -1834,6 +1835,9 @@ export function normalizeAction(next, objective) {
   else if (["declined_check", "skipped_check", "could_not_verify", "unverified", "gap", "blocked_check", "not_checked"].includes(at)) at = "declined_check";
   else if (["read_repo", "read_code", "read_source", "list_repo", "list_files", "open_file", "read_repo_file", "browse_repo"].includes(at)) at = "read_repo";
   else if (["propose_lens", "new_lens", "add_lens", "suggest_lens", "propose_method", "lens"].includes(at)) at = "propose_lens";   // only offered in the critic round
+  // Deliberately generous. The doc line calls it propose_harness_note, and a model that has just been told
+  // "record what this round learned" reaches for the words in that sentence rather than the name.
+  else if (["propose_harness_note", "harness_note", "add_harness_note", "record_lesson", "harness", "remember", "note_for_later"].includes(at)) at = "propose_harness_note";
   else if (["ask_stakeholder", "ask_ceo", "open_question", "scope_question", "clarify", "clarification", "assumption", "flag_assumption", "ask_owner", "ask_stakeholders"].includes(at)) at = "ask_stakeholder";   // a question that must NOT stop the work
   else if (["ask_peer", "ask", "consult", "message", "message_agent", "ask_teammate", "ask_colleague", "ask_agent", "peer"].includes(at)) at = "ask_peer";   // consult a named teammate
   else if (["mcp_call", "mcp", "tool", "use_tool", "call_tool", "mcp_tool", "tool_call"].includes(at)) at = "mcp_call";   // call an external MCP tool (via Latch)
@@ -3403,6 +3407,32 @@ async function runAgentTask(run, agent, org, objective, priorWork = "", depth = 
           emitAct({ agent: who, depth, actionType: "propose_lens", url: String(next.title || "").slice(0, 40), ok: false, bytes: 0, error: "refused" });
           history.push({ role: "user", content: "That lens was not added: " + out.reason + ". Either propose a different one or finish — saying the existing lenses already cover it is a perfectly good answer." });
         }
+      } else if ((next.actionType || "") === "propose_harness_note") {
+        // Same atomic shape as propose_lens above: the register is read, validated against, and appended
+        // to inside ONE updateOrg, so a note cannot be checked against a register that has already moved
+        // underneath it.
+        let out = { ok: false, reason: "the register was unavailable" };
+        await updateOrg((o) => {
+          const shape = normalizeHarnessNote({ id: next.title, note: next.command, because: next.details },
+                                             { existing: o.harness || [], run });
+          if (!shape.ok) { out = shape; return; }
+          // SNAPSHOT BEFORE THE APPEND, which is the entire point of keeping snapshots. Rolling back has to
+          // return the register to what it was BEFORE a model wrote to it; a snapshot taken afterwards would
+          // only ever restore the state that already contains the note somebody wants gone.
+          snapshotHarness(o, Date.now());
+          const add = addHarnessNote(o, shape.entry, Date.now());
+          out = add.added ? { ok: true, entry: add.entry } : { ok: false, reason: add.reason };
+        }).catch((e) => { out = { ok: false, reason: "the register could not be written: " + e.message }; });
+        didExecute = true;
+        if (out.ok) {
+          emit(run, "harnessNoted", { by: who, depth, id: out.entry.id, note: out.entry.note, because: out.entry.because });
+          emitAct({ agent: who, depth, actionType: "propose_harness_note", url: out.entry.id, ok: true, bytes: out.entry.note.length, error: "" });
+          history.push({ role: "user", content: "Recorded for later rounds in this workspace. It changes where a future round looks, and nothing about what any round may do. Carry on with this one." });
+        } else {
+          emit(run, "harnessRejected", { by: who, depth, id: String(next.title || "").slice(0, 40), reason: out.reason });
+          emitAct({ agent: who, depth, actionType: "propose_harness_note", url: String(next.title || "").slice(0, 40), ok: false, bytes: 0, error: "refused" });
+          history.push({ role: "user", content: "That note was not recorded: " + out.reason + ". Carry on with the round — reading more of the code is worth more than another attempt at a note." });
+        }
       } else if ((next.actionType || "") === "ask_stakeholder") {
         // Deliberately NOT an escalation: nothing waits, nothing polls, no approval is created, no agent goes into
         // "waiting". The question becomes company state and the agent is told to carry on under its own assumption —
@@ -4816,7 +4846,13 @@ export function normalizeHarnessNote(body, opts = {}) {
   // found nothing, because that is the case the lens register cannot express. What it may not rest on is a
   // round that did not look at all -- the same condition huntVerdict calls "idle". A note drawn from a round
   // with no reads, no refusals and no tokens is drawn from nothing, and is indistinguishable from invention.
-  const reads = Number(run.reads) || 0;
+  // filesSeen FIRST, because that is what the runner actually maintains: the investigate loop tracks
+  // opened files in `run.filesSeen`, a Set. The first version of this read `run.reads`, a field nothing
+  // sets — so in production the evidence rule would have refused every note whose round had only read
+  // code, which is the exact case this register exists to learn from. A validator reading a field its
+  // caller never writes is not strict, it is broken, and it fails in the direction that looks like
+  // working. `reads` is still honoured because it is the convenient shape for a test fixture.
+  const reads = (run.filesSeen instanceof Set ? run.filesSeen.size : 0) || Number(run.reads) || 0;
   const refused = (run.rejectedFindings || []).length;
   const found = (run.findings || []).length;
   const tokens = Number(run.tokensSoFar != null ? run.tokensSoFar : run.tokens) || 0;

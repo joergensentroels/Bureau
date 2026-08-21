@@ -14,7 +14,7 @@ node tools/restore-drill.mjs      # restore the newest snapshot and boot a REAL 
 .\Install-Heartbeat.ps1 -Verify   # the dead-man's switch, against the REAL Bureau/Ollama/watcher
 ```
 
-**Where the suite stands right now: <!--fig:assertions-->2,106 headless assertions across
+**Where the suite stands right now: <!--fig:assertions-->2,121 headless assertions across
 <!--fig:suites-->28 suites** (<!--fig:pure-suites-->22 pure, <!--fig:server-suites-->6 server), plus the
 live `--e2e` at 18/18 and the scripted verifications written up below.
 
@@ -864,7 +864,7 @@ both sides from `server.mjs` — through `test/action-surface.mjs`, which holds 
 read these counts without importing a suite that asserts at import time — so it cannot be satisfied by editing
 itself, and it canonicalises the reachable side by **calling** the real `normalizeAction` instead of reasoning
 about what it would do — precisely the gap the `note` defect lived in.
-**<!--fig:reachable-actions-->126 reachable names against <!--fig:dispatch-branches-->22 branches** (both pinned
+**<!--fig:reachable-actions-->133 reachable names against <!--fig:dispatch-branches-->23 branches** (both pinned
 by `docs.test.mjs`, so this sentence goes red rather than stale); anything left over must be named in the new
 `UNEXECUTED_ACTIONS` export, which holds `other` alone. It also asserts each parse is non-empty *before*
 concluding anything from it (the empty set is a subset of everything, so a silently broken parser would report

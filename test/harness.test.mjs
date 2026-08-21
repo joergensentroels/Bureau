@@ -14,8 +14,9 @@
 // and it is asserted directly below.
 import {
   normalizeHarnessNote, addHarnessNote, harnessBlock, snapshotHarness, rollbackHarness, huntRefusal,
-  investigateObjective,
+  investigateObjective, normalizeAction,
 } from "../server.mjs";
+import { deriveActionSurface } from "./action-surface.mjs";
 
 let pass = 0, fail = 0;
 const chk = (name, cond, extra) => {
@@ -217,6 +218,53 @@ console.log("# WIRED — a register nothing reads is the shape this repo distrus
       withBoth.indexOf("written by previous rounds") < withBoth.indexOf("REPOSITORY:"));
   chk("  and after the lens, so the two read together",
       withBoth.indexOf(lens.prompt) < withBoth.indexOf("written by previous rounds"));
+}
+
+
+console.log("# the ACTION — reachable, permitted, and reading the field the runner actually sets");
+{
+  // THE RUNTIME SHAPE, and this is the assertion that matters most in this block.
+  //
+  // The evidence rule first read `run.reads`, a field nothing in the runner sets. The investigate loop
+  // tracks opened files in `run.filesSeen`, a Set. So in production every note from a round that had only
+  // READ code — the exact case this register exists to learn from — would have been refused, while every
+  // test using the convenient `{ reads: 12 }` fixture passed. A validator reading a field its caller never
+  // writes is not strict, it is broken, and it fails in the direction that looks like working.
+  const runtimeShape = { id: "run_rt", filesSeen: new Set(["src/a.mjs", "src/b.mjs"]), tokensSoFar: 5000,
+                         findings: [], rejectedFindings: [] };
+  const rt = normalizeHarnessNote(GOOD, { run: runtimeShape });
+  chk("  a note is accepted from the shape the RUNNER builds (filesSeen, a Set)", rt.ok === true, rt.reason);
+  chk("  CONTROL: an empty filesSeen is still refused, so the Set is being read and not merely present",
+      normalizeHarnessNote(GOOD, { run: { id: "r", filesSeen: new Set(), tokensSoFar: 5000 } }).ok === false);
+  chk("  CONTROL: and the fixture shape still works, so both callers are served",
+      normalizeHarnessNote(GOOD, { run: dryRound }).ok === true);
+
+  // PERMITTED IN A HUNTING ROUND. Without this the action exists, dispatches, and is refused by huntRefusal
+  // every single time it is proposed — advertised and unreachable, which this repo has shipped three times.
+  chk("  a hunting round may propose one", huntRefusal({ phase: "investigate", actType: "propose_harness_note" }) === null);
+
+  // OFFERED TO THE MODEL. Reachability is not the same as being told it exists: an action in the dispatcher
+  // and absent from the prompt catalogue is one no round will ever choose. Parsed with the real
+  // action-surface parser rather than a grep, so it answers the question the runner's own doc filter asks.
+  const surface = deriveActionSurface();
+  chk("  it has a line in the prompt's action catalogue", surface.fromDocs.includes("propose_harness_note"));
+  chk("  and that line says what to put where", /command=the note itself/.test(surface.docLines.get("propose_harness_note") || ""));
+  chk("  and states the limit to the model, not just to us",
+      /cannot change what you are allowed to do/.test(surface.docLines.get("propose_harness_note") || ""));
+  chk("  the dispatcher really has a branch for it", surface.dispatched.includes("propose_harness_note"));
+
+  // THE SYNONYMS. A model told "record what this round learned" reaches for those words, not for the
+  // function name. Canonicalised by CALLING normalizeAction, for the reason action-surface.mjs gives:
+  // reading the table reproduces the bug instead of catching it.
+  for (const said of ["propose_harness_note", "harness_note", "record_lesson", "note_for_later", "remember"]) {
+    const got = normalizeAction({ type: "propose_action", actionType: said, title: "t", details: "d" }, "obj").actionType;
+    chk(`  "${said}" normalizes to propose_harness_note`, got === "propose_harness_note", got);
+  }
+  // CONTROL: the synonym net must not be so wide that it swallows a different action.
+  const note = normalizeAction({ type: "propose_action", actionType: "note", title: "t", details: "d" }, "obj").actionType;
+  chk("  CONTROL: plain `note` is still `note`, not swallowed by the new synonyms", note === "note", note);
+  const lens = normalizeAction({ type: "propose_action", actionType: "propose_lens", title: "t", details: "d" }, "obj").actionType;
+  chk("  CONTROL: propose_lens is untouched", lens === "propose_lens", lens);
 }
 
 console.log("# THE SECURITY INVARIANT — a note is data, and the gate is code");
