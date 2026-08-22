@@ -37,6 +37,8 @@ import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { stateDir } from "./state-dir.mjs";
+// Imported rather than defined here, so eval/attention-ab.mjs can reuse it without running this report.
+import { classifyReads } from "./read-distribution.mjs";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DB = path.join(stateDir(ROOT), "data-bureau.db");
@@ -50,26 +52,6 @@ let db;
 try { db = new DatabaseSync(DB, { readOnly: true }); }
 catch (e) { console.log(`cannot open ${DB}: ${e.message}`); process.exit(2); }
 
-// A search is a read_repo with terms after the path. Both halves are needed: the file, for concentration,
-// and the kind, because the two behave differently and averaging them hides the effect.
-export function classifyReads(urls) {
-  const file = (u) => String(u).split(":")[0];
-  const searches = urls.filter((u) => String(u).includes(":"));
-  const reads = urls.filter((u) => !String(u).includes(":"));
-  const searchByFile = {};
-  for (const u of searches) searchByFile[file(u)] = (searchByFile[file(u)] || 0) + 1;
-  const topSearch = searches.length ? Math.max(...Object.values(searchByFile)) : 0;
-  return {
-    searches: searches.length,
-    reads: reads.length,
-    files: new Set(urls.map(file)).size,
-    topSearchFile: Object.entries(searchByFile).sort((a, b) => b[1] - a[1])[0]?.[0] || "",
-    topSearchCount: topSearch,
-    // The number item 3 is about. null rather than 0 when there were no searches: a round that never
-    // searched has no concentration, and reporting 0% would read as perfectly spread attention.
-    concentration: searches.length ? topSearch / searches.length : null,
-  };
-}
 
 const where = wsFilter ? "AND ws LIKE ?" : "";
 const runs = db.prepare(`SELECT run_id, ws, at, json FROM audit WHERE kind='run' ${where} ORDER BY at ASC`)
