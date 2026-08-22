@@ -221,6 +221,28 @@ console.log("# WIRED — a register nothing reads is the shape this repo distrus
 }
 
 
+
+console.log("# the operator provenance — exempt from the evidence rule, held to every other one");
+{
+  // The evidence rule exists because a MODEL writing into its own future prompt is self-injection, and a
+  // note resting on a round that examined nothing is indistinguishable from invention. An operator seeding
+  // a note is configuration by the person whose prompt it is — demanding run evidence from them would only
+  // teach them to fabricate it. The exemption is scoped to exactly that one rule.
+  const op = normalizeHarnessNote(GOOD, { operator: true });
+  chk("  an operator note needs no run evidence", op.ok === true, op.reason);
+  chk("  and its provenance says so", op.ok && op.entry.runId === "operator");
+  // CONTROL: the exemption must not leak to the model path.
+  chk("  CONTROL: without the flag, the same call is still refused",
+      normalizeHarnessNote(GOOD, {}).ok === false);
+  // The quality rules still bind the operator in full.
+  chk("  an operator label is still refused",
+      normalizeHarnessNote({ note: "test coverage gaps in the admin area", because: "b" }, { operator: true }).ok === false);
+  chk("  an operator note with no because is still refused",
+      normalizeHarnessNote({ note: GOOD.note, because: "" }, { operator: true }).ok === false);
+  chk("  and the paraphrase rule still applies to operators",
+      normalizeHarnessNote(GOOD, { operator: true, existing: [{ id: "x", note: GOOD.note }] }).ok === false);
+}
+
 console.log("# the ACTION — reachable, permitted, and reading the field the runner actually sets");
 {
   // THE RUNTIME SHAPE, and this is the assertion that matters most in this block.

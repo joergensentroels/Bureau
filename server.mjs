@@ -4927,7 +4927,7 @@ const HARNESS_SNAPSHOTS = 5;       // prior generations kept, for rollback
 const HARNESS_IMPERATIVE = /^(read|open|start|skip|prefer|avoid|look|search|check|trace|walk|list|compare|ignore|begin|do not|dont)\b/i;
 
 export function normalizeHarnessNote(body, opts = {}) {
-  const { existing = [], run = {} } = opts;
+  const { existing = [], run = {}, operator = false } = opts;
   const note = String(body && body.note || "").trim().slice(0, HARNESS_NOTE_MAX);
   const because = String(body && body.because || "").trim().slice(0, 240);
   if (note.length < 30) return { ok: false, reason: "that is a label, not guidance — say what a later round should DO differently, in a sentence" };
@@ -4949,17 +4949,25 @@ export function normalizeHarnessNote(body, opts = {}) {
   // code, which is the exact case this register exists to learn from. A validator reading a field its
   // caller never writes is not strict, it is broken, and it fails in the direction that looks like
   // working. `reads` is still honoured because it is the convenient shape for a test fixture.
-  const reads = (run.filesSeen instanceof Set ? run.filesSeen.size : 0) || Number(run.reads) || 0;
-  const refused = (run.rejectedFindings || []).length;
-  const found = (run.findings || []).length;
-  const tokens = Number(run.tokensSoFar != null ? run.tokensSoFar : run.tokens) || 0;
-  if (!(reads > 0 || refused > 0 || found > 0) || tokens <= 0)
-    return { ok: false, reason: "this round examined nothing, so it has nothing to teach a later one — a note needs a round that actually read the repository" };
+  // THE OPERATOR IS EXEMPT FROM THE EVIDENCE RULE, and the exemption is the point rather than a hole.
+  // That rule exists because a MODEL writing into its own future prompt is self-injection, and a note
+  // resting on a round that examined nothing is indistinguishable from an invention. An operator seeding
+  // a note is neither: it is configuration, by the person whose repository and whose prompt it is, and
+  // demanding they fabricate run evidence would only teach them to fabricate run evidence. The quality
+  // rules above (imperative, length, because, paraphrase) still apply to them in full.
+  if (!operator) {
+    const reads = (run.filesSeen instanceof Set ? run.filesSeen.size : 0) || Number(run.reads) || 0;
+    const refused = (run.rejectedFindings || []).length;
+    const found = (run.findings || []).length;
+    const tokens = Number(run.tokensSoFar != null ? run.tokensSoFar : run.tokens) || 0;
+    if (!(reads > 0 || refused > 0 || found > 0) || tokens <= 0)
+      return { ok: false, reason: "this round examined nothing, so it has nothing to teach a later one — a note needs a round that actually read the repository" };
+  }
 
   const id = (String(body && body.id || "").trim().toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "").slice(0, 40))
           || ("h-" + String(sigWords(note).slice(0, 3).join("-") || "note").slice(0, 30));
   if ((existing || []).some((h) => h.id === id)) return { ok: false, reason: "there is already a note with that id" };
-  return { ok: true, entry: { id, note, because, runId: String(run.id || "") } };
+  return { ok: true, entry: { id, note, because, runId: operator ? "operator" : String(run.id || "") } };
 }
 
 export function addHarnessNote(org, note, now = 0, cap = HARNESS_CAP) {
@@ -7610,6 +7618,64 @@ const server = createServer(async (req, res) => {
     }
 
     // ----- the lens register: which ways of looking this company has tried, and what each one found -----
+    // ---- the continual-harness register, operator surface -------------------------------------------
+    // Exists because the register had exactly one writer — the propose_harness_note action — which made
+    // it impossible to seed a note for the attention A/B (or remove one afterwards) without editing the
+    // org blob from outside the server's write mutex. Same admission rules as the agent path, one stated
+    // difference: the operator is exempt from the run-evidence rule (see normalizeHarnessNote), because an
+    // operator note is configuration rather than self-injection. Every write snapshots first, so
+    // rollbackHarness can always reach the state before it.
+    if (p === "/api/harness" && req.method === "GET") {
+      const org = await readOrg();
+      return send(res, 200, { notes: Array.isArray(org.harness) ? org.harness : [],
+                              snapshots: (org.harnessSnaps || []).length });
+    }
+    if (p === "/api/harness" && req.method === "POST") {
+      const body = await readBody(req);
+      let out = { ok: false, reason: "the register was unavailable" };
+      await updateOrg((o) => {
+        const shape = normalizeHarnessNote({ id: body.id, note: body.note, because: body.because },
+                                           { existing: o.harness || [], operator: true });
+        if (!shape.ok) { out = shape; return; }
+        snapshotHarness(o, Date.now());
+        const add = addHarnessNote(o, shape.entry, Date.now());
+        out = add.added ? { ok: true, entry: add.entry } : { ok: false, reason: add.reason };
+      });
+      return send(res, out.ok ? 201 : 400, out);
+    }
+    if (p.startsWith("/api/harness/") && req.method === "PATCH") {
+      // Off/on rather than edit: a note's text is its identity for the paraphrase rule, and an edited
+      // note would dodge it. To change what a note says, delete it and add the new one.
+      const id = p.split("/")[3];
+      const body = await readBody(req);
+      let out = { ok: false, reason: "no such note" };
+      await updateOrg((o) => {
+        const h = (o.harness || []).find((x) => x.id === id);
+        if (!h) return;
+        snapshotHarness(o, Date.now());
+        if (body.off !== undefined) h.off = Boolean(body.off);
+        out = { ok: true, entry: h };
+      });
+      return send(res, out.ok ? 200 : 404, out);
+    }
+    if (p.startsWith("/api/harness/") && req.method === "DELETE") {
+      const id = p.split("/")[3];
+      let out = { ok: false, reason: "no such note" };
+      await updateOrg((o) => {
+        const before = (o.harness || []).length;
+        if (!before) return;
+        snapshotHarness(o, Date.now());
+        o.harness = (o.harness || []).filter((x) => x.id !== id);
+        if (o.harness.length < before) out = { ok: true, removed: id };
+      });
+      return send(res, out.ok ? 200 : 404, out);
+    }
+    if (p === "/api/harness/rollback" && req.method === "POST") {
+      let out = { ok: false, reason: "the register was unavailable" };
+      await updateOrg((o) => { out = rollbackHarness(o); });
+      return send(res, out.ok ? 200 : 409, out);
+    }
+
     if (p === "/api/lenses" && req.method === "GET") {
       const org = await readOrg();
       const list = (Array.isArray(org.lenses) && org.lenses.length ? org.lenses : seedLenses({}))

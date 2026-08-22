@@ -44,6 +44,39 @@ const ok = (c, m) => (c ? pass : fail).push(m);
     // ---- the lens register over HTTP ----
     // The register is only "company state" if the company can change it. Read it, add one, rewrite one, switch one off.
     {
+      // ---- the harness register's operator surface --------------------------------------------------
+      {
+        const empty = (await api("GET", "/api/harness")).j;
+        ok(Array.isArray(empty.notes) && empty.notes.length === 0, "harness register starts empty");
+        const bad = await api("POST", "/api/harness", { note: "coverage gaps", because: "b" });
+        ok(bad.status === 400 && /instruction verb|label/.test(bad.j.reason || ""),
+          "a label is refused through the route with the admission rule's own reason");
+        const added = await api("POST", "/api/harness", {
+          note: "Avoid re-searching the admin surfaces; earlier rounds exhausted that entire area.",
+          because: "seeded by the operator for the attention A/B" });
+        ok(added.status === 201 && added.j.ok === true, "an operator note is accepted (no run evidence needed)");
+        ok(added.j.entry.runId === "operator", "and carries operator provenance");
+        const dup = await api("POST", "/api/harness", {
+          note: "Avoid searching the admin surfaces again; prior rounds exhausted that whole area.",
+          because: "b" });
+        ok(dup.status === 400, "a paraphrase of it is refused through the route too");
+        const id = added.j.entry.id;
+        const off = await api("PATCH", "/api/harness/" + id, { off: true });
+        ok(off.status === 200 && off.j.entry.off === true, "a note can be switched off");
+        ok((await api("PATCH", "/api/harness/nope", { off: true })).status === 404, "switching off a missing note is a 404");
+        const rb = await api("POST", "/api/harness/rollback", {});
+        ok(rb.status === 200 && rb.j.ok === true, "rollback restores the previous generation");
+        ok(((await api("GET", "/api/harness")).j.notes.find((h) => h.id === id) || {}).off !== true,
+          "…which undoes the off flag (the write before it snapshotted first)");
+        const del = await api("DELETE", "/api/harness/" + id, {});
+        ok(del.status === 200 && del.j.removed === id, "a note can be deleted");
+        ok((await api("GET", "/api/harness")).j.notes.length === 0, "and the register is empty again");
+        ok((await api("POST", "/api/harness/rollback", {})).status === 200,
+          "rollback after delete brings it back (delete snapshotted first)");
+        await api("POST", "/api/harness/rollback", {});   // and back to empty for the suites after us
+        ok((await api("GET", "/api/harness")).j.notes.length === 0, "register left empty for later suites");
+      }
+
       const seeded = (await api("GET", "/api/lenses")).j.lenses;
       ok(Array.isArray(seeded) && seeded.length >= 8, "the register seeds itself on first read (" + (seeded || []).length + " lenses)");
       ok(seeded.every((l) => l.id && l.prompt && "found" in l && "dry" in l), "each lens carries its id, instruction and yield");
